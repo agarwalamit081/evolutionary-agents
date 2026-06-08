@@ -62,7 +62,7 @@ Use the exact model ID strings below. Do not guess or invent alternatives.
 |---|---|---|---|---|---|---|---|---|
 | `gpt-4.1-mini-2025-04-14` | Cheap | 128K | 32K (~33K) | Text, Image | Text | ✅ | ✅ | ✅ |
 | `gpt-4o-mini-2024-07-18` | Very Cheap | 128K | 16K | Text, Image | Text | ✅ | ✅ | ✅ |
-| `gpt-5.4-mini` | Moderate | 200K+ | 128K | Text, Image, Audio | Text, Audio | ✅ | ✅ | ✅ |
+| `gpt-5-nano-2025-08-07` | Cheap | 128K | 128K | Text, Image | Text | ✅ | ✅ | ✅ |
 | `gpt-5.4-nano-2026-03-17` | Cheap | 128K | 128K | Text, Image | Text | ✅ | ✅ | ✅ |
 | `gpt-5-mini-2025-08-07` | Moderate | 200K+ | 128K | Text, Image, Audio | Text, Audio | ✅ | ✅ | ✅ |
 | `gpt-5-nano-2025-08-07` | Cheap | 128K | 128K | Text, Image | Text | ✅ | ✅ | ✅ |

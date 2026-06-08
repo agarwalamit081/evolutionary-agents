@@ -12,8 +12,8 @@ if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
   exit 0
 fi
 
-# Skip skills, rules, and hooks directories (reference material, not application code)
-if echo "$FILE_PATH" | grep -E '(skills/|rules/|hooks/)' > /dev/null; then
+# Skip skills, rules, hooks, model registry, and design docs (reference material, not application code)
+if echo "$FILE_PATH" | grep -E '(skills/|rules/|hooks/|model_registry\.py|docs/design-docs/|README\.md)' > /dev/null; then
   exit 0
 fi
 

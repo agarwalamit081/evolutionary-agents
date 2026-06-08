@@ -1,0 +1,86 @@
+"""File reader tool — reads files within a sandboxed directory."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from loguru import logger
+
+# Default sandbox root — restricts file access
+_DEFAULT_SANDBOX = Path(".")
+
+
+async def file_reader(
+    file_path: str,
+    sandbox_root: str = ".",
+    max_lines: int = 200,
+    encoding: str = "utf-8",
+) -> str:
+    """Read a file within the sandboxed directory.
+
+    Args:
+        file_path: Relative path to the file to read.
+        sandbox_root: Root directory for sandboxing (prevents path traversal).
+        max_lines: Maximum number of lines to return.
+        encoding: File encoding.
+
+    Returns:
+        File contents as a string.
+    """
+    root = Path(sandbox_root).resolve()
+    target = (root / file_path).resolve()
+
+    # Security: prevent path traversal
+    if not str(target).startswith(str(root)):
+        return f"ERROR: Path traversal blocked: {file_path}"
+
+    if not target.exists():
+        return f"ERROR: File not found: {file_path}"
+
+    if not target.is_file():
+        return f"ERROR: Not a file: {file_path}"
+
+    # Size check (max 1MB)
+    size = target.stat().st_size
+    if size > 1_000_000:
+        return f"ERROR: File too large ({size} bytes, max 1MB): {file_path}"
+
+    logger.info(f"Reading file: {file_path} ({size} bytes)")
+
+    try:
+        content = target.read_text(encoding=encoding)
+    except UnicodeDecodeError:
+        return f"ERROR: Cannot decode file as {encoding}: {file_path}"
+
+    lines = content.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines.append(f"\n... (truncated at {max_lines} lines, total {len(content.splitlines())} lines)")
+
+    return "\n".join(lines)
+
+
+TOOL_DEFINITION = {
+    "name": "file_reader",
+    "handler": file_reader,
+    "description": (
+        "Read a file from the sandboxed project directory. "
+        "Supports text files with configurable line limits. "
+        "Path traversal attacks are blocked."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Relative path to the file to read.",
+            },
+            "max_lines": {
+                "type": "integer",
+                "description": "Maximum number of lines to return (default: 200).",
+                "default": 200,
+            },
+        },
+        "required": ["file_path"],
+    },
+}

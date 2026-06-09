@@ -141,17 +141,17 @@ async def _async_create_memory_manager(settings: object):
     try:
         import redis.asyncio as aioredis
 
-        from src.db.session import get_session
+        from src.db.session import _get_session_factory
         from src.memory.manager import MemoryManager
 
         redis_client = aioredis.from_url(settings.redis.redis_url)
-        async for db_session in get_session():
+        factory = _get_session_factory()
+        async with factory() as db_session:
             return MemoryManager(
                 redis_client=redis_client,
                 db_session=db_session,
                 settings=settings,
             )
-        return None
     except Exception:
         logger.debug("MemoryManager not available, using stub memory")
         return None

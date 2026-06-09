@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.models import WarmMemory
 
 
-class WarmMemory:
+class WarmMemoryStore:
     """PostgreSQL-backed warm memory for persistent skills and procedures.
 
     Stores skills, procedures, and workflows that have been validated
@@ -47,12 +47,11 @@ class WarmMemory:
         entry = WarmMemory(
             id=uuid.UUID(memory_id),
             memory_type=memory_type,
-            name=name,
+            title=name,
             content=content,
             tags=tags or [],
             fitness_score=fitness_score,
-            usage_count=0,
-            success_count=0,
+            access_count=0,
         )
         self._session.add(entry)
         await self._session.commit()
@@ -88,7 +87,10 @@ class WarmMemory:
         if memory_type:
             query = query.where(WarmMemory.memory_type == memory_type)
         if name:
-            query = query.where(WarmMemory.name == name)
+            query = query.where(WarmMemory.title == name)
+        if tags:
+            # Match entries that contain ANY of the requested tags (JSONB overlap)
+            query = query.where(WarmMemory.tags.bool_op("?|")(tags))
 
         result = await self._session.execute(query)
         entries = result.scalars().all()
@@ -97,11 +99,11 @@ class WarmMemory:
             {
                 "id": str(entry.id),
                 "type": entry.memory_type,
-                "name": entry.name,
+                "name": entry.title,
                 "content": entry.content,
                 "tags": entry.tags,
                 "fitness_score": entry.fitness_score,
-                "usage_count": entry.usage_count,
+                "access_count": entry.access_count,
             }
             for entry in entries
         ]
@@ -122,14 +124,13 @@ class WarmMemory:
         if not entry:
             return
 
-        entry.usage_count += 1
-        if success:
-            entry.success_count += 1
+        entry.access_count += 1
 
         # Recalculate fitness using exponential moving average
-        if entry.usage_count > 0:
-            success_rate = entry.success_count / entry.usage_count
-            entry.fitness_score = 0.7 * entry.fitness_score + 0.3 * success_rate
+        # Weight successful uses more heavily than total access count
+        if entry.access_count > 0:
+            adjustment = 0.1 if success else -0.05
+            entry.fitness_score = max(0.0, min(1.0, entry.fitness_score + adjustment))
 
         await self._session.commit()
         logger.debug(f"Fitness updated for {memory_id[:8]}: {entry.fitness_score:.3f}")

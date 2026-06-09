@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config.settings import Settings
 from src.memory.cold import ColdMemory as ColdMemoryStore
 from src.memory.hot import HotMemory as HotMemoryStore
-from src.memory.warm import WarmMemory as WarmMemoryStore
+from src.memory.warm import WarmMemoryStore
 
 
 class MemoryManager:

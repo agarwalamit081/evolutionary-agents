@@ -118,17 +118,6 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_streaming=True,
         supports_images=True,
     ),
-    "gpt-5-nano-2025-08-07": ModelSpec(
-        model_id="gpt-5-nano-2025-08-07",
-        provider="openai",
-        tier=ModelTier.CHEAP,
-        max_context=128_000,
-        max_output=128_000,
-        supports_tool_calling=True,
-        supports_json_mode=True,
-        supports_streaming=True,
-        supports_images=True,
-    ),
     # ── Z.AI (Zhipu / GLM) ───────────────────────────────────────
     "glm-4.7-flash": ModelSpec(
         model_id="glm-4.7-flash",

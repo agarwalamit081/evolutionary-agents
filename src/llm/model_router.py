@@ -6,14 +6,15 @@ from loguru import logger
 
 from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY, ModelTier
 from src.config.settings import Settings
-from src.llm.models import TaskComplexity
+from src.graph.enums import TaskComplexity
 
 
 # Mapping from TaskComplexity to model tier and fallback chain key
 COMPLEXITY_TIER_MAP: dict[TaskComplexity, tuple[ModelTier, str]] = {
-    TaskComplexity.MICRO: (ModelTier.VERY_CHEAP, "tier_0_micro"),
-    TaskComplexity.STANDARD: (ModelTier.CHEAP, "tier_1_standard"),
-    TaskComplexity.REASONING: (ModelTier.MODERATE, "tier_2_reasoning"),
+    TaskComplexity.TRIVIAL: (ModelTier.VERY_CHEAP, "tier_0_micro"),
+    TaskComplexity.SIMPLE: (ModelTier.CHEAP, "tier_1_standard"),
+    TaskComplexity.COMPLEX: (ModelTier.CHEAP, "tier_1_standard"),
+    TaskComplexity.CRITICAL: (ModelTier.MODERATE, "tier_2_reasoning"),
 }
 
 
@@ -38,10 +39,9 @@ class ModelRouter:
         Returns:
             A model identifier string (litellm format).
         """
-        if complexity == TaskComplexity.EMBEDDING:
-            return "text-embedding-3-small"
-
-        tier, chain_key = COMPLEXITY_TIER_MAP[complexity]
+        tier, chain_key = COMPLEXITY_TIER_MAP.get(
+            complexity, (ModelTier.CHEAP, "tier_1_standard")
+        )
         excluded = (exclude_providers or set()) | self._exclude_providers
 
         model = self._route_from_chain(chain_key, excluded)
@@ -138,4 +138,4 @@ class ModelRouter:
         try:
             return self._settings.llm.has_provider_key(provider)
         except Exception:
-            return True  # Assume available if settings access fails
+            return False  # Skip provider if settings access fails

@@ -111,6 +111,20 @@ async def _run_evolution_engine(
             git_tracker=git_tracker,
         )
 
+        # Generate human-readable evolution report
+        from src.evolution.report import generate_report
+
+        report = generate_report(
+            cycle_result=cycle_result,
+            generation=generation,
+            trigger="reflection_recommended",
+        )
+        logger.info(f"\n{report}")
+
+        # Crystallize deployed mutations as warm memory skills
+        if cycle_result.get("deployed") and cycle_result.get("proposal"):
+            await _crystallize_mutation_skill(cycle_result["proposal"])
+
         evolution_record = {
             "generation": generation,
             "trigger": "reflection_recommended",
@@ -121,6 +135,7 @@ async def _run_evolution_engine(
             "mutations_deployed": cycle_result.get("mutations_deployed", 0),
             "commit_hash": cycle_result.get("deployment", {}).get("commit_hash"),
             "rationale": cycle_result.get("proposal", {}).get("rationale", ""),
+            "report": report,
         }
 
         logger.info(
@@ -138,3 +153,48 @@ async def _run_evolution_engine(
     except Exception as e:
         logger.warning(f"Evolution engine failed: {e}")
         return None
+
+
+async def _crystallize_mutation_skill(proposal: dict[str, Any]) -> None:
+    """Store a deployed mutation as a warm memory skill for future runs.
+
+    This enables the retrieve_memory_node to load evolved prompts and
+    configurations on subsequent agent runs via the existing memory pipeline.
+    """
+    try:
+        from src.memory.warm import WarmMemoryStore
+
+        mutation_type = proposal.get("mutation_type")
+        mutated_content = proposal.get("mutated_content", "")
+        target_path = proposal.get("target_path") or "evolution/latest_mutation.json"
+
+        if not mutated_content:
+            return
+
+        # Determine memory type from mutation type
+        if str(mutation_type) == "prompt":
+            memory_type = "evolved_prompt"
+        elif str(mutation_type) in ("workflow", "tool", "config"):
+            memory_type = "evolved_config"
+        else:
+            memory_type = "evolved_skill"
+
+        # Use warm memory store directly (no Redis/pgvector needed for skills)
+        from src.db.session import get_session
+
+        async with get_session() as session:
+            warm_store = WarmMemoryStore(session)
+            await warm_store.store(
+                name=f"evolved_{memory_type}_{proposal.get('priority', 'normal')}",
+                content=mutated_content,
+                memory_type=memory_type,
+                tags=["evolution", str(mutation_type), target_path],
+                fitness_score=0.6,
+            )
+
+        logger.info(
+            f"Crystallized mutation as warm memory skill: "
+            f"type={memory_type}, target={target_path}"
+        )
+    except Exception as e:
+        logger.debug(f"Skill crystallization skipped (non-critical): {e}")

@@ -60,13 +60,12 @@ async def run_agent(request: RunRequest) -> RunResponse:
         from src.memory.manager import MemoryManager
 
         redis_client = aioredis.from_url(settings.redis.redis_url)
-        async for db_session in get_session():
+        async with get_session() as db_session:
             memory = MemoryManager(
                 redis_client=redis_client,
                 db_session=db_session,
                 settings=settings,
             )
-            break
     except Exception:
         logger.debug("MemoryManager not available for API request")
 

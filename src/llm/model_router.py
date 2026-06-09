@@ -72,7 +72,7 @@ class ModelRouter:
 
     def get_fallback_tier0(self) -> str:
         """Get a cheap fallback model."""
-        chain = FALLBACK_CHAINS.get("gpt-4o-mini-2024-07-18", [])
+        chain = FALLBACK_CHAINS.get("qwen3.5-flash", [])
         if chain:
             return chain[0]
         return "qwen3.5-flash"
@@ -90,9 +90,6 @@ class ModelRouter:
     def _route_from_chain(self, chain_key: str, exclude_providers: set[str]) -> str | None:
         """Try models in a fallback chain, skipping excluded providers."""
         chain = FALLBACK_CHAINS.get(chain_key, [])
-        if not chain:
-            # chain_key might be a model ID — try direct lookup
-            chain = FALLBACK_CHAINS.get(chain_key, [])
 
         for model_id in chain:
             provider = self._extract_provider(model_id)

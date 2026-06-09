@@ -183,33 +183,47 @@ class SelfEvolutionEngine:
         opportunity: dict[str, Any],
         current_content: str | None = None,
     ) -> dict[str, Any]:
-        """Generate a heuristic mutation when LLM is unavailable."""
+        """Generate a heuristic mutation when LLM is unavailable.
+
+        Uses structured templates from ``src.evolution.templates`` to produce
+        real, loadable content instead of comment-only placeholders.
+        """
+        from src.evolution.templates import (
+            generate_code_improvement,
+            generate_config_tuning,
+            generate_memory_config,
+            generate_prompt_improvement,
+            generate_tool_config,
+            generate_workflow_config,
+        )
+
         mutation_type = opportunity.get("type", MutationType.PROMPT)
         description = opportunity.get("description", "Unknown improvement")
+        patterns = opportunity.get("patterns", [])
 
-        # Generate a template mutation based on type
         if mutation_type == MutationType.PROMPT:
-            mutated = (
-                f"# Improved prompt based on: {description}\n"
-                f"# Original patterns addressed: {opportunity.get('patterns', [])}\n"
-                f"# This is a heuristic placeholder — LLM generation preferred"
-            )
+            template = generate_prompt_improvement(patterns, current_content)
         elif mutation_type == MutationType.WORKFLOW:
-            mutated = (
-                f"# Workflow optimization: {description}\n"
-                f"# Reduced average execution time by simplifying step ordering"
-            )
+            template = generate_workflow_config(description)
+        elif mutation_type == MutationType.TOOL:
+            template = generate_tool_config(description)
+        elif mutation_type == MutationType.MEMORY:
+            template = generate_memory_config(description)
+        elif mutation_type == MutationType.CODE:
+            template = generate_code_improvement(description, current_content)
+        elif mutation_type == MutationType.CONFIG:
+            template = generate_config_tuning(description)
         else:
-            mutated = f"# {mutation_type} mutation: {description}"
+            template = generate_prompt_improvement(patterns, current_content)
 
         return {
             "mutation_type": mutation_type,
             "description": description,
             "original_content": current_content,
-            "mutated_content": mutated,
-            "target_path": None,
+            "mutated_content": template["content"],
+            "target_path": template["target_path"],
             "priority": opportunity.get("priority", "low"),
-            "rationale": "Heuristic generation (no LLM available)",
+            "rationale": template["rationale"],
             "model_used": None,
             "tokens_used": 0,
         }
@@ -272,6 +286,12 @@ class SelfEvolutionEngine:
             logger.debug("No sandbox executor provided — skipping sandbox test")
             return {"passed": True, "note": "sandbox not available"}
 
+        # Non-code mutations (prompts, configs) cannot be executed in a sandbox
+        mutation_type = proposal.get("mutation_type")
+        if mutation_type in (MutationType.PROMPT, MutationType.CONFIG, MutationType.MEMORY):
+            logger.debug(f"Skipping sandbox for {mutation_type} mutation (non-executable)")
+            return {"passed": True, "note": f"non-code mutation ({mutation_type}), sandbox skipped"}
+
         mutated_content = proposal.get("mutated_content", "")
         if not mutated_content:
             return {"passed": False, "reason": "No mutated content to test"}
@@ -319,6 +339,12 @@ class SelfEvolutionEngine:
         if sandbox is None:
             logger.debug("No sandbox executor — skipping A/B test, accepting mutation")
             return {"is_significant": True, "note": "A/B test skipped (no sandbox)"}
+
+        # Non-code mutations cannot be meaningfully A/B tested in a sandbox
+        mutation_type = proposal.get("mutation_type")
+        if mutation_type in (MutationType.PROMPT, MutationType.CONFIG, MutationType.MEMORY):
+            logger.debug(f"Skipping A/B test for {mutation_type} mutation (non-executable)")
+            return {"is_significant": True, "note": f"non-code mutation ({mutation_type}), A/B test skipped"}
 
         original = proposal.get("original_content", "")
         mutated = proposal.get("mutated_content", "")
@@ -429,13 +455,15 @@ class SelfEvolutionEngine:
         mutated_content = proposal.get("mutated_content", "")
 
         # Apply via git tracker if available
-        if git_tracker is not None and target_path:
+        if git_tracker is not None:
             try:
-                await git_tracker.apply_mutation(target_path, mutated_content)
+                # Use a fallback path when target_path is not set
+                write_path = target_path or "evolution/latest_mutation.json"
+                await git_tracker.apply_mutation(write_path, mutated_content)
                 commit_hash = await git_tracker.snapshot(
                     f"evolution: {proposal.get('description', 'mutation')}"
                 )
-                logger.info(f"Mutation committed to shadow repo: {commit_hash[:8]}")  # type: ignore[union-attr]
+                logger.info(f"Mutation committed to shadow repo: {commit_hash[:8] if commit_hash else '(no hash)'}")
             except Exception as e:
                 logger.warning(f"Git tracker failed during deploy: {e}")
                 commit_hash = None

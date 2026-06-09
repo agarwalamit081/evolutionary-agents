@@ -182,15 +182,18 @@ class TestEvolutionEngine:
 
     @pytest.mark.asyncio
     async def test_generate_with_no_gateway_uses_heuristic(self) -> None:
-        """Generate without gateway uses heuristic fallback."""
+        """Generate without gateway uses heuristic fallback with real content."""
         engine = SelfEvolutionEngine()
         opportunity = {"type": MutationType.CODE, "description": "Optimize", "priority": "low"}
         result = await engine.generate(opportunity, current_content="x = 1")
 
         assert result["mutation_type"] == MutationType.CODE
-        assert result["rationale"] == "Heuristic generation (no LLM available)"
         assert result["model_used"] is None
         assert result["tokens_used"] == 0
+        # Heuristic now produces structured JSON content, not comments
+        assert result["mutated_content"] is not None
+        assert not result["mutated_content"].startswith("#")  # No comment-only content
+        assert result["target_path"] is not None  # Always set now
 
     @pytest.mark.asyncio
     async def test_generate_with_gateway_uses_llm(self) -> None:
@@ -228,8 +231,8 @@ class TestEvolutionEngine:
 
         # Should still produce a result via heuristic fallback
         assert result["mutation_type"] == MutationType.PROMPT
-        assert result["rationale"] == "Heuristic generation (no LLM available)"
         assert result["mutated_content"] is not None
+        assert not result["mutated_content"].startswith("#")
 
     # ── Validate tests ───────────────────────────────────────────────
 
@@ -600,7 +603,11 @@ class TestEvolutionEngine:
 
     @pytest.mark.asyncio
     async def test_run_cycle_sandbox_failure(self) -> None:
-        """Run cycle with sandbox failure returns status=sandbox_failed."""
+        """Run cycle with sandbox failure returns status=sandbox_failed.
+
+        Patches generate to return a CODE mutation so sandbox is actually
+        executed (PROMPT mutations skip sandbox).
+        """
         mock_safety = MagicMock()
         mock_safety.validate = AsyncMock(return_value={
             "passed": True,
@@ -609,11 +616,27 @@ class TestEvolutionEngine:
         mock_sandbox = _make_mock_sandbox(success=False, exit_code=1)
 
         engine = SelfEvolutionEngine(safety_pipeline=mock_safety)
-        result = await engine.run_cycle(
-            execution_history=[],
-            failure_patterns=["test failure"],
-            sandbox=mock_sandbox,
-        )
+
+        with patch.object(
+            engine, "generate",
+            new_callable=AsyncMock,
+            return_value={
+                "mutation_type": MutationType.CODE,
+                "description": "test code mutation",
+                "original_content": "old",
+                "mutated_content": "raise RuntimeError('boom')",
+                "target_path": "test.py",
+                "priority": "high",
+                "rationale": "testing sandbox failure",
+                "model_used": None,
+                "tokens_used": 0,
+            },
+        ):
+            result = await engine.run_cycle(
+                execution_history=[],
+                failure_patterns=["test failure"],
+                sandbox=mock_sandbox,
+            )
 
         assert result["status"] == "sandbox_failed"
         assert result["deployed"] is False
@@ -624,9 +647,8 @@ class TestEvolutionEngine:
     async def test_run_cycle_ab_test_rejection(self) -> None:
         """Run cycle where A/B test shows regression returns status=rejected.
 
-        Since run_cycle calls generate() without current_content, the proposal's
-        original_content is None. ab_test then runs treatment only (no original
-        to compare against). If treatment fails, is_significant=False.
+        Patches generate to return a CODE mutation so A/B test is actually
+        executed (PROMPT mutations skip A/B test).
         """
         mock_safety = MagicMock()
         mock_safety.validate = AsyncMock(return_value={
@@ -646,11 +668,27 @@ class TestEvolutionEngine:
         )
 
         engine = SelfEvolutionEngine(safety_pipeline=mock_safety)
-        result = await engine.run_cycle(
-            execution_history=[],
-            failure_patterns=["test failure"],
-            sandbox=mock_sandbox,
-        )
+
+        with patch.object(
+            engine, "generate",
+            new_callable=AsyncMock,
+            return_value={
+                "mutation_type": MutationType.CODE,
+                "description": "test code mutation",
+                "original_content": None,
+                "mutated_content": "new code",
+                "target_path": "test.py",
+                "priority": "high",
+                "rationale": "testing AB rejection",
+                "model_used": None,
+                "tokens_used": 0,
+            },
+        ):
+            result = await engine.run_cycle(
+                execution_history=[],
+                failure_patterns=["test failure"],
+                sandbox=mock_sandbox,
+            )
 
         assert result["status"] == "rejected"
         assert result["deployed"] is False
@@ -736,3 +774,113 @@ class TestEvolutionEngine:
             )
 
         assert result["status"] == "no_opportunities"
+
+    # ── Heuristic template tests ──────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_heuristic_generate_produces_json_content(self) -> None:
+        """Heuristic generation produces valid JSON content, not comments."""
+        engine = SelfEvolutionEngine()
+        opportunity = {
+            "type": MutationType.PROMPT,
+            "description": "Fix JSON parsing",
+            "priority": "high",
+            "patterns": ["invalid JSON from LLM"],
+        }
+        result = await engine.generate(opportunity)
+
+        import json
+        parsed = json.loads(result["mutated_content"])
+        assert "suffixes" in parsed
+        assert result["target_path"] is not None
+
+    @pytest.mark.asyncio
+    async def test_heuristic_generate_sets_target_path_for_all_types(self) -> None:
+        """All mutation types get a non-None target_path from templates."""
+        engine = SelfEvolutionEngine()
+        for mtype in MutationType:
+            opportunity = {"type": mtype, "description": "test", "priority": "low"}
+            result = await engine.generate(opportunity)
+            assert result["target_path"] is not None, f"target_path is None for {mtype}"
+
+    # ── Sandbox skip for non-code mutations ───────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_sandbox_skips_prompt_mutation(self) -> None:
+        """Sandbox test is skipped for PROMPT mutations."""
+        mock_sandbox = _make_mock_sandbox()
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "mutated_content": '{"suffixes": ["test"]}',
+            "mutation_type": MutationType.PROMPT,
+        }
+        result = await engine.sandbox_test(proposal, sandbox=mock_sandbox)
+
+        assert result["passed"] is True
+        assert "sandbox skipped" in result["note"]
+        mock_sandbox.execute_code.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sandbox_skips_config_mutation(self) -> None:
+        """Sandbox test is skipped for CONFIG mutations."""
+        mock_sandbox = _make_mock_sandbox()
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "mutated_content": '{"temperature": 0.4}',
+            "mutation_type": MutationType.CONFIG,
+        }
+        result = await engine.sandbox_test(proposal, sandbox=mock_sandbox)
+
+        assert result["passed"] is True
+        mock_sandbox.execute_code.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sandbox_runs_code_mutation(self) -> None:
+        """Sandbox test IS executed for CODE mutations."""
+        mock_sandbox = _make_mock_sandbox(success=True)
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "mutated_content": "x = 1",
+            "mutation_type": MutationType.CODE,
+        }
+        result = await engine.sandbox_test(proposal, sandbox=mock_sandbox)
+
+        assert result["passed"] is True
+        mock_sandbox.execute_code.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ab_test_skips_prompt_mutation(self) -> None:
+        """A/B test is skipped for PROMPT mutations."""
+        mock_sandbox = _make_mock_sandbox()
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "original_content": "old",
+            "mutated_content": "new",
+            "mutation_type": MutationType.PROMPT,
+        }
+        result = await engine.ab_test(proposal, sandbox=mock_sandbox)
+
+        assert result["is_significant"] is True
+        assert "A/B test skipped" in result["note"]
+        mock_sandbox.execute_code.assert_not_awaited()
+
+    # ── Deploy fallback target_path ───────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_deploy_with_no_target_path_uses_fallback(self) -> None:
+        """Deploy with None target_path still commits to shadow repo."""
+        mock_tracker = _make_mock_git_tracker()
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "mutation_type": MutationType.PROMPT,
+            "description": "test",
+            "target_path": None,
+            "mutated_content": '{"suffixes": ["test"]}',
+        }
+        validation = {"passed": True}
+        result = await engine.deploy(proposal, validation, git_tracker=mock_tracker)
+
+        assert result["deployed"] is True
+        mock_tracker.apply_mutation.assert_awaited_once()
+        called_path = mock_tracker.apply_mutation.call_args[0][0]
+        assert "evolution/" in called_path

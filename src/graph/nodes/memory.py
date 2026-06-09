@@ -55,6 +55,24 @@ async def retrieve_memory_node(
                 logger.info(f"Retrieved {len(retrieved)} memories from 3-tier system")
         except Exception as e:
             logger.warning(f"Memory retrieval failed: {e}")
+
+        # Load evolved prompts from warm memory (crystallized by evolution)
+        try:
+            evolved = await memory.warm.retrieve(
+                memory_type="evolved_prompt",
+                min_fitness=0.5,
+                limit=3,
+            )
+            for entry in evolved:
+                retrieved.append({
+                    "content": entry.get("content", ""),
+                    "tier": "evolved",
+                    "score": entry.get("fitness_score", 0.6),
+                })
+            if evolved:
+                logger.info(f"Loaded {len(evolved)} evolved prompt(s) from warm memory")
+        except Exception as e:
+            logger.debug(f"Evolved prompt loading skipped: {e}")
     else:
         logger.debug("No MemoryManager available, returning empty memories")
 

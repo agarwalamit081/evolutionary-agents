@@ -1,21 +1,11 @@
-"""LLM response data models and enums."""
+"""LLM response data models."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
 from typing import Any
-
-
-class TaskComplexity(str, Enum):
-    """Task complexity levels mapped to model tiers."""
-
-    MICRO = "micro"          # Tier 0: classification, labeling
-    STANDARD = "standard"    # Tier 1: routine generation, extraction
-    REASONING = "reasoning"  # Tier 2: complex reasoning, analysis
-    EMBEDDING = "embedding"  # Embedding generation
 
 
 @dataclass

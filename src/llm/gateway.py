@@ -28,7 +28,8 @@ from src.config.settings import Settings
 from src.llm.cache import PromptCache
 from src.llm.cost_tracker import CostTracker
 from src.llm.model_router import ModelRouter
-from src.llm.models import LLMResponse, TaskComplexity, ToolCallResponse
+from src.graph.enums import TaskComplexity
+from src.llm.models import LLMResponse, ToolCallResponse
 from src.llm.rate_limiter import RateLimiterRegistry
 from src.llm.structured_output import StructuredOutputManager
 
@@ -52,7 +53,7 @@ class LLMGateway:
         gateway = LLMGateway(settings)
         response = await gateway.acompletion(
             messages=[{"role": "user", "content": "Hello"}],
-            complexity=TaskComplexity.STANDARD,
+            complexity=TaskComplexity.SIMPLE,
         )
     """
 
@@ -109,7 +110,7 @@ class LLMGateway:
         if model is None and complexity is not None:
             model = self._model_router.route(complexity)
         elif model is None:
-            model = self._model_router.route(TaskComplexity.STANDARD)
+            model = self._model_router.route(TaskComplexity.SIMPLE)
 
         provider = self._extract_provider(model)
 
@@ -192,7 +193,7 @@ class LLMGateway:
         if model is None and complexity is not None:
             model = self._model_router.route(complexity)
         elif model is None:
-            model = self._model_router.route(TaskComplexity.STANDARD)
+            model = self._model_router.route(TaskComplexity.SIMPLE)
 
         provider = self._extract_provider(model)
         await self._rate_limiter.acquire(provider, self._estimate_tokens(messages))
@@ -287,6 +288,19 @@ class LLMGateway:
     ) -> LLMResponse:
         """Execute an LLM call with automatic fallback on failure."""
         fallback_chain = [model] + FALLBACK_CHAINS.get(model, [])
+
+        # Pre-filter: skip providers without API keys to reduce log noise.
+        # If ALL providers lack keys (e.g., test env), fall back to trying all.
+        available_chain: list[str] = []
+        for m in fallback_chain:
+            p = self._extract_provider(m)
+            if self._model_router._has_provider_key(p):
+                available_chain.append(m)
+            else:
+                logger.debug(f"Skipping fallback {m}: no API key for {p}")
+
+        if available_chain:
+            fallback_chain = available_chain
 
         last_error: Exception | None = None
         for attempt_model in fallback_chain:

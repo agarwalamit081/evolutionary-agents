@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -10,8 +10,15 @@ from src.graph.enums import Confidence, Phase
 from src.graph.models import ReflectionResult
 from src.graph.state import AgentState
 
+if TYPE_CHECKING:
+    from src.llm.gateway import LLMGateway
 
-async def reflect_node(state: AgentState) -> dict[str, Any]:
+
+async def reflect_node(
+    state: AgentState,
+    *,
+    gateway: LLMGateway | None = None,
+) -> dict[str, Any]:
     """Perform self-reflection on the execution so far.
 
     Evaluates completed steps, tool results, and progress toward the goal.

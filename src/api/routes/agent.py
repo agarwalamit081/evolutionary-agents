@@ -32,13 +32,46 @@ class RunResponse(BaseModel):
 @router.post("/run", response_model=RunResponse)
 async def run_agent(request: RunRequest) -> RunResponse:
     """Run the agent to accomplish a goal."""
+    from src.config import get_settings
     from src.graph.factory import initial_state
     from src.graph.task_graph import compile_task_graph
+
+    settings = get_settings()
 
     thread_id = f"api-{os.getpid()}-{hash(request.goal) % 10000}"
     state = initial_state(request.goal, thread_id, request.max_iterations)
 
-    compiled = compile_task_graph()
+    # Instantiate dependencies
+    gateway: object = None
+    memory: object = None
+    tools: object = None
+
+    try:
+        from src.llm.gateway import LLMGateway
+
+        gateway = LLMGateway(settings)
+    except Exception:
+        logger.debug("LLMGateway not available for API request")
+
+    try:
+        from src.memory.manager import MemoryManager
+
+        memory = MemoryManager(settings)
+    except Exception:
+        logger.debug("MemoryManager not available for API request")
+
+    try:
+        from src.tools import create_default_registry
+
+        tools = create_default_registry()
+    except Exception:
+        logger.debug("ToolRegistry not available for API request")
+
+    compiled = compile_task_graph(
+        gateway=gateway,
+        memory=memory,
+        tools=tools,
+    )
 
     logger.info(f"API: Starting agent with goal: {request.goal[:80]}")
     result = await compiled.ainvoke(state)

@@ -73,6 +73,9 @@ async def _run_agent(
 ) -> dict:
     """Run the agent graph to completion.
 
+    Instantiates dependencies (LLMGateway, MemoryManager, ToolRegistry)
+    and passes them through compile_task_graph() for dependency injection.
+
     Args:
         goal_text: The goal to accomplish.
         max_iterations: Maximum graph iterations.
@@ -81,21 +84,66 @@ async def _run_agent(
     Returns:
         Final agent state.
     """
+    from src.config import get_settings
     from src.graph.factory import initial_state
     from src.graph.task_graph import compile_task_graph
+
+    settings = get_settings()
 
     # Create initial state
     thread_id = f"cli-{os.getpid()}-{id(goal_text)}"
     state = initial_state(goal_text, thread_id, max_iterations)
 
-    # Compile and run graph
-    compiled = compile_task_graph()
+    # Instantiate dependencies
+    gateway = _create_gateway(settings)
+    memory = _create_memory_manager(settings)
+    tools = _create_tool_registry()
+
+    # Compile graph with injected dependencies
+    compiled = compile_task_graph(
+        gateway=gateway,
+        memory=memory,
+        tools=tools,
+    )
 
     logger.info(f"Starting agent with goal: {goal_text[:80]}")
     result = await compiled.ainvoke(state)
 
     logger.info("Agent execution complete")
     return dict(result)
+
+
+def _create_gateway(settings: object):
+    """Create LLMGateway if provider key is available."""
+    try:
+        from src.llm.gateway import LLMGateway
+
+        return LLMGateway(settings)
+    except Exception:
+        logger.debug("LLMGateway not available, using heuristic fallback")
+        return None
+
+
+def _create_memory_manager(settings: object):
+    """Create MemoryManager if Redis and PostgreSQL are available."""
+    try:
+        from src.memory.manager import MemoryManager
+
+        return MemoryManager(settings)
+    except Exception:
+        logger.debug("MemoryManager not available, using stub memory")
+        return None
+
+
+def _create_tool_registry():
+    """Create ToolRegistry with all built-in tools."""
+    try:
+        from src.tools import create_default_registry
+
+        return create_default_registry()
+    except Exception:
+        logger.debug("ToolRegistry not available")
+        return None
 
 
 if __name__ == "__main__":

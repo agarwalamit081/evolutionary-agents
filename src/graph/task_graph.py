@@ -5,11 +5,16 @@ Graph topology:
         → verify → evolve? → store_memory → hitl? → END
 
 With error_handler reachable from all nodes via conditional edges.
+
+Dependencies (LLMGateway, MemoryManager, ToolRegistry) are injected via
+closure wrappers in build_task_graph(). When deps are None, nodes fall
+back to heuristic behavior.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 
@@ -36,37 +41,73 @@ from src.graph.routers import (
 )
 from src.graph.state import AgentState
 
+if TYPE_CHECKING:
+    from src.llm.gateway import LLMGateway
+    from src.memory.manager import MemoryManager
+    from src.tools.registry import ToolRegistry
 
-def build_task_graph() -> StateGraph:
-    """Build and return the task execution StateGraph.
 
-    The graph is not compiled — callers should compile with optional
-    checkpointer and interrupt_before settings.
+# ─── Closure Wrappers ───────────────────────────────────────────────
+
+
+def _wrap(
+    node_fn: Callable[..., Awaitable[dict[str, Any]]],
+    **deps: Any,
+) -> Callable[[AgentState], Awaitable[dict[str, Any]]]:
+    """Wrap a node function, injecting keyword dependencies via closure.
+
+    The returned function matches LangGraph's expected signature:
+        (state: AgentState) -> dict[str, Any]
+    """
+
+    async def _wrapped(state: AgentState) -> dict[str, Any]:
+        return await node_fn(state, **deps)
+
+    _wrapped.__name__ = node_fn.__name__
+    _wrapped.__doc__ = node_fn.__doc__
+    return _wrapped
+
+
+# ─── Graph Builder ──────────────────────────────────────────────────
+
+
+def build_task_graph(
+    gateway: LLMGateway | None = None,
+    memory: MemoryManager | None = None,
+    tools: ToolRegistry | None = None,
+) -> StateGraph:
+    """Build the task execution StateGraph with injected dependencies.
+
+    Args:
+        gateway: LLMGateway for LLM calls. None = heuristic fallback.
+        memory: MemoryManager for 3-tier memory. None = stub behavior.
+        tools: ToolRegistry for tool execution. None = no tool calls.
 
     Returns:
         StateGraph ready for compilation.
     """
     graph = StateGraph(AgentState)
 
-    # ─── Add Nodes ──────────────────────────────────────────────────────
-    graph.add_node("classify", classify_node)
-    graph.add_node("plan", plan_node)
-    graph.add_node("retrieve_memory", retrieve_memory_node)
-    graph.add_node("execute", execute_node)
-    graph.add_node("reflect", reflect_node)
-    graph.add_node("verify", verify_node)
-    graph.add_node("evolve", evolve_node)
-    graph.add_node("store_memory", store_memory_node)
+    # ─── Add Nodes (with dependency injection) ────────────────────────
+    graph.add_node("classify", _wrap(classify_node, gateway=gateway))
+    graph.add_node("plan", _wrap(plan_node, gateway=gateway))
+    graph.add_node("retrieve_memory", _wrap(retrieve_memory_node, memory=memory))
+    graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools))
+    graph.add_node("reflect", _wrap(reflect_node, gateway=gateway))
+    graph.add_node("verify", _wrap(verify_node, gateway=gateway))
+    graph.add_node("evolve", _wrap(evolve_node, gateway=gateway))
+    graph.add_node("store_memory", _wrap(store_memory_node, memory=memory))
+    # No deps needed for HITL and error handler
     graph.add_node("hitl_gate", hitl_gate_node)
     graph.add_node("error_handler", error_handler_node)
 
-    # ─── Linear Edges (START → execute) ─────────────────────────────────
+    # ─── Linear Edges (START → execute) ────────────────────────────────
     graph.add_edge(START, "classify")
     graph.add_edge("classify", "plan")
     graph.add_edge("plan", "retrieve_memory")
     graph.add_edge("retrieve_memory", "execute")
 
-    # ─── Conditional Edges ──────────────────────────────────────────────
+    # ─── Conditional Edges ─────────────────────────────────────────────
     graph.add_conditional_edges("execute", route_after_execute, {
         "reflect": "reflect",
         "execute": "execute",
@@ -112,19 +153,25 @@ def build_task_graph() -> StateGraph:
 
 
 def compile_task_graph(
+    gateway: LLMGateway | None = None,
+    memory: MemoryManager | None = None,
+    tools: ToolRegistry | None = None,
     checkpointer: Any = None,
     interrupt_before: list[str] | None = None,
 ) -> Any:
-    """Build and compile the task graph with optional checkpointing.
+    """Build and compile the task graph with dependencies and optional checkpointing.
 
     Args:
+        gateway: LLMGateway for LLM calls.
+        memory: MemoryManager for 3-tier memory.
+        tools: ToolRegistry for tool execution.
         checkpointer: AsyncPostgresSaver or similar for state persistence.
         interrupt_before: Node names to pause before execution (e.g., ["hitl_gate"]).
 
     Returns:
         Compiled StateGraph ready for invocation.
     """
-    graph = build_task_graph()
+    graph = build_task_graph(gateway=gateway, memory=memory, tools=tools)
 
     compile_kwargs: dict[str, Any] = {}
     if checkpointer is not None:

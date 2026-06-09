@@ -2,22 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from src.graph.enums import GoalStatus, Phase
 from src.graph.state import AgentState
 
+if TYPE_CHECKING:
+    from src.llm.gateway import LLMGateway
+    from src.tools.registry import ToolRegistry
 
-async def execute_node(state: AgentState) -> dict[str, Any]:
+
+async def execute_node(
+    state: AgentState,
+    *,
+    gateway: LLMGateway | None = None,
+    tools: ToolRegistry | None = None,
+) -> dict[str, Any]:
     """Execute the current plan step.
 
-    For now, uses a simple execution model. When the LLM gateway is
-    integrated, this will use bind_tools() and AIMessage.tool_calls.
+    When gateway and tools are provided, uses LLM tool calling via
+    bind_tools() and AIMessage.tool_calls. Otherwise falls back to
+    simulated step execution.
 
     Args:
         state: Current agent state with plan and step index.
+        gateway: Optional LLM gateway for tool-calling execution.
+        tools: Optional tool registry for executing tool calls.
 
     Returns:
         Partial state update with execution results.

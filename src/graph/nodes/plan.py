@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from loguru import logger
@@ -11,12 +11,19 @@ from src.graph.enums import GoalStatus, Phase, Strategy
 from src.graph.models import PlanStep
 from src.graph.state import AgentState
 
+if TYPE_CHECKING:
+    from src.llm.gateway import LLMGateway
 
-async def plan_node(state: AgentState) -> dict[str, Any]:
+
+async def plan_node(
+    state: AgentState,
+    *,
+    gateway: LLMGateway | None = None,
+) -> dict[str, Any]:
     """Generate an execution plan based on the classified goal and strategy.
 
     Creates a list of PlanSteps from the goal and strategy.
-    For now uses heuristic plan generation; LLM-based planning is an enhancement.
+    When a gateway is provided, LLM-based planning can generate richer plans.
 
     Args:
         state: Current agent state with classified goal.

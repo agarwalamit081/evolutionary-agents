@@ -155,6 +155,7 @@ class RedisSettings(BaseSettings):
     redis_ttl_hot_memory: int = 86400  # 24 hours
     redis_ttl_session: int = 3600  # 1 hour
     redis_ttl_rate_limit: int = 60  # 1 minute
+    cache_ttl_seconds: int = 3600  # LLM prompt cache TTL
 
     model_config = SettingsConfigDict(
         env_file=".env",

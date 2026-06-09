@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -15,6 +15,9 @@ from src.graph.enums import (
 )
 from src.graph.models import Goal
 from src.graph.state import AgentState
+
+if TYPE_CHECKING:
+    pass
 
 # Heuristic keyword-based classification for fast path
 _COMPLEXITY_KEYWORDS: dict[TaskComplexity, list[str]] = {
@@ -37,14 +40,19 @@ _STRATEGY_KEYWORDS: dict[Strategy, list[str]] = {
 }
 
 
-async def classify_node(state: AgentState) -> dict[str, Any]:
+async def classify_node(
+    state: AgentState,
+    *,
+    gateway: LLMGateway | None = None,
+) -> dict[str, Any]:
     """Classify task complexity and select execution strategy.
 
-    Uses keyword heuristics for fast classification. For ambiguous cases,
-    falls back to LLM-based classification via the gateway.
+    Uses keyword heuristics for fast classification. When a gateway is
+    provided, LLM-based classification can enhance ambiguous cases.
 
     Args:
         state: Current agent state.
+        gateway: Optional LLM gateway for LLM-enhanced classification.
 
     Returns:
         Partial state update with classification results.

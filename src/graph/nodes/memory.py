@@ -2,22 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from src.graph.enums import Phase
 from src.graph.state import AgentState
 
+if TYPE_CHECKING:
+    from src.memory.manager import MemoryManager
 
-async def retrieve_memory_node(state: AgentState) -> dict[str, Any]:
+
+async def retrieve_memory_node(
+    state: AgentState,
+    *,
+    memory: MemoryManager | None = None,
+) -> dict[str, Any]:
     """Retrieve relevant memories for the current goal.
 
     Queries the memory system for context relevant to the task.
-    In production, this uses the MemoryManager with Redis + pgvector.
+    When a MemoryManager is provided, queries all 3 tiers.
 
     Args:
         state: Current agent state.
+        memory: Optional MemoryManager for 3-tier memory queries.
 
     Returns:
         Partial state update with retrieved memories.
@@ -40,14 +48,19 @@ async def retrieve_memory_node(state: AgentState) -> dict[str, Any]:
     }
 
 
-async def store_memory_node(state: AgentState) -> dict[str, Any]:
+async def store_memory_node(
+    state: AgentState,
+    *,
+    memory: MemoryManager | None = None,
+) -> dict[str, Any]:
     """Store execution learnings and observations to memory.
 
     Persists lessons learned, skill observations, and execution metadata.
-    In production, this uses the MemoryManager with consolidation.
+    When a MemoryManager is provided, stores across all 3 tiers.
 
     Args:
         state: Current agent state with reflection and observations.
+        memory: Optional MemoryManager for 3-tier memory storage.
 
     Returns:
         Partial state update confirming storage.

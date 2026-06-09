@@ -99,11 +99,15 @@ async def _run_agent(
     memory = await _async_create_memory_manager(settings)
     tools = _create_tool_registry()
 
+    # Create checkpointer if possible
+    checkpointer = await _create_checkpointer(settings)
+
     # Compile graph with injected dependencies
     compiled = compile_task_graph(
         gateway=gateway,
         memory=memory,
         tools=tools,
+        checkpointer=checkpointer,
     )
 
     logger.info(f"Starting agent with goal: {goal_text[:80]}")
@@ -161,6 +165,17 @@ def _create_tool_registry():
         return create_default_registry()
     except Exception:
         logger.debug("ToolRegistry not available")
+        return None
+
+
+async def _create_checkpointer(settings: object):
+    """Create AsyncPostgresSaver checkpointer if PostgreSQL is available."""
+    try:
+        from src.graph.checkpoint import create_checkpointer
+
+        return await create_checkpointer(settings.database.database_url)
+    except Exception:
+        logger.debug("Checkpointer not available, running without persistence")
         return None
 
 

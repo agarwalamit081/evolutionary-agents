@@ -46,6 +46,7 @@ class SafetyPipeline:
         code: str,
         context: dict[str, Any] | None = None,
         sandbox_executor: Any | None = None,
+        allowlisted_modules: set[str] | None = None,
     ) -> dict[str, Any]:
         """Run all 7 safety layers on the provided code.
 
@@ -53,6 +54,8 @@ class SafetyPipeline:
             code: The Python source code to validate.
             context: Optional context (target_path, mutation_type, etc.).
             sandbox_executor: Optional SandboxExecutor for Layer 6 sandbox testing.
+            allowlisted_modules: Optional set of module names to allow even if
+                normally considered dangerous (for generated tool validation).
 
         Returns:
             Dict with 'passed' bool, 'layers' results, and 'issues' list.
@@ -77,7 +80,7 @@ class SafetyPipeline:
             all_issues.extend(results["security"]["issues"])
 
         # Layer 4: Import validation
-        results["imports"] = self._check_imports(code)
+        results["imports"] = self._check_imports(code, allowlisted_modules)
         if not results["imports"]["passed"]:
             all_issues.extend(results["imports"]["issues"])
 
@@ -155,14 +158,27 @@ class SafetyPipeline:
             return {"passed": False, "issues": issues}
         return {"passed": True, "issues": []}
 
-    def _check_imports(self, code: str) -> dict[str, Any]:
-        """Layer 4: Validate imports — block dangerous modules."""
+    def _check_imports(
+        self,
+        code: str,
+        allowlisted: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Layer 4: Validate imports — block dangerous modules.
+
+        Args:
+            code: Python source code to check.
+            allowlisted: Optional set of module names to exempt from blocking.
+        """
         dangerous_modules = {
             "os", "sys", "subprocess", "shutil", "ctypes",
             "multiprocessing", "threading", "socket",
             "http.server", "xml.etree", "pickle", "marshal",
             "importlib", "pkgutil", "code", "codeop",
         }
+
+        # Remove allowlisted modules from the dangerous set
+        if allowlisted:
+            dangerous_modules = dangerous_modules - allowlisted
 
         issues: list[str] = []
         try:

@@ -12,12 +12,14 @@ from src.graph.state import AgentState
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
+    from src.tools.registry import ToolRegistry
 
 
 async def reflect_node(
     state: AgentState,
     *,
     gateway: LLMGateway | None = None,
+    tools: ToolRegistry | None = None,
 ) -> dict[str, Any]:
     """Perform self-reflection on the execution so far.
 
@@ -28,6 +30,7 @@ async def reflect_node(
     Args:
         state: Current agent state with execution results.
         gateway: Optional LLM gateway for LLM-enhanced reflection.
+        tools: Optional ToolRegistry for gap detection.
 
     Returns:
         Partial state update with reflection results.
@@ -45,7 +48,7 @@ async def reflect_node(
         if result is not None:
             return result
 
-    return _heuristic_reflect(state, goal_text, completed_steps, errors)
+    return _heuristic_reflect(state, goal_text, completed_steps, errors, tools)
 
 
 def _heuristic_reflect(
@@ -53,6 +56,7 @@ def _heuristic_reflect(
     goal_text: str,
     completed_steps: list[Any],
     errors: list[str],
+    tools: ToolRegistry | None = None,
 ) -> dict[str, Any]:
     """Heuristic-based reflection using completion ratios."""
     plan_steps = state.get("plan_steps", [])
@@ -80,6 +84,18 @@ def _heuristic_reflect(
         lessons.append(f"Encountered {len(errors)} errors during execution")
         memory_obs.append(f"Error pattern: {errors[-1][:100] if errors else 'none'}")
 
+    # Detect tool gaps from "Unknown tool" errors in tool results
+    tool_results = state.get("tool_results", [])
+    missing_tools: list[str] = []
+    for tr in tool_results:
+        if hasattr(tr, "error") and tr.error and "Unknown tool" in str(tr.error):
+            # Confirm the tool is truly absent from registry (not just a typo)
+            if tools is not None and tools.get_handler(tr.tool_name) is None:
+                missing_tools.append(f"tool matching '{tr.tool_name}' capability")
+
+    if missing_tools:
+        lessons.append(f"Missing tool capabilities detected: {', '.join(missing_tools)}")
+
     should_replan = completion_ratio < 0.3 and has_errors
     should_evolve = (
         completion_ratio >= 0.5
@@ -103,12 +119,17 @@ def _heuristic_reflect(
         f"should_evolve={should_evolve}, should_replan={should_replan}"
     )
 
-    return {
+    result: dict[str, Any] = {
         "phase": Phase.VERIFY,
         "reflection": reflection,
         "confidence": confidence,
         "memory_observations": memory_obs,
     }
+
+    if missing_tools:
+        result["pending_tool_gaps"] = missing_tools
+
+    return result
 
 
 async def _llm_reflect(
@@ -137,6 +158,13 @@ async def _llm_reflect(
 
         errors_summary = "\n".join(f"- {e[:100]}" for e in errors[-3:]) if errors else "None"
 
+        # Include tool failure details for gap detection
+        tool_errors = []
+        for tr in tool_results:
+            if hasattr(tr, "error") and tr.error:
+                tool_errors.append(f"- {tr.tool_name}: {tr.error[:100]}")
+        tool_errors_str = "\n".join(tool_errors[-3:]) if tool_errors else "None"
+
         user_prompt = REFLECT_USER.format(
             goal_text=goal_text,
             completed_count=completed_count,
@@ -144,6 +172,7 @@ async def _llm_reflect(
             completed_summary=completed_summary,
             error_count=len(errors),
             errors_summary=errors_summary,
+            tool_errors=tool_errors_str,
         )
 
         messages: list[dict[str, str]] = [
@@ -182,12 +211,18 @@ async def _llm_reflect(
             f"should_replan={analysis.should_replan}"
         )
 
-        return {
+        result: dict[str, Any] = {
             "phase": Phase.VERIFY,
             "reflection": reflection,
             "confidence": conf,
             "memory_observations": analysis.memory_observations,
         }
+
+        # Propagate missing tool gaps identified by LLM
+        if analysis.missing_tools:
+            result["pending_tool_gaps"] = analysis.missing_tools
+
+        return result
     except Exception as e:
         logger.debug(f"LLM reflection failed, using heuristics: {e}")
         return None

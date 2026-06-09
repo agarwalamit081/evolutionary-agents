@@ -13,12 +13,14 @@ from src.graph.state import AgentState
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
+    from src.tools.registry import ToolRegistry
 
 
 async def plan_node(
     state: AgentState,
     *,
     gateway: LLMGateway | None = None,
+    tools: ToolRegistry | None = None,
 ) -> dict[str, Any]:
     """Generate an execution plan based on the classified goal and strategy.
 
@@ -27,6 +29,8 @@ async def plan_node(
 
     Args:
         state: Current agent state with classified goal.
+        gateway: Optional LLM gateway for LLM-enhanced planning.
+        tools: Optional ToolRegistry for dynamic tool list in prompts.
 
     Returns:
         Partial state update with plan_steps and phase transition.
@@ -46,7 +50,7 @@ async def plan_node(
     # Try LLM planning first, fall back to heuristics
     plan_steps: list[PlanStep] | None = None
     if gateway is not None:
-        plan_steps = await _llm_plan(gateway, goal, strategy, state)
+        plan_steps = await _llm_plan(gateway, goal, strategy, state, tools)
 
     if plan_steps is None:
         plan_steps = _generate_plan(goal.text, strategy)
@@ -66,6 +70,7 @@ async def _llm_plan(
     goal: Goal,
     strategy: Strategy,
     state: AgentState,
+    tools: ToolRegistry | None = None,
 ) -> list[PlanStep] | None:
     """Attempt LLM-based plan generation. Returns None on failure."""
     try:
@@ -88,8 +93,18 @@ async def _llm_plan(
             estimated_steps="auto",
             memory_context=memory_ctx,
         )
+        # Build dynamic tool list for the plan prompt
+        if tools is not None:
+            tool_names = [t["function"]["name"] for t in tools.list_tools()]
+        else:
+            tool_names = [
+                "code_executor", "web_search", "file_reader",
+                "file_writer", "code_validator", "self_inspect", "memory_search",
+            ]
+        system_prompt = PLAN_SYSTEM.format(available_tools=", ".join(tool_names))
+
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": PLAN_SYSTEM},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
         response = await gateway.acompletion(

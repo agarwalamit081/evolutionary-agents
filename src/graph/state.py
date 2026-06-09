@@ -61,6 +61,10 @@ class AgentState(TypedDict, total=False):
     evolution_history: Annotated[list[dict[str, Any]], operator.add]
     skills_learned: Annotated[list[SkillDef], operator.add]
 
+    # ─── Dynamic Tool Creation ──────────────────────────────────────────
+    pending_tool_gaps: Annotated[list[str], operator.add]
+    tools_created: Annotated[list[dict[str, Any]], operator.add]
+
     # ─── Sub-Agents ─────────────────────────────────────────────────────
     sub_agents: list[SubAgentSpec]
 

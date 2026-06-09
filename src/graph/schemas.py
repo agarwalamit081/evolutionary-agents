@@ -42,6 +42,10 @@ class ReflectionAnalysis(BaseModel):
     lessons_learned: list[str] = Field(default_factory=list, description="Key takeaways")
     memory_observations: list[str] = Field(default_factory=list, description="Observations worth storing")
     next_action: str = Field(default="continue", description="Recommended next action")
+    missing_tools: list[str] = Field(
+        default_factory=list,
+        description="Capabilities/tools the agent needed but did not have",
+    )
 
 
 class VerificationResult(BaseModel):

@@ -8,6 +8,7 @@ from src.graph.nodes.hitl import hitl_gate_node
 from src.graph.nodes.memory import retrieve_memory_node, store_memory_node
 from src.graph.nodes.plan import plan_node
 from src.graph.nodes.reflect import reflect_node
+from src.graph.nodes.tool_create import tool_create_node
 from src.graph.nodes.verify import verify_node
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "store_memory_node",
     "hitl_gate_node",
     "error_handler_node",
+    "tool_create_node",
 ]

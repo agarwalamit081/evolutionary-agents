@@ -63,10 +63,17 @@ def route_after_reflect(state: AgentState) -> str:
     """Route after the reflect node.
 
     Returns:
+        "tool_create" — tool gaps detected, create missing tools
         "verify" — confidence is medium or higher
         "execute" — low confidence, retry execution
         "plan" — reflection suggests replanning
     """
+    # Check for tool gaps first — highest priority
+    pending_gaps = state.get("pending_tool_gaps", [])
+    if pending_gaps:
+        logger.info(f"Tool gaps detected: {pending_gaps}, routing to tool_create")
+        return "tool_create"
+
     reflection = state.get("reflection")
 
     if reflection is None:
@@ -210,4 +217,20 @@ def route_after_error(state: AgentState) -> str:
         return "complete"
 
     # Default: retry execution
+    return "execute"
+
+
+def route_after_tool_create(state: AgentState) -> str:
+    """Route after the tool_create node.
+
+    Returns:
+        "plan" — new tools were created, replan to use them
+        "execute" — no tools created, retry execution
+    """
+    tools_created = state.get("tools_created", [])
+    if tools_created:
+        logger.info(
+            f"{len(tools_created)} tool(s) created, routing to plan for replanning"
+        )
+        return "plan"
     return "execute"

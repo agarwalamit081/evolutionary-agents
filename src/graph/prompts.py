@@ -44,7 +44,7 @@ Respond with a JSON object matching this schema:
   - expected_output: what we expect from this step
 - rationale: brief explanation of the plan
 
-Available tools: code_executor, web_search, file_reader, file_writer, code_validator, self_inspect, memory_search
+Available tools: {available_tools}
 
 Guidelines:
 - Break the goal into concrete, actionable steps
@@ -89,7 +89,13 @@ Evaluate:
 1. Are we making progress toward the goal?
 2. Are the right tools being used effectively?
 3. Any patterns worth remembering?
-4. Should we adjust our approach?"""
+4. Should we adjust our approach?
+5. Did the agent need a capability that no available tool provides?
+6. If a tool call returned "Unknown tool", what tool was needed?
+
+If missing capabilities are identified, list them in missing_tools as descriptive
+phrases like "fetch data from HTTP APIs", "calculate statistical metrics",
+"convert between data formats"."""
 
 REFLECT_USER = """\
 Goal: {goal_text}
@@ -97,6 +103,7 @@ Completed steps: {completed_count}/{total_steps}
 {completed_summary}
 Errors: {error_count}
 {errors_summary}
+Tool errors: {tool_errors}
 Reflect on the execution progress."""
 
 VERIFY_SYSTEM = """\
@@ -154,3 +161,59 @@ Performance context:
 {performance_context}
 
 Generate a specific, testable mutation that addresses this opportunity."""
+
+# ─── Dynamic Tool Generation Prompts ──────────────────────────────────
+
+TOOL_GENERATE_SYSTEM = """\
+You are a tool code generator for an AI agent. Generate a complete, production-ready \
+Python tool that addresses the described capability gap.
+
+The tool must:
+1. Define exactly ONE async function as the handler
+2. Use only these allowed imports: httpx, json, re, math, datetime, pathlib, \
+collections, itertools, textwrap, typing, dataclasses, copy, decimal, statistics, \
+hashlib, base64, urllib.parse, html.parser, loguru
+3. Include comprehensive error handling with try/except
+4. Return string results (success message or error message)
+5. Use sensible timeouts for any network operations (httpx with timeout=15.0)
+6. NOT import or use os, sys, subprocess, socket, eval, exec, or any file I/O \
+outside the current working directory
+
+Respond with a JSON object matching this schema:
+- tool_name: snake_case identifier (e.g. "json_url_parser")
+- description: Clear description for LLM tool selection
+- input_schema: JSON Schema object defining parameters (type: "object", properties, required)
+- handler_code: Complete Python source code for an async function
+- test_code: Simple async test code that calls the handler
+
+The handler_code must be a complete, self-contained async function definition.
+Example structure:
+    async def my_tool(param1: str, param2: int = 10) -> str:
+        '''Tool description.'''
+        try:
+            # implementation using allowed imports only
+            return str(result)
+        except Exception as e:
+            return f"ERROR: {{e}}"
+
+The test_code should call the handler function directly with sample arguments.
+Example:
+    import asyncio
+    result = asyncio.get_event_loop().run_until_complete(my_tool("sample"))
+    assert "ERROR" not in result, f"Test failed: {{result}}"
+    print("Test passed")
+"""
+
+TOOL_GENERATE_USER = """\
+The agent needs a tool it does not currently have.
+
+Capability gap: {gap_description}
+
+Context from execution:
+- Goal: {goal_text}
+- Failed tool calls: {failed_tools}
+- Error details: {error_details}
+- Existing tools (do not duplicate): {existing_tools}
+
+Generate a complete tool that fills this gap. The tool should be focused, \
+safe, and production-ready."""

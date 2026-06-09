@@ -28,6 +28,7 @@ from src.graph.nodes import (
     reflect_node,
     retrieve_memory_node,
     store_memory_node,
+    tool_create_node,
     verify_node,
 )
 from src.graph.routers import (
@@ -37,6 +38,7 @@ from src.graph.routers import (
     route_after_hitl,
     route_after_reflect,
     route_after_store,
+    route_after_tool_create,
     route_after_verify,
 )
 from src.graph.state import AgentState
@@ -92,13 +94,14 @@ def build_task_graph(
     # LangGraph's StateNode type is strict about signatures; our closure
     # wrappers match at runtime but Pyright can't verify that statically.
     graph.add_node("classify", _wrap(classify_node, gateway=gateway))  # type: ignore[arg-type]
-    graph.add_node("plan", _wrap(plan_node, gateway=gateway))  # type: ignore[arg-type]
+    graph.add_node("plan", _wrap(plan_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("retrieve_memory", _wrap(retrieve_memory_node, memory=memory))  # type: ignore[arg-type]
     graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
-    graph.add_node("reflect", _wrap(reflect_node, gateway=gateway))  # type: ignore[arg-type]
+    graph.add_node("reflect", _wrap(reflect_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("verify", _wrap(verify_node, gateway=gateway))  # type: ignore[arg-type]
     graph.add_node("evolve", _wrap(evolve_node, gateway=gateway))  # type: ignore[arg-type]
     graph.add_node("store_memory", _wrap(store_memory_node, memory=memory))  # type: ignore[arg-type]
+    graph.add_node("tool_create", _wrap(tool_create_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     # No deps needed for HITL and error handler
     graph.add_node("hitl_gate", hitl_gate_node)  # type: ignore[arg-type]
     graph.add_node("error_handler", error_handler_node)  # type: ignore[arg-type]
@@ -120,6 +123,12 @@ def build_task_graph(
         "verify": "verify",
         "execute": "execute",
         "plan": "plan",
+        "tool_create": "tool_create",
+    })
+
+    graph.add_conditional_edges("tool_create", route_after_tool_create, {
+        "plan": "plan",
+        "execute": "execute",
     })
 
     graph.add_conditional_edges("verify", route_after_verify, {

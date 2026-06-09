@@ -16,6 +16,7 @@ class Phase(str, Enum):
     VERIFY = "verify"
     EVOLVE = "evolve"
     STORE_MEMORY = "store_memory"
+    TOOL_CREATE = "tool_create"
     HITL_GATE = "hitl_gate"
     ERROR_HANDLER = "error_handler"
     COMPLETE = "complete"

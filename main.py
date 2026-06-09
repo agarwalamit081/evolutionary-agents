@@ -99,6 +99,10 @@ async def _run_agent(
     memory = await _async_create_memory_manager(settings)
     tools = _create_tool_registry()
 
+    # Load previously created dynamic tools from database
+    if tools is not None:
+        await _load_dynamic_tools(tools)
+
     # Create checkpointer if possible
     checkpointer = await _create_checkpointer(settings)
 
@@ -166,6 +170,26 @@ def _create_tool_registry():
     except Exception:
         logger.debug("ToolRegistry not available")
         return None
+
+
+async def _load_dynamic_tools(tools: object) -> None:
+    """Load previously created dynamic tools from the database.
+
+    Best-effort — non-fatal if the database is unavailable.
+    """
+    try:
+        from src.tools.dynamic.persister import ToolPersister
+        from src.tools.registry import ToolRegistry
+
+        if not isinstance(tools, ToolRegistry):
+            return
+
+        persister = ToolPersister()
+        loaded = await persister.load_active_tools(tools)
+        if loaded:
+            logger.info(f"Loaded {len(loaded)} dynamic tools from DB: {', '.join(loaded)}")
+    except Exception as e:
+        logger.debug(f"Dynamic tool loading skipped: {e}")
 
 
 async def _create_checkpointer(settings: object):

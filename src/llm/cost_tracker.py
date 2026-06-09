@@ -120,15 +120,16 @@ class CostTracker:
     def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
         """Calculate cost for a model call based on per-token pricing.
 
-        Falls back to $0.005/1K input + $0.015/1K output if model not in registry.
+        Falls back to $0.005/1K input + $0.015/1K output if model not in
+        registry or registry entry lacks cost fields.
         """
         spec = MODEL_REGISTRY.get(model)
-        if spec:
+        if spec and hasattr(spec, "input_cost_per_1k") and hasattr(spec, "output_cost_per_1k"):
             cost = (input_tokens * spec.input_cost_per_1k / 1000) + (
                 output_tokens * spec.output_cost_per_1k / 1000
             )
             return cost
 
-        # Fallback pricing for unknown models
-        logger.warning(f"Unknown model '{model}', using fallback pricing")
+        # Fallback pricing for unknown models or models without cost data
+        logger.warning(f"Using fallback pricing for model '{model}'")
         return (input_tokens * 0.005 / 1000) + (output_tokens * 0.015 / 1000)

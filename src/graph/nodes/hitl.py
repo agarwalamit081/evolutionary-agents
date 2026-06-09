@@ -64,7 +64,7 @@ async def hitl_gate_node(state: AgentState) -> dict[str, Any]:
                 "is_complete": False,
                 "errors": [f"Human rejected: {feedback}"] if feedback else ["Human rejected the result"],
             }
-    except (ImportError, TypeError):
+    except (ImportError, TypeError, RuntimeError):
         # LangGraph interrupt not available or not in compiled graph context
         logger.debug("Auto-approving (HITL interrupt not available)")
 

@@ -69,6 +69,16 @@ class TestModelRouterRoute:
         result = router.route(TaskComplexity.CRITICAL)
         assert isinstance(result, str)
 
+    def test_complexity_tier_map_chain_keys_are_valid(self) -> None:
+        """COMPLEXITY_TIER_MAP chain keys exist in FALLBACK_CHAINS."""
+        from src.config.model_registry import FALLBACK_CHAINS
+        from src.llm.model_router import COMPLEXITY_TIER_MAP
+
+        for complexity, (tier, chain_key) in COMPLEXITY_TIER_MAP.items():
+            assert chain_key in FALLBACK_CHAINS, (
+                f"Chain key '{chain_key}' for {complexity.value} not in FALLBACK_CHAINS"
+            )
+
 
 class TestModelRouterProviderHealth:
     """Tests for provider health management."""

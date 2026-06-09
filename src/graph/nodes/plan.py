@@ -94,7 +94,7 @@ async def _llm_plan(
         ]
         response = await gateway.acompletion(
             messages=messages,
-            model="gpt-4o-mini-2024-07-18",
+            complexity=TaskComplexity.SIMPLE,
         )
 
         extractor = StructuredOutputManager()

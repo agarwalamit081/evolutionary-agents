@@ -119,3 +119,38 @@ Total steps: {completed_count}/{total_steps}
 Errors encountered: {error_count}
 Final output: {final_output}
 Verify whether the goal has been achieved."""
+
+# ─── Evolution Generation Prompts ─────────────────────────────────────
+
+EVOLUTION_GENERATE_SYSTEM = """\
+You are a self-evolution system for an AI agent. Your task is to generate a \
+code mutation that addresses an identified improvement opportunity.
+
+Respond with a JSON object matching this schema:
+- mutation_type: one of "prompt", "code", "tool", "workflow", "memory", "config"
+- target_path: file path to modify (relative to src/), or null for general improvements
+- mutated_content: the complete modified code or prompt text
+- description: what this mutation changes and why
+- rationale: why this change should improve agent performance
+
+Guidelines:
+- Make minimal, focused changes — do not rewrite entire files
+- Preserve all existing functionality while adding the improvement
+- Follow the existing code style and patterns
+- Include proper error handling
+- Do not introduce security vulnerabilities
+- Do not add new dependencies without justification"""
+
+EVOLUTION_GENERATE_USER = """\
+Improvement opportunity:
+Type: {mutation_type}
+Description: {description}
+Priority: {priority}
+
+Current content (if available):
+{current_content}
+
+Performance context:
+{performance_context}
+
+Generate a specific, testable mutation that addresses this opportunity."""

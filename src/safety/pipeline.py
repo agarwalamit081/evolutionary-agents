@@ -41,12 +41,18 @@ class SafetyPipeline:
     All layers must pass for a mutation to be deployed.
     """
 
-    async def validate(self, code: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def validate(
+        self,
+        code: str,
+        context: dict[str, Any] | None = None,
+        sandbox_executor: Any | None = None,
+    ) -> dict[str, Any]:
         """Run all 7 safety layers on the provided code.
 
         Args:
             code: The Python source code to validate.
             context: Optional context (target_path, mutation_type, etc.).
+            sandbox_executor: Optional SandboxExecutor for Layer 6 sandbox testing.
 
         Returns:
             Dict with 'passed' bool, 'layers' results, and 'issues' list.
@@ -80,11 +86,18 @@ class SafetyPipeline:
         if not results["behavioral"]["passed"]:
             all_issues.extend(results["behavioral"]["issues"])
 
-        # Layer 6: Sandbox execution (placeholder)
-        results["sandbox"] = {"passed": True, "issues": [], "note": "sandbox pending"}
+        # Layer 6: Sandbox execution
+        if sandbox_executor is not None:
+            results["sandbox"] = await self._check_sandbox(code, sandbox_executor)
+            if not results["sandbox"]["passed"]:
+                all_issues.extend(results["sandbox"]["issues"])
+        else:
+            results["sandbox"] = {"passed": True, "issues": [], "note": "sandbox skipped (no executor)"}
 
-        # Layer 7: Semantic check (placeholder)
-        results["semantic"] = {"passed": True, "issues": [], "note": "semantic check pending"}
+        # Layer 7: Semantic check
+        results["semantic"] = self._check_semantic(code)
+        if not results["semantic"]["passed"]:
+            all_issues.extend(results["semantic"]["issues"])
 
         passed = all(layer["passed"] for layer in results.values())
 
@@ -184,6 +197,62 @@ class SafetyPipeline:
         if "open(" in code and "write" in code:
             if "sandbox" not in code.lower() and "tmp" not in code.lower():
                 issues.append("File write outside sandbox directory")
+
+        if issues:
+            return {"passed": False, "issues": issues}
+        return {"passed": True, "issues": []}
+
+    async def _check_sandbox(self, code: str, sandbox_executor: Any) -> dict[str, Any]:
+        """Layer 6: Execute code in sandbox and check for runtime errors."""
+        try:
+            result = await sandbox_executor.execute_code(code)
+            if result.timed_out:
+                return {"passed": False, "issues": ["Code timed out in sandbox execution"]}
+            if not result.success:
+                stderr_preview = result.stderr[:200] if result.stderr else "unknown error"
+                return {"passed": False, "issues": [f"Sandbox execution failed: {stderr_preview}"]}
+            return {"passed": True, "issues": []}
+        except Exception as e:
+            return {"passed": False, "issues": [f"Sandbox execution error: {e}"]}
+
+    def _check_semantic(self, code: str) -> dict[str, Any]:
+        """Layer 7: Semantic check — verify behavioral invariants via AST analysis."""
+        issues: list[str] = []
+
+        try:
+            tree = ast.parse(code)
+
+            # Check for sys.exit() calls
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    if isinstance(func, ast.Attribute) and func.attr == "exit":
+                        if isinstance(func.value, ast.Name) and func.value.id == "sys":
+                            issues.append("Code contains sys.exit() — not allowed in mutations")
+
+            # Check for empty function bodies (pass-only)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    body = node.body
+                    if len(body) == 1 and isinstance(body[0], ast.Pass):
+                        issues.append(f"Function '{node.name}' has empty body (pass only)")
+                    elif len(body) == 1:
+                        # Check for docstring-only bodies
+                        if (isinstance(body[0], ast.Expr)
+                                and isinstance(body[0].value, ast.Constant)
+                                and isinstance(body[0].value.value, str)):
+                            issues.append(f"Function '{node.name}' has docstring-only body")
+
+            # Check that code has at least one function or class definition
+            has_definition = any(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                for node in ast.walk(tree)
+            )
+            if not has_definition and len(code.splitlines()) > 5:
+                issues.append("Mutation code has no function or class definitions")
+
+        except SyntaxError:
+            issues.append("Cannot perform semantic check due to syntax error")
 
         if issues:
             return {"passed": False, "issues": issues}

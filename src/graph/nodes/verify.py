@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from src.graph.enums import Confidence, Phase
+from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.state import AgentState
 
 if TYPE_CHECKING:
@@ -155,7 +155,7 @@ async def _llm_verify(
 
         response = await gateway.acompletion(
             messages=messages,
-            model="gpt-4o-mini-2024-07-18",
+            complexity=TaskComplexity.SIMPLE,
         )
 
         extractor = StructuredOutputManager()

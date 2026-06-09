@@ -23,7 +23,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY
+from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY, ModelTier
 from src.config.settings import Settings
 from src.llm.cache import PromptCache
 from src.llm.cost_tracker import CostTracker
@@ -44,6 +44,13 @@ _TRANSIENT_ERRORS = (
 
 # Max retries for transient errors
 _MAX_RETRIES = 3
+
+# Tier ordering for cheaper fallback selection
+_TIER_ORDER: dict[ModelTier, int] = {
+    ModelTier.VERY_CHEAP: 0,
+    ModelTier.CHEAP: 1,
+    ModelTier.MODERATE: 2,
+}
 
 
 class LLMGateway:
@@ -427,17 +434,20 @@ class LLMGateway:
         if not spec:
             return None
 
-        # Find models in cheaper tiers
-        cheaper_tiers = []
-        if spec.tier.value >= 2:
-            cheaper_tiers.append("tier_1_standard")
-        if spec.tier.value >= 1:
-            cheaper_tiers.append("tier_0_micro")
+        current_order = _TIER_ORDER.get(spec.tier, 0)
+        if current_order == 0:
+            return None  # Already cheapest tier
 
-        for tier_key in cheaper_tiers:
-            chain = FALLBACK_CHAINS.get(tier_key, [])
-            if chain:
-                return chain[0]
+        # Walk fallback chain first — prefer provider diversity
+        for fb in FALLBACK_CHAINS.get(model, []):
+            fb_spec = MODEL_REGISTRY.get(fb)
+            if fb_spec and _TIER_ORDER.get(fb_spec.tier, 0) < current_order:
+                return fb
+
+        # Scan registry for any cheaper model
+        for mid, mspec in MODEL_REGISTRY.items():
+            if mid != model and _TIER_ORDER.get(mspec.tier, 0) < current_order:
+                return mid
 
         return None
 

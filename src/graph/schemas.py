@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from src.graph.enums import Strategy, TaskComplexity
+from src.graph.enums import MutationType, Strategy, TaskComplexity
 
 
 class TaskClassification(BaseModel):
@@ -52,3 +52,13 @@ class VerificationResult(BaseModel):
     gaps: list[str] = Field(default_factory=list, description="Remaining gaps or issues")
     quality_assessment: str = Field(default="", description="Quality of the results")
     should_evolve: bool = Field(default=False, description="Whether evolution could improve results")
+
+
+class MutationProposal(BaseModel):
+    """Structured output from the evolution generate node's LLM call."""
+
+    mutation_type: MutationType = Field(description="Type of mutation to generate")
+    target_path: str | None = Field(default=None, description="File path to modify (relative to src/)")
+    mutated_content: str = Field(description="The complete modified code or prompt text")
+    description: str = Field(description="What this mutation changes")
+    rationale: str = Field(default="", description="Why this change should improve performance")

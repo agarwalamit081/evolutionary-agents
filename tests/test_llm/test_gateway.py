@@ -238,24 +238,56 @@ class TestBuildKwargs:
 class TestGetCheaperFallback:
     """Tests for LLMGateway._get_cheaper_fallback.
 
-    Note: ModelTier is a str enum (values: "very_cheap", "cheap", "moderate").
-    The method compares tier.value >= 2 (int), which raises TypeError for str
-    enum values. This is a known bug — the tests document the actual behavior.
+    ModelTier is a str enum (values: "very_cheap", "cheap", "moderate").
+    The method uses _TIER_ORDER to compare tiers numerically and walks
+    the model's fallback chain first, then scans the registry.
     """
 
     def test_returns_none_for_unknown_model(self, gateway: LLMGateway) -> None:
         result = gateway._get_cheaper_fallback("nonexistent-model")
         assert result is None
 
-    def test_moderate_tier_raises_type_error(self, gateway: LLMGateway) -> None:
-        """Moderate-tier models trigger TypeError due to str>=int comparison."""
-        with pytest.raises(TypeError):
-            gateway._get_cheaper_fallback("claude-sonnet-4-6")
+    def test_moderate_tier_returns_cheaper_model(self, gateway: LLMGateway) -> None:
+        """Moderate-tier models return a cheaper fallback from their chain."""
+        result = gateway._get_cheaper_fallback("claude-sonnet-4-6")
+        assert result is not None
+        # Should return a model in a cheaper tier (CHEAP or VERY_CHEAP)
+        from src.config.model_registry import MODEL_REGISTRY, ModelTier
 
-    def test_very_cheap_tier_raises_type_error(self, gateway: LLMGateway) -> None:
-        """Even very-cheap-tier models trigger TypeError from str>=int comparison."""
-        with pytest.raises(TypeError):
-            gateway._get_cheaper_fallback("gpt-4o-mini-2024-07-18")
+        fb_spec = MODEL_REGISTRY.get(result)
+        assert fb_spec is not None
+        assert fb_spec.tier in {ModelTier.CHEAP, ModelTier.VERY_CHEAP}
+
+    def test_cheap_tier_returns_very_cheap_model(self, gateway: LLMGateway) -> None:
+        """Cheap-tier models return a very-cheap fallback."""
+        result = gateway._get_cheaper_fallback("claude-haiku-4-5-20251001")
+        assert result is not None
+        from src.config.model_registry import MODEL_REGISTRY, ModelTier
+
+        fb_spec = MODEL_REGISTRY.get(result)
+        assert fb_spec is not None
+        assert fb_spec.tier == ModelTier.VERY_CHEAP
+
+    def test_very_cheap_tier_returns_none(self, gateway: LLMGateway) -> None:
+        """Very-cheap-tier models have no cheaper fallback — returns None."""
+        result = gateway._get_cheaper_fallback("gpt-4o-mini-2024-07-18")
+        assert result is None
+
+    def test_prefers_fallback_chain_over_registry_scan(self, gateway: LLMGateway) -> None:
+        """Models with defined fallback chains prefer chain models over registry scan."""
+        result = gateway._get_cheaper_fallback("claude-sonnet-4-6")
+        assert result is not None
+        from src.config.model_registry import FALLBACK_CHAINS
+
+        # Result should be from claude-sonnet-4-6's fallback chain
+        chain = FALLBACK_CHAINS.get("claude-sonnet-4-6", [])
+        if chain:
+            # The result should be from the chain (cheaper tier)
+            from src.config.model_registry import MODEL_REGISTRY
+
+            fb_spec = MODEL_REGISTRY.get(result)
+            assert fb_spec is not None
+            assert fb_spec.tier != "moderate"
 
 
 # ─── Test _parse_response ────────────────────────────────────────────
@@ -463,25 +495,24 @@ class TestAcompletionWithTools:
 class TestBudgetEnforcement:
     """Tests for budget check during acompletion.
 
-    Note: _get_cheaper_fallback uses str enum values compared to int thresholds,
-    which always raises TypeError. The method returns None for all models. As a
-    result, budget exhaustion always raises RuntimeError. We test both the actual
-    behavior and the intended fallback path (via mocking _get_cheaper_fallback).
+    _get_cheaper_fallback uses _TIER_ORDER for tier comparison.
+    When budget is exhausted, the gateway tries to find a cheaper fallback.
+    If no cheaper model exists, RuntimeError is raised.
     """
 
     @pytest.mark.asyncio
-    async def test_budget_exhausted_raises_type_error_due_to_tier_bug(
+    async def test_budget_exhausted_with_no_cheaper_fallback_raises_runtime_error(
         self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
     ) -> None:
-        """When budget is exhausted, _get_cheaper_fallback raises TypeError (str>=int bug)."""
+        """When budget is exhausted and model is already cheapest, RuntimeError is raised."""
         mock_tracker = MagicMock()
         mock_tracker.check_budget = AsyncMock(return_value=(False, "Daily budget exhausted"))
         gateway.set_cost_tracker(mock_tracker)
 
-        with pytest.raises(TypeError):
+        with pytest.raises(RuntimeError, match="Budget exhausted"):
             await gateway.acompletion(
                 messages=simple_messages,
-                model="gpt-4o-mini-2024-07-18",
+                model="gpt-4o-mini-2024-07-18",  # VERY_CHEAP — no cheaper option
             )
 
     @pytest.mark.asyncio

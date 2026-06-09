@@ -11,10 +11,10 @@ from src.graph.enums import TaskComplexity
 
 # Mapping from TaskComplexity to model tier and fallback chain key
 COMPLEXITY_TIER_MAP: dict[TaskComplexity, tuple[ModelTier, str]] = {
-    TaskComplexity.TRIVIAL: (ModelTier.VERY_CHEAP, "tier_0_micro"),
-    TaskComplexity.SIMPLE: (ModelTier.CHEAP, "tier_1_standard"),
-    TaskComplexity.COMPLEX: (ModelTier.CHEAP, "tier_1_standard"),
-    TaskComplexity.CRITICAL: (ModelTier.MODERATE, "tier_2_reasoning"),
+    TaskComplexity.TRIVIAL: (ModelTier.VERY_CHEAP, "qwen3.5-flash"),
+    TaskComplexity.SIMPLE: (ModelTier.CHEAP, "claude-haiku-4-5-20251001"),
+    TaskComplexity.COMPLEX: (ModelTier.CHEAP, "claude-haiku-4-5-20251001"),
+    TaskComplexity.CRITICAL: (ModelTier.MODERATE, "claude-sonnet-4-6"),
 }
 
 
@@ -40,7 +40,7 @@ class ModelRouter:
             A model identifier string (litellm format).
         """
         tier, chain_key = COMPLEXITY_TIER_MAP.get(
-            complexity, (ModelTier.CHEAP, "tier_1_standard")
+            complexity, (ModelTier.CHEAP, "claude-haiku-4-5-20251001")
         )
         excluded = (exclude_providers or set()) | self._exclude_providers
 

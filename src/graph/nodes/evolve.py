@@ -68,19 +68,47 @@ async def _run_evolution_engine(
 ) -> dict[str, Any] | None:
     """Run the SelfEvolutionEngine. Returns None on failure."""
     try:
+        from pathlib import Path
+
+        from src.config import get_settings
         from src.evolution.engine import SelfEvolutionEngine
+        from src.evolution.git_tracker import GitTracker
         from src.safety.pipeline import SafetyPipeline
+        from src.sandbox.executor import SandboxExecutor
 
         reflection = state.get("reflection")
         execution_history = state.get("execution_history", [])
 
+        settings = get_settings()
         safety = SafetyPipeline()
         engine = SelfEvolutionEngine(gateway=gateway, safety_pipeline=safety)
 
-        # Run one evolution cycle
+        # Create sandbox executor
+        sandbox: SandboxExecutor | None = None
+        try:
+            sandbox = SandboxExecutor(settings.evolution)
+            await sandbox.ensure_image()
+        except Exception as e:
+            logger.debug(f"Sandbox executor not available: {e}")
+            sandbox = None
+
+        # Create git tracker for shadow repo
+        git_tracker: GitTracker | None = None
+        try:
+            source_dir = Path(getattr(settings.evolution, "evolution_source_dir", "src"))
+            repo_dir = Path(getattr(settings.evolution, "evolution_shadow_repo_path", ".turing/evolution-repo"))
+            git_tracker = GitTracker(source_dir=source_dir, repo_dir=repo_dir)
+            await git_tracker.initialize()
+        except Exception as e:
+            logger.debug(f"Git tracker not available: {e}")
+            git_tracker = None
+
+        # Run one evolution cycle with full pipeline
         cycle_result = await engine.run_cycle(
             execution_history=execution_history,
             reflection=reflection,
+            sandbox=sandbox,
+            git_tracker=git_tracker,
         )
 
         evolution_record = {
@@ -88,15 +116,18 @@ async def _run_evolution_engine(
             "trigger": "reflection_recommended",
             "summary": reflection.summary if reflection else "no reflection",
             "lessons": reflection.lessons_learned if reflection else [],
-            "outcome": "completed",
+            "outcome": cycle_result.get("status", "unknown"),
             "mutations_proposed": cycle_result.get("mutations_proposed", 0),
             "mutations_deployed": cycle_result.get("mutations_deployed", 0),
+            "commit_hash": cycle_result.get("deployment", {}).get("commit_hash"),
+            "rationale": cycle_result.get("proposal", {}).get("rationale", ""),
         }
 
         logger.info(
             f"Evolution cycle complete: "
             f"{evolution_record['mutations_proposed']} proposed, "
-            f"{evolution_record['mutations_deployed']} deployed"
+            f"{evolution_record['mutations_deployed']} deployed, "
+            f"status={evolution_record['outcome']}"
         )
 
         return {

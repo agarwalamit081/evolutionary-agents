@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from src.graph.enums import Confidence, Phase
+from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.models import ReflectionResult
 from src.graph.state import AgentState
 
@@ -153,7 +153,7 @@ async def _llm_reflect(
 
         response = await gateway.acompletion(
             messages=messages,
-            model="gpt-4o-mini-2024-07-18",
+            complexity=TaskComplexity.COMPLEX,
         )
 
         extractor = StructuredOutputManager()

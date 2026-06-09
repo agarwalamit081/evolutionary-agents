@@ -221,6 +221,11 @@ class EvolutionSettings(BaseSettings):
     evolution_max_mutations: int = 5
     evolution_sandbox_timeout: int = 30  # Seconds
     evolution_require_human_approval: bool = True
+    evolution_sandbox_memory_mb: int = 256
+    evolution_sandbox_image: str = "python:3.12-slim"
+    evolution_sandbox_mode: Literal["docker", "subprocess"] = "docker"
+    evolution_shadow_repo_path: str = ".turing/evolution-repo"
+    evolution_source_dir: str = "src"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -233,6 +238,7 @@ class EvolutionSettings(BaseSettings):
         "evolution_interval",
         "evolution_max_mutations",
         "evolution_sandbox_timeout",
+        "evolution_sandbox_memory_mb",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:

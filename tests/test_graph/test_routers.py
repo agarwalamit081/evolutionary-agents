@@ -232,3 +232,85 @@ class TestRouteAfterHitl:
         sample_state["is_complete"] = False
         result = route_after_hitl(sample_state)
         assert result == "execute"
+
+
+class TestRouteAfterReflectAgentGaps:
+    """Tests for agent gap routing in route_after_reflect."""
+
+    def test_route_after_reflect_agent_gaps(self, sample_state: dict[str, Any]) -> None:
+        """Routes to agent_spawn when pending_agent_gaps present."""
+        sample_state["pending_agent_gaps"] = ["Need data analysis specialist"]
+        result = route_after_reflect(sample_state)
+        assert result == "agent_spawn"
+
+    def test_route_after_reflect_agent_gaps_before_tool_gaps(self, sample_state: dict[str, Any]) -> None:
+        """Agent gaps take priority over tool gaps."""
+        sample_state["pending_agent_gaps"] = ["Need specialist"]
+        sample_state["pending_tool_gaps"] = ["missing_tool"]
+        result = route_after_reflect(sample_state)
+        # Agent gaps have higher priority
+        assert result == "agent_spawn"
+
+    def test_route_after_reflect_tool_gaps_when_no_agent_gaps(self, sample_state: dict[str, Any]) -> None:
+        """Routes to tool_create when only tool gaps present."""
+        sample_state["pending_agent_gaps"] = []
+        sample_state["pending_tool_gaps"] = ["missing_tool"]
+        result = route_after_reflect(sample_state)
+        assert result == "tool_create"
+
+
+class TestRouteAfterAgentSpawn:
+    """Tests for route_after_agent_spawn routing function."""
+
+    def test_route_after_agent_spawn_with_spawned(self, sample_state: dict[str, Any]) -> None:
+        """Routes to delegate when sub_agents_spawned non-empty."""
+        from src.graph.routers import route_after_agent_spawn
+
+        sample_state["sub_agents_spawned"] = [
+            {"name": "agent1", "id": "id1"},
+            {"name": "agent2", "id": "id2"},
+        ]
+        result = route_after_agent_spawn(sample_state)
+        assert result == "delegate"
+
+    def test_route_after_agent_spawn_empty(self, sample_state: dict[str, Any]) -> None:
+        """Routes to plan when no agents spawned."""
+        from src.graph.routers import route_after_agent_spawn
+
+        sample_state["sub_agents_spawned"] = []
+        result = route_after_agent_spawn(sample_state)
+        assert result == "plan"
+
+
+class TestRouteAfterDelegate:
+    """Tests for route_after_delegate routing function."""
+
+    def test_route_after_delegate_all_success(self, sample_state: dict[str, Any]) -> None:
+        """Routes to verify when all delegation_results successful."""
+        from src.graph.routers import route_after_delegate
+
+        sample_state["delegation_results"] = [
+            {"success": True, "result": "Done"},
+            {"success": True, "result": "Also done"},
+        ]
+        result = route_after_delegate(sample_state)
+        assert result == "verify"
+
+    def test_route_after_delegate_some_failure(self, sample_state: dict[str, Any]) -> None:
+        """Routes to execute when any delegation fails."""
+        from src.graph.routers import route_after_delegate
+
+        sample_state["delegation_results"] = [
+            {"success": True, "result": "Done"},
+            {"success": False, "errors": ["Failed"]},
+        ]
+        result = route_after_delegate(sample_state)
+        assert result == "execute"
+
+    def test_route_after_delegate_empty_results(self, sample_state: dict[str, Any]) -> None:
+        """Routes to verify when delegation_results is empty."""
+        from src.graph.routers import route_after_delegate
+
+        sample_state["delegation_results"] = []
+        result = route_after_delegate(sample_state)
+        assert result == "verify"

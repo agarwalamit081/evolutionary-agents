@@ -75,6 +75,27 @@ class SubAgentSpec(BaseModel):
     status: GoalStatus = GoalStatus.PENDING
     result: str | None = None
 
+    # ── Persistent sub-agent fields ────────────────────────────────────
+    name: str = ""
+    description: str = ""
+    template_type: str = "fixed"  # "fixed" or "custom"
+    tool_scope: str = "inherit_all"  # "inherit_all", "inherit_subset", "self_create"
+    tool_subset: list[str] = Field(default_factory=list)
+    budget_mode: str = "shared"  # "shared" or "separate"
+    budget_limit: float = 0.0
+    depth_limit: int = 0  # 0 = no recursion
+    node_config: dict[str, Any] = Field(default_factory=dict)
+    system_prompt_override: str | None = None
+    version: int = 1
+    is_active: bool = True
+
+    # Rolling performance metrics
+    total_runs: int = 0
+    success_rate: float = 0.0
+    avg_cost: float = 0.0
+    avg_latency_ms: int = 0
+    quality_score: float = Field(default=0.5, ge=0.0, le=1.0)
+
 
 class ReflectionResult(BaseModel):
     """Result of self-reflection on execution."""

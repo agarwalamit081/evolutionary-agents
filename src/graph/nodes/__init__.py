@@ -1,6 +1,8 @@
 """Graph nodes package — all node functions for the task execution graph."""
 
+from src.graph.nodes.agent_spawn import agent_spawn_node
 from src.graph.nodes.classify import classify_node
+from src.graph.nodes.delegate import delegate_node
 from src.graph.nodes.error_handler import error_handler_node
 from src.graph.nodes.evolve import evolve_node
 from src.graph.nodes.execute import execute_node
@@ -23,4 +25,6 @@ __all__ = [
     "hitl_gate_node",
     "error_handler_node",
     "tool_create_node",
+    "agent_spawn_node",
+    "delegate_node",
 ]

@@ -103,6 +103,12 @@ async def _run_agent(
     if tools is not None:
         await _load_dynamic_tools(tools)
 
+    # Load active sub-agents from database
+    from src.agents.registry import SubAgentRegistry
+
+    sub_agent_registry = SubAgentRegistry()
+    await _load_sub_agents(sub_agent_registry)
+
     # Create checkpointer if possible
     checkpointer = await _create_checkpointer(settings)
 
@@ -112,6 +118,7 @@ async def _run_agent(
         memory=memory,
         tools=tools,
         checkpointer=checkpointer,
+        sub_agent_registry=sub_agent_registry,
     )
 
     logger.info(f"Starting agent with goal: {goal_text[:80]}")
@@ -190,6 +197,26 @@ async def _load_dynamic_tools(tools: object) -> None:
             logger.info(f"Loaded {len(loaded)} dynamic tools from DB: {', '.join(loaded)}")
     except Exception as e:
         logger.debug(f"Dynamic tool loading skipped: {e}")
+
+
+async def _load_sub_agents(registry: object) -> None:
+    """Load previously created sub-agents from the database.
+
+    Best-effort — non-fatal if the database is unavailable.
+    """
+    try:
+        from src.agents.persister import SubAgentPersister
+        from src.agents.registry import SubAgentRegistry
+
+        if not isinstance(registry, SubAgentRegistry):
+            return
+
+        persister = SubAgentPersister()
+        loaded = await persister.load_active_agents(registry)
+        if loaded:
+            logger.info(f"Loaded {len(loaded)} sub-agents from DB: {', '.join(loaded)}")
+    except Exception as e:
+        logger.debug(f"Sub-agent loading skipped: {e}")
 
 
 async def _create_checkpointer(settings: object):

@@ -63,12 +63,19 @@ def route_after_reflect(state: AgentState) -> str:
     """Route after the reflect node.
 
     Returns:
+        "agent_spawn" — sub-agent gaps detected, spawn new sub-agents
         "tool_create" — tool gaps detected, create missing tools
         "verify" — confidence is medium or higher
         "execute" — low confidence, retry execution
         "plan" — reflection suggests replanning
     """
-    # Check for tool gaps first — highest priority
+    # Check for sub-agent gaps first — highest priority
+    pending_agent_gaps = state.get("pending_agent_gaps", [])
+    if pending_agent_gaps:
+        logger.info(f"Sub-agent gaps detected: {pending_agent_gaps}, routing to agent_spawn")
+        return "agent_spawn"
+
+    # Check for tool gaps — second priority
     pending_gaps = state.get("pending_tool_gaps", [])
     if pending_gaps:
         logger.info(f"Tool gaps detected: {pending_gaps}, routing to tool_create")
@@ -233,4 +240,49 @@ def route_after_tool_create(state: AgentState) -> str:
             f"{len(tools_created)} tool(s) created, routing to plan for replanning"
         )
         return "plan"
+    return "execute"
+
+
+def route_after_agent_spawn(state: AgentState) -> str:
+    """Route after the agent_spawn node.
+
+    Returns:
+        "delegate" — sub-agents were spawned, delegate subtasks to them
+        "plan" — no sub-agents spawned, replan without them
+    """
+    sub_agents_spawned = state.get("sub_agents_spawned", [])
+    if sub_agents_spawned:
+        logger.info(
+            f"{len(sub_agents_spawned)} sub-agent(s) spawned, "
+            f"routing to delegate"
+        )
+        return "delegate"
+    logger.info("No sub-agents spawned, routing to plan")
+    return "plan"
+
+
+def route_after_delegate(state: AgentState) -> str:
+    """Route after the delegate node.
+
+    Returns:
+        "verify" — all delegations succeeded, verify results
+        "execute" — some delegations failed, retry execution
+    """
+    delegation_results = state.get("delegation_results", [])
+    if not delegation_results:
+        return "verify"
+
+    all_success = all(r.get("success", False) for r in delegation_results)
+    if all_success:
+        logger.info(
+            f"All {len(delegation_results)} delegation(s) succeeded, "
+            f"routing to verify"
+        )
+        return "verify"
+
+    failed = sum(1 for r in delegation_results if not r.get("success", False))
+    logger.warning(
+        f"{failed}/{len(delegation_results)} delegation(s) failed, "
+        f"routing to execute"
+    )
     return "execute"

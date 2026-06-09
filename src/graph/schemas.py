@@ -46,6 +46,10 @@ class ReflectionAnalysis(BaseModel):
         default_factory=list,
         description="Capabilities/tools the agent needed but did not have",
     )
+    missing_sub_agents: list[str] = Field(
+        default_factory=list,
+        description="Descriptions of specialized sub-agents that would help",
+    )
 
 
 class VerificationResult(BaseModel):
@@ -66,3 +70,27 @@ class MutationProposal(BaseModel):
     mutated_content: str = Field(description="The complete modified code or prompt text")
     description: str = Field(description="What this mutation changes")
     rationale: str = Field(default="", description="Why this change should improve performance")
+
+
+# ── Sub-Agent Schemas ──────────────────────────────────────────────────
+
+
+class SubAgentProposal(BaseModel):
+    """Structured output from agent_spawn node's LLM call."""
+
+    name: str = Field(description="Snake_case sub-agent name (e.g. data_analyst)")
+    description: str = Field(description="What this sub-agent specializes in")
+    template_type: str = Field(default="fixed", description="fixed or custom")
+    tool_scope: str = Field(default="inherit_all", description="inherit_all, inherit_subset, or self_create")
+    tool_subset: list[str] = Field(default_factory=list, description="Tool names if inherit_subset")
+    model_tier: str = Field(default="simple", description="trivial, simple, complex, or critical")
+    goal_description: str = Field(description="The subtask category this agent handles")
+    rationale: str = Field(description="Why a dedicated sub-agent is needed")
+
+
+class DelegationPlan(BaseModel):
+    """Structured output from delegate node's LLM call for agent selection."""
+
+    sub_agent_name: str = Field(description="Name of sub-agent to delegate to")
+    goal: str = Field(description="Specific subtask goal")
+    expected_output: str = Field(description="What the sub-agent should produce")

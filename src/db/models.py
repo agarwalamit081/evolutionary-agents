@@ -564,6 +564,143 @@ class ToolVersion(Base):
 
 
 # =============================================================================
+# Sub-Agent Domain
+# =============================================================================
+
+
+class SubAgentModel(Base):
+    """Sub-agent definitions with configuration, versioning, and rolling performance metrics."""
+
+    __tablename__ = "sub_agent_definitions"
+
+    id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # ── Configuration ────────────────────────────────────────────────────
+    template_type: Mapped[str] = mapped_column(
+        Text, nullable=False, default="fixed"
+    )  # "fixed" or "custom"
+    tool_scope: Mapped[str] = mapped_column(
+        Text, nullable=False, default="inherit_all"
+    )  # "inherit_all", "inherit_subset", "self_create"
+    tool_subset: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    budget_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, default="shared"
+    )  # "shared" or "separate"
+    budget_limit: Mapped[float] = mapped_column(
+        Numeric(10, 6), nullable=False, default=0
+    )
+    model_tier: Mapped[str] = mapped_column(
+        Text, nullable=False, default="simple"
+    )  # TaskComplexity value
+    max_iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    depth_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # ── Custom subgraph config (for template_type="custom") ──────────────
+    node_config: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    system_prompt_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── Rolling performance metrics ──────────────────────────────────────
+    total_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_cost: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    avg_latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+
+    # ── Lifecycle ────────────────────────────────────────────────────────
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    source_mutation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("mutations.id"), nullable=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    # Relationships
+    runs: Mapped[list[SubAgentRunModel]] = relationship(
+        back_populates="sub_agent", cascade="all, delete-orphan"
+    )
+    source_mutation: Mapped[Mutation | None] = relationship()
+
+    # Indexes and constraints
+    __table_args__ = (
+        CheckConstraint(
+            "success_rate BETWEEN 0 AND 1", name="check_sa_success_rate"
+        ),
+        CheckConstraint(
+            "quality_score BETWEEN 0 AND 1", name="check_sa_quality_score"
+        ),
+        Index(
+            "idx_sub_agents_active",
+            "name",
+            postgresql_where="is_active = true",
+        ),
+        Index("idx_sub_agents_template", "template_type"),
+        Index(
+            "idx_sub_agents_performance",
+            "success_rate",
+            postgresql_where="is_active = true",
+        ),
+    )
+
+
+class SubAgentRunModel(Base):
+    """Individual sub-agent execution records for performance tracking."""
+
+    __tablename__ = "sub_agent_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
+    sub_agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sub_agent_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    parent_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("task_executions.id"), nullable=True
+    )
+    parent_thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # ── Input/Output ─────────────────────────────────────────────────────
+    goal_text: Mapped[str] = mapped_column(Text, nullable=False)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── Execution metrics ────────────────────────────────────────────────
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending"
+    )  # pending, running, completed, failed, timeout
+    iterations_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tokens_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # ── Quality assessment ───────────────────────────────────────────────
+    quality_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    extra_data: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    completed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Relationships
+    sub_agent: Mapped[SubAgentModel] = relationship(back_populates="runs")
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_sub_agent_runs_agent", "sub_agent_id", "created_at"),
+        Index("idx_sub_agent_runs_parent", "parent_thread_id"),
+        Index("idx_sub_agent_runs_status", "status"),
+    )
+
+
+# =============================================================================
 # Knowledge Graph Domain
 # =============================================================================
 

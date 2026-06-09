@@ -77,6 +77,30 @@ class SelfEvolutionEngine:
             "priority": "low",
         })
 
+        # Analyze sub-agent performance for optimization
+        sub_agent_metrics = []
+        for record in execution_history:
+            if isinstance(record, dict) and "sub_agent_metrics" in record:
+                sub_agent_metrics.extend(record["sub_agent_metrics"])
+        for metric in sub_agent_metrics:
+            name = metric.get("name", "unknown")
+            success_rate = metric.get("success_rate", 1.0)
+            avg_cost = metric.get("avg_cost", 0.0)
+            if success_rate < 0.6:
+                opportunities.append({
+                    "type": MutationType.SUB_AGENT_CONFIG,
+                    "description": f"Optimize sub-agent '{name}' (success_rate={success_rate:.2f})",
+                    "priority": "high",
+                    "target_sub_agent": name,
+                })
+            if avg_cost > 0.05:
+                opportunities.append({
+                    "type": MutationType.SUB_AGENT_MODEL_TIER,
+                    "description": f"Reduce cost for sub-agent '{name}' (avg_cost=${avg_cost:.4f})",
+                    "priority": "medium",
+                    "target_sub_agent": name,
+                })
+
         return {
             "opportunities": opportunities,
             "performance_metrics": {
@@ -193,6 +217,10 @@ class SelfEvolutionEngine:
             generate_config_tuning,
             generate_memory_config,
             generate_prompt_improvement,
+            generate_sub_agent_config_mutation,
+            generate_sub_agent_model_tier_mutation,
+            generate_sub_agent_prompt_mutation,
+            generate_sub_agent_tool_mutation,
             generate_tool_config,
             generate_workflow_config,
         )
@@ -213,6 +241,14 @@ class SelfEvolutionEngine:
             template = generate_code_improvement(description, current_content)
         elif mutation_type == MutationType.CONFIG:
             template = generate_config_tuning(description)
+        elif mutation_type == MutationType.SUB_AGENT_PROMPT:
+            template = generate_sub_agent_prompt_mutation(opportunity)
+        elif mutation_type == MutationType.SUB_AGENT_TOOLS:
+            template = generate_sub_agent_tool_mutation(opportunity)
+        elif mutation_type == MutationType.SUB_AGENT_CONFIG:
+            template = generate_sub_agent_config_mutation(opportunity)
+        elif mutation_type == MutationType.SUB_AGENT_MODEL_TIER:
+            template = generate_sub_agent_model_tier_mutation(opportunity)
         else:
             template = generate_prompt_improvement(patterns, current_content)
 
@@ -288,7 +324,9 @@ class SelfEvolutionEngine:
 
         # Non-code mutations (prompts, configs) cannot be executed in a sandbox
         mutation_type = proposal.get("mutation_type")
-        if mutation_type in (MutationType.PROMPT, MutationType.CONFIG, MutationType.MEMORY):
+        if mutation_type in (MutationType.PROMPT, MutationType.CONFIG, MutationType.MEMORY,
+                            MutationType.SUB_AGENT_PROMPT, MutationType.SUB_AGENT_TOOLS,
+                            MutationType.SUB_AGENT_CONFIG, MutationType.SUB_AGENT_MODEL_TIER):
             logger.debug(f"Skipping sandbox for {mutation_type} mutation (non-executable)")
             return {"passed": True, "note": f"non-code mutation ({mutation_type}), sandbox skipped"}
 
@@ -342,7 +380,9 @@ class SelfEvolutionEngine:
 
         # Non-code mutations cannot be meaningfully A/B tested in a sandbox
         mutation_type = proposal.get("mutation_type")
-        if mutation_type in (MutationType.PROMPT, MutationType.CONFIG, MutationType.MEMORY):
+        if mutation_type in (MutationType.PROMPT, MutationType.CONFIG, MutationType.MEMORY,
+                            MutationType.SUB_AGENT_PROMPT, MutationType.SUB_AGENT_TOOLS,
+                            MutationType.SUB_AGENT_CONFIG, MutationType.SUB_AGENT_MODEL_TIER):
             logger.debug(f"Skipping A/B test for {mutation_type} mutation (non-executable)")
             return {"is_significant": True, "note": f"non-code mutation ({mutation_type}), A/B test skipped"}
 

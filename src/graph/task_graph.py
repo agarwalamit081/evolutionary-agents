@@ -19,7 +19,9 @@ from typing import TYPE_CHECKING, Any
 from langgraph.graph import END, START, StateGraph
 
 from src.graph.nodes import (
+    agent_spawn_node,
     classify_node,
+    delegate_node,
     error_handler_node,
     evolve_node,
     execute_node,
@@ -32,6 +34,8 @@ from src.graph.nodes import (
     verify_node,
 )
 from src.graph.routers import (
+    route_after_agent_spawn,
+    route_after_delegate,
     route_after_error,
     route_after_evolve,
     route_after_execute,
@@ -44,6 +48,7 @@ from src.graph.routers import (
 from src.graph.state import AgentState
 
 if TYPE_CHECKING:
+    from src.agents.registry import SubAgentRegistry
     from src.llm.gateway import LLMGateway
     from src.memory.manager import MemoryManager
     from src.tools.registry import ToolRegistry
@@ -77,6 +82,7 @@ def build_task_graph(
     gateway: LLMGateway | None = None,
     memory: MemoryManager | None = None,
     tools: ToolRegistry | None = None,
+    sub_agent_registry: SubAgentRegistry | None = None,
 ) -> StateGraph:
     """Build the task execution StateGraph with injected dependencies.
 
@@ -84,6 +90,7 @@ def build_task_graph(
         gateway: LLMGateway for LLM calls. None = heuristic fallback.
         memory: MemoryManager for 3-tier memory. None = stub behavior.
         tools: ToolRegistry for tool execution. None = no tool calls.
+        sub_agent_registry: SubAgentRegistry for sub-agent delegation.
 
     Returns:
         StateGraph ready for compilation.
@@ -102,6 +109,8 @@ def build_task_graph(
     graph.add_node("evolve", _wrap(evolve_node, gateway=gateway))  # type: ignore[arg-type]
     graph.add_node("store_memory", _wrap(store_memory_node, memory=memory))  # type: ignore[arg-type]
     graph.add_node("tool_create", _wrap(tool_create_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
+    graph.add_node("agent_spawn", _wrap(agent_spawn_node, gateway=gateway, tools=tools, sub_agent_registry=sub_agent_registry))  # type: ignore[arg-type]
+    graph.add_node("delegate", _wrap(delegate_node, gateway=gateway, tools=tools, sub_agent_registry=sub_agent_registry, memory=memory))  # type: ignore[arg-type]
     # No deps needed for HITL and error handler
     graph.add_node("hitl_gate", hitl_gate_node)  # type: ignore[arg-type]
     graph.add_node("error_handler", error_handler_node)  # type: ignore[arg-type]
@@ -120,14 +129,25 @@ def build_task_graph(
     })
 
     graph.add_conditional_edges("reflect", route_after_reflect, {
+        "agent_spawn": "agent_spawn",
+        "tool_create": "tool_create",
         "verify": "verify",
         "execute": "execute",
         "plan": "plan",
-        "tool_create": "tool_create",
     })
 
     graph.add_conditional_edges("tool_create", route_after_tool_create, {
         "plan": "plan",
+        "execute": "execute",
+    })
+
+    graph.add_conditional_edges("agent_spawn", route_after_agent_spawn, {
+        "delegate": "delegate",
+        "plan": "plan",
+    })
+
+    graph.add_conditional_edges("delegate", route_after_delegate, {
+        "verify": "verify",
         "execute": "execute",
     })
 
@@ -169,6 +189,7 @@ def compile_task_graph(
     tools: ToolRegistry | None = None,
     checkpointer: Any = None,
     interrupt_before: list[str] | None = None,
+    sub_agent_registry: Any = None,
 ) -> Any:
     """Build and compile the task graph with dependencies and optional checkpointing.
 
@@ -178,11 +199,17 @@ def compile_task_graph(
         tools: ToolRegistry for tool execution.
         checkpointer: AsyncPostgresSaver or similar for state persistence.
         interrupt_before: Node names to pause before execution (e.g., ["hitl_gate"]).
+        sub_agent_registry: SubAgentRegistry for sub-agent delegation.
 
     Returns:
         Compiled StateGraph ready for invocation.
     """
-    graph = build_task_graph(gateway=gateway, memory=memory, tools=tools)
+    graph = build_task_graph(
+        gateway=gateway,
+        memory=memory,
+        tools=tools,
+        sub_agent_registry=sub_agent_registry,
+    )
 
     compile_kwargs: dict[str, Any] = {}
     if checkpointer is not None:

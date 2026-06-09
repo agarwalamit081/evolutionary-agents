@@ -65,8 +65,11 @@ class AgentState(TypedDict, total=False):
     pending_tool_gaps: Annotated[list[str], operator.add]
     tools_created: Annotated[list[dict[str, Any]], operator.add]
 
-    # ─── Sub-Agents ─────────────────────────────────────────────────────
+    # ─── Sub-Agent Delegation ──────────────────────────────────────────
     sub_agents: list[SubAgentSpec]
+    pending_agent_gaps: Annotated[list[str], operator.add]
+    sub_agents_spawned: Annotated[list[dict[str, Any]], operator.add]
+    delegation_results: Annotated[list[dict[str, Any]], operator.add]
 
     # ─── Cost & Budget ──────────────────────────────────────────────────
     total_tokens_used: int

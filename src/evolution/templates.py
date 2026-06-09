@@ -358,3 +358,166 @@ def generate_config_tuning(
         "target_path": "evolution/config_tuning.json",
         "rationale": rationale,
     }
+
+
+# ─── Sub-Agent Mutation Templates ───────────────────────────────────────
+
+
+def generate_sub_agent_prompt_mutation(
+    opportunity: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate a prompt override mutation for a sub-agent.
+
+    Improves the system_prompt_override to be more specific based on
+    observed failure patterns.
+
+    Args:
+        opportunity: Dict with 'target_sub_agent' and 'description'.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    agent_name = opportunity.get("target_sub_agent", "unknown")
+    description = opportunity.get("description", "")
+
+    content = {
+        "mutation_type": "sub_agent_prompt",
+        "target_sub_agent": agent_name,
+        "system_prompt_override": (
+            f"You are a specialized sub-agent for {agent_name} tasks. "
+            f"Focus on accuracy and completeness. "
+            f"If a step fails, analyze the error and try an alternative approach. "
+            f"Always return structured, concise results."
+        ),
+        "generation_source": "heuristic",
+    }
+
+    rationale = (
+        f"Updated system prompt for sub-agent '{agent_name}' to improve "
+        f"accuracy and error recovery. Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": f"evolution/sub_agent_{agent_name}_prompt.json",
+        "rationale": rationale,
+    }
+
+
+def generate_sub_agent_tool_mutation(
+    opportunity: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate a tool set adjustment mutation for a sub-agent.
+
+    Expands or restricts the tool_subset based on the opportunity.
+
+    Args:
+        opportunity: Dict with 'target_sub_agent' and 'description'.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    agent_name = opportunity.get("target_sub_agent", "unknown")
+    description = opportunity.get("description", "")
+
+    content = {
+        "mutation_type": "sub_agent_tools",
+        "target_sub_agent": agent_name,
+        "tool_scope": "inherit_all",
+        "rationale": (
+            f"Expanded tool access to inherit_all to give sub-agent "
+            f"'{agent_name}' more flexibility in completing tasks."
+        ),
+        "generation_source": "heuristic",
+    }
+
+    rationale = (
+        f"Expanded tool set for sub-agent '{agent_name}' from inherit_subset "
+        f"to inherit_all. Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": f"evolution/sub_agent_{agent_name}_tools.json",
+        "rationale": rationale,
+    }
+
+
+def generate_sub_agent_config_mutation(
+    opportunity: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate a configuration adjustment mutation for a sub-agent.
+
+    Adjusts max_iterations, depth_limit, or other config parameters.
+
+    Args:
+        opportunity: Dict with 'target_sub_agent' and 'description'.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    agent_name = opportunity.get("target_sub_agent", "unknown")
+    description = opportunity.get("description", "")
+
+    content = {
+        "mutation_type": "sub_agent_config",
+        "target_sub_agent": agent_name,
+        "max_iterations": 15,
+        "depth_limit": 0,
+        "rationale": (
+            f"Increased max_iterations to 15 to allow sub-agent '{agent_name}' "
+            f"more time to complete complex subtasks."
+        ),
+        "generation_source": "heuristic",
+    }
+
+    rationale = (
+        f"Config adjustment for sub-agent '{agent_name}': "
+        f"increased max_iterations to 15. Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": f"evolution/sub_agent_{agent_name}_config.json",
+        "rationale": rationale,
+    }
+
+
+def generate_sub_agent_model_tier_mutation(
+    opportunity: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate a model tier downgrade mutation for a sub-agent.
+
+    Reduces cost by downgrading model tier when performance allows.
+
+    Args:
+        opportunity: Dict with 'target_sub_agent' and 'description'.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    agent_name = opportunity.get("target_sub_agent", "unknown")
+    description = opportunity.get("description", "")
+
+    # Downgrade from complex to simple, or simple to trivial
+    content = {
+        "mutation_type": "sub_agent_model_tier",
+        "target_sub_agent": agent_name,
+        "model_tier": "simple",
+        "rationale": (
+            f"Downgraded model tier for sub-agent '{agent_name}' to 'simple' "
+            f"to reduce cost while maintaining acceptable performance."
+        ),
+        "generation_source": "heuristic",
+    }
+
+    rationale = (
+        f"Model tier downgrade for sub-agent '{agent_name}' to 'simple' "
+        f"for cost reduction. Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": f"evolution/sub_agent_{agent_name}_tier.json",
+        "rationale": rationale,
+    }

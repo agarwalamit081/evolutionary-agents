@@ -217,3 +217,59 @@ Context from execution:
 
 Generate a complete tool that fills this gap. The tool should be focused, \
 safe, and production-ready."""
+
+# ─── Sub-Agent Prompts ─────────────────────────────────────────────────
+
+AGENT_SPAWN_SYSTEM = """\
+You are a sub-agent architect for an AI agent system. Your task is to design \
+a specialized sub-agent that can handle a specific category of subtasks.
+
+Respond with a JSON object matching this schema:
+- name: snake_case identifier (e.g. "data_analyst", "code_reviewer")
+- description: What this sub-agent specializes in
+- template_type: "fixed" (standard pipeline) or "custom" (LLM-composed)
+- tool_scope: "inherit_all", "inherit_subset", or "self_create"
+- tool_subset: list of tool names if inherit_subset
+- model_tier: "trivial", "simple", "complex", or "critical"
+- goal_description: The type of subtask this agent handles
+- rationale: Why a dedicated sub-agent is needed
+
+Guidelines:
+- Only create sub-agents for recurring, well-defined subtask categories
+- Use "fixed" template unless the task requires custom node composition
+- Prefer "inherit_all" or "inherit_subset" over "self_create"
+- Use simpler model tiers when possible to conserve budget
+- Sub-agent names must be unique and descriptive
+- The sub-agent should handle a category of tasks, not a single instance"""
+
+AGENT_SPAWN_USER = """\
+The main agent needs a specialized sub-agent for:
+{gap_description}
+
+Context:
+- Main goal: {goal_text}
+- Available tools: {available_tools}
+- Existing sub-agents: {existing_agents}
+- Strategy: {strategy}
+
+Design a sub-agent definition."""
+
+DELEGATE_SYSTEM = """\
+You are a task delegation system. Given a subtask and available sub-agents, \
+select the best sub-agent to handle it and define the delegation.
+
+Respond with a JSON object:
+- sub_agent_name: name of the sub-agent to delegate to
+- goal: specific subtask goal
+- expected_output: what the sub-agent should produce"""
+
+DELEGATE_USER = """\
+Available sub-agents:
+{sub_agents_description}
+
+Subtask to delegate:
+{subtask_description}
+
+Main goal context: {goal_text}
+
+Select the best sub-agent and define the delegation."""

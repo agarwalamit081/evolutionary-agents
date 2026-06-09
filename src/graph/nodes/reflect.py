@@ -129,6 +129,12 @@ def _heuristic_reflect(
     if missing_tools:
         result["pending_tool_gaps"] = missing_tools
 
+    # Detect sub-agent gaps: complex multi-part tasks with 6+ steps suggest
+    # the need for specialized sub-agents to handle independent subtask categories
+    missing_agents = _detect_agent_gaps_heuristic(state, goal_text, plan_steps)
+    if missing_agents:
+        result["pending_agent_gaps"] = missing_agents
+
     return result
 
 
@@ -222,7 +228,46 @@ async def _llm_reflect(
         if analysis.missing_tools:
             result["pending_tool_gaps"] = analysis.missing_tools
 
+        # Propagate missing sub-agent gaps identified by LLM
+        if analysis.missing_sub_agents:
+            result["pending_agent_gaps"] = analysis.missing_sub_agents
+
         return result
     except Exception as e:
         logger.debug(f"LLM reflection failed, using heuristics: {e}")
         return None
+
+
+def _detect_agent_gaps_heuristic(
+    state: AgentState,
+    goal_text: str,
+    plan_steps: list[Any],
+) -> list[str]:
+    """Detect heuristically whether sub-agents would help.
+
+    Triggers when:
+    - Goal contains multi-part indicators ("and", "then", "also", "combine")
+    - Plan has 6+ steps suggesting multiple independent subtasks
+    - Not already using sub-agents (checked via state)
+
+    Returns:
+        List of sub-agent gap descriptions.
+    """
+    # Skip if sub-agents already spawned this run
+    if state.get("sub_agents_spawned"):
+        return []
+
+    gaps: list[str] = []
+
+    # Multi-part goal detection
+    multi_part_indicators = [" and ", " then ", " also ", " as well as ", " combine "]
+    goal_lower = goal_text.lower()
+    multi_part_count = sum(1 for indicator in multi_part_indicators if indicator in goal_lower)
+
+    if multi_part_count >= 2 and len(plan_steps) >= 6:
+        gaps.append(
+            f"multi-part task with {len(plan_steps)} steps — "
+            f"specialized sub-agents for independent subtask categories"
+        )
+
+    return gaps

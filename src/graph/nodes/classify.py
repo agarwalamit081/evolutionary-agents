@@ -76,7 +76,7 @@ async def classify_node(
                 f"LLM classification: complexity={complexity.value}, "
                 f"strategy={strategy.value}, "
                 f"steps={estimated_steps}, "
-                f"confidence={confidence:.2f}"
+                f"confidence={confidence.value}"
             )
         else:
             complexity, strategy, estimated_steps = _heuristic_classify(goal_text.lower())

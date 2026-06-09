@@ -54,9 +54,19 @@ async def run_agent(request: RunRequest) -> RunResponse:
         logger.debug("LLMGateway not available for API request")
 
     try:
+        import redis.asyncio as aioredis
+
+        from src.db.session import get_session
         from src.memory.manager import MemoryManager
 
-        memory = MemoryManager(settings)
+        redis_client = aioredis.from_url(settings.redis.redis_url)
+        async for db_session in get_session():
+            memory = MemoryManager(
+                redis_client=redis_client,
+                db_session=db_session,
+                settings=settings,
+            )
+            break
     except Exception:
         logger.debug("MemoryManager not available for API request")
 

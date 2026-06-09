@@ -20,8 +20,8 @@ async def retrieve_memory_node(
 ) -> dict[str, Any]:
     """Retrieve relevant memories for the current goal.
 
-    Queries the memory system for context relevant to the task.
-    When a MemoryManager is provided, queries all 3 tiers.
+    When a MemoryManager is provided, queries all 3 tiers (Redis hot,
+    PostgreSQL warm, pgvector cold) for context relevant to the task.
 
     Args:
         state: Current agent state.
@@ -35,12 +35,28 @@ async def retrieve_memory_node(
 
     logger.info(f"Retrieving memories for: {goal_text[:60]}...")
 
-    # Placeholder: return empty memories until MemoryManager is integrated
-    # In production, this would:
-    # 1. Query Redis hot cache for recent context
-    # 2. Query PostgreSQL warm memory for relevant skills/procedures
-    # 3. Query pgvector cold memory for semantic similarity search
     retrieved: list[dict[str, Any]] = []
+
+    if memory is not None:
+        try:
+            results = await memory.retrieve_context(query=goal_text, limit=5)
+            if results:
+                retrieved = [
+                    {"content": r.content, "tier": r.tier, "score": r.score}
+                    for r in results
+                    if hasattr(r, "content")
+                ]
+                # Fallback: results might be plain dicts
+                if not retrieved and isinstance(results, list):
+                    retrieved = [
+                        r if isinstance(r, dict) else {"content": str(r)}
+                        for r in results[:5]
+                    ]
+                logger.info(f"Retrieved {len(retrieved)} memories from 3-tier system")
+        except Exception as e:
+            logger.warning(f"Memory retrieval failed: {e}")
+    else:
+        logger.debug("No MemoryManager available, returning empty memories")
 
     return {
         "phase": Phase.EXECUTE,
@@ -55,8 +71,8 @@ async def store_memory_node(
 ) -> dict[str, Any]:
     """Store execution learnings and observations to memory.
 
-    Persists lessons learned, skill observations, and execution metadata.
-    When a MemoryManager is provided, stores across all 3 tiers.
+    When a MemoryManager is provided, persists observations as hot
+    memories and lessons learned as warm memories.
 
     Args:
         state: Current agent state with reflection and observations.
@@ -77,11 +93,34 @@ async def store_memory_node(
         f"{lessons_count} lessons learned"
     )
 
-    # Placeholder: memory storage happens here in production
-    # 1. Store hot observations in Redis with TTL
-    # 2. Consolidate important observations to PostgreSQL warm memory
-    # 3. Generate embeddings and store in pgvector cold memory
-    # 4. Update knowledge graph with new entities/relations
+    if memory is not None:
+        stored_count = 0
+
+        # Store each observation as hot memory
+        for obs in memory_observations:
+            try:
+                await memory.store_observation(
+                    content=obs,
+                    metadata={"source": "reflection", "complete": is_complete},
+                )
+                stored_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to store observation: {e}")
+
+        # Store lessons learned as warm memory skills
+        if reflection and reflection.lessons_learned:
+            try:
+                await memory.store_skill(
+                    name=f"lesson_{stored_count}",
+                    content="; ".join(reflection.lessons_learned),
+                    metadata={"type": "lesson", "goal": str(state.get("current_goal", ""))[:100]},
+                )
+            except Exception as e:
+                logger.warning(f"Failed to store lessons: {e}")
+
+        logger.info(f"Stored {stored_count}/{observations_count} observations to memory")
+    else:
+        logger.debug("No MemoryManager available, skipping memory storage")
 
     return {
         "phase": Phase.COMPLETE if is_complete else Phase.HITL_GATE,

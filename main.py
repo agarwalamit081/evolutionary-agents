@@ -96,7 +96,7 @@ async def _run_agent(
 
     # Instantiate dependencies
     gateway = _create_gateway(settings)
-    memory = _create_memory_manager(settings)
+    memory = await _async_create_memory_manager(settings)
     tools = _create_tool_registry()
 
     # Compile graph with injected dependencies
@@ -125,11 +125,29 @@ def _create_gateway(settings: object):
 
 
 def _create_memory_manager(settings: object):
-    """Create MemoryManager if Redis and PostgreSQL are available."""
+    """Create MemoryManager if Redis and PostgreSQL are available.
+
+    Note: Returns a coroutine that must be awaited.
+    """
+    return _async_create_memory_manager(settings)
+
+
+async def _async_create_memory_manager(settings: object):
+    """Async factory for MemoryManager."""
     try:
+        import redis.asyncio as aioredis
+
+        from src.db.session import get_session
         from src.memory.manager import MemoryManager
 
-        return MemoryManager(settings)
+        redis_client = aioredis.from_url(settings.redis.redis_url)
+        async for db_session in get_session():
+            return MemoryManager(
+                redis_client=redis_client,
+                db_session=db_session,
+                settings=settings,
+            )
+        return None
     except Exception:
         logger.debug("MemoryManager not available, using stub memory")
         return None

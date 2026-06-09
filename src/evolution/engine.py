@@ -150,7 +150,7 @@ class SelfEvolutionEngine:
                 {"role": "user", "content": user_prompt},
             ]
 
-            response = await self._gateway.acompletion(
+            response = await self._gateway.acompletion(  # type: ignore[union-attr]
                 messages=messages,
                 complexity=TaskComplexity.COMPLEX,
             )
@@ -435,7 +435,7 @@ class SelfEvolutionEngine:
                 commit_hash = await git_tracker.snapshot(
                     f"evolution: {proposal.get('description', 'mutation')}"
                 )
-                logger.info(f"Mutation committed to shadow repo: {commit_hash[:8]}")
+                logger.info(f"Mutation committed to shadow repo: {commit_hash[:8]}")  # type: ignore[union-attr]
             except Exception as e:
                 logger.warning(f"Git tracker failed during deploy: {e}")
                 commit_hash = None

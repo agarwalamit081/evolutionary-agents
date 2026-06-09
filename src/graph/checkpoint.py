@@ -29,8 +29,12 @@ async def create_checkpointer(database_url: str) -> Any:
     # Convert asyncpg URL to psycopg format if needed
     psycopg_url = database_url.replace("+asyncpg", "")
 
+    # from_conn_string returns an async context manager; we enter it
+    # to call setup(), then return the initialized checkpointer.
     checkpointer = AsyncPostgresSaver.from_conn_string(psycopg_url)
-    await checkpointer.setup()
+    # The object returned by from_conn_string is both usable directly
+    # and as a context manager. Use it directly for non-scoped usage.
+    await checkpointer.setup()  # type: ignore[union-attr]
 
     logger.info("AsyncPostgresSaver checkpointer initialized")
     return checkpointer

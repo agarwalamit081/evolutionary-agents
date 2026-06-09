@@ -124,7 +124,7 @@ class CostTracker:
         registry or registry entry lacks cost fields.
         """
         spec = MODEL_REGISTRY.get(model)
-        if spec and hasattr(spec, "input_cost_per_1k") and hasattr(spec, "output_cost_per_1k"):
+        if spec and spec.input_cost_per_1k > 0 and spec.output_cost_per_1k > 0:
             cost = (input_tokens * spec.input_cost_per_1k / 1000) + (
                 output_tokens * spec.output_cost_per_1k / 1000
             )

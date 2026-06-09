@@ -107,12 +107,13 @@ class SandboxExecutor:
 
         try:
             import docker
+            import docker.errors as docker_errors
 
             client = await asyncio.to_thread(docker.from_env)
             try:
                 await asyncio.to_thread(client.images.get, self._image)
                 logger.debug("Docker image already available: {}", self._image)
-            except docker.errors.ImageNotFound:
+            except docker_errors.ImageNotFound:
                 logger.info("Pulling Docker image: {} ...", self._image)
                 await asyncio.to_thread(client.images.pull, self._image)
                 logger.info("Docker image pulled: {}", self._image)
@@ -143,7 +144,7 @@ class SandboxExecutor:
 
         try:
             import docker
-            import docker.errors
+            import docker.errors as docker_errors
         except ImportError:
             logger.warning(
                 "docker package not installed — falling back to subprocess mode"
@@ -239,7 +240,7 @@ class SandboxExecutor:
                     timed_out=True,
                 )
 
-        except docker.errors.DockerException as exc:
+        except docker_errors.DockerException as exc:
             duration = time.monotonic() - start
             logger.error("Docker error in sandbox: {}", exc)
             return SandboxResult(

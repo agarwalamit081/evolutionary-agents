@@ -181,6 +181,7 @@ class BudgetSettings(BaseSettings):
 
     daily_token_budget: int = 500000
     per_task_token_limit: int = 100000
+    max_cost_usd: float = 10.0
     budget_warn_threshold: float = 0.70
     budget_critical_threshold: float = 0.90
 

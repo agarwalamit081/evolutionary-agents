@@ -32,6 +32,8 @@ class ModelSpec(NamedTuple):
     supports_json_mode: bool
     supports_streaming: bool
     supports_images: bool
+    input_cost_per_1k: float = 0.0
+    output_cost_per_1k: float = 0.0
 
 
 # ─── Canonical Model Registry ──────────────────────────────────────

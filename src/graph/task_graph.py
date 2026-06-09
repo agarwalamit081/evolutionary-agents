@@ -89,17 +89,19 @@ def build_task_graph(
     graph = StateGraph(AgentState)
 
     # ─── Add Nodes (with dependency injection) ────────────────────────
-    graph.add_node("classify", _wrap(classify_node, gateway=gateway))
-    graph.add_node("plan", _wrap(plan_node, gateway=gateway))
-    graph.add_node("retrieve_memory", _wrap(retrieve_memory_node, memory=memory))
-    graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools))
-    graph.add_node("reflect", _wrap(reflect_node, gateway=gateway))
-    graph.add_node("verify", _wrap(verify_node, gateway=gateway))
-    graph.add_node("evolve", _wrap(evolve_node, gateway=gateway))
-    graph.add_node("store_memory", _wrap(store_memory_node, memory=memory))
+    # LangGraph's StateNode type is strict about signatures; our closure
+    # wrappers match at runtime but Pyright can't verify that statically.
+    graph.add_node("classify", _wrap(classify_node, gateway=gateway))  # type: ignore[arg-type]
+    graph.add_node("plan", _wrap(plan_node, gateway=gateway))  # type: ignore[arg-type]
+    graph.add_node("retrieve_memory", _wrap(retrieve_memory_node, memory=memory))  # type: ignore[arg-type]
+    graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
+    graph.add_node("reflect", _wrap(reflect_node, gateway=gateway))  # type: ignore[arg-type]
+    graph.add_node("verify", _wrap(verify_node, gateway=gateway))  # type: ignore[arg-type]
+    graph.add_node("evolve", _wrap(evolve_node, gateway=gateway))  # type: ignore[arg-type]
+    graph.add_node("store_memory", _wrap(store_memory_node, memory=memory))  # type: ignore[arg-type]
     # No deps needed for HITL and error handler
-    graph.add_node("hitl_gate", hitl_gate_node)
-    graph.add_node("error_handler", error_handler_node)
+    graph.add_node("hitl_gate", hitl_gate_node)  # type: ignore[arg-type]
+    graph.add_node("error_handler", error_handler_node)  # type: ignore[arg-type]
 
     # ─── Linear Edges (START → execute) ────────────────────────────────
     graph.add_edge(START, "classify")

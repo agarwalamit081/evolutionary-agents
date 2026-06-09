@@ -42,14 +42,14 @@ async def retrieve_memory_node(
             results = await memory.retrieve_context(query=goal_text, limit=5)
             if results:
                 retrieved = [
-                    {"content": r.content, "tier": r.tier, "score": r.score}
+                    {"content": r.get("content", ""), "tier": r.get("tier", ""), "score": r.get("score", 0.0)}
                     for r in results
-                    if hasattr(r, "content")
+                    if isinstance(r, dict) and "content" in r
                 ]
-                # Fallback: results might be plain dicts
-                if not retrieved and isinstance(results, list):
+                # Fallback: results might be plain objects
+                if not retrieved:
                     retrieved = [
-                        r if isinstance(r, dict) else {"content": str(r)}
+                        {"content": str(r)}
                         for r in results[:5]
                     ]
                 logger.info(f"Retrieved {len(retrieved)} memories from 3-tier system")
@@ -101,7 +101,7 @@ async def store_memory_node(
             try:
                 await memory.store_observation(
                     content=obs,
-                    metadata={"source": "reflection", "complete": is_complete},
+                    tags=["reflection", "complete" if is_complete else "incomplete"],
                 )
                 stored_count += 1
             except Exception as e:
@@ -113,7 +113,7 @@ async def store_memory_node(
                 await memory.store_skill(
                     name=f"lesson_{stored_count}",
                     content="; ".join(reflection.lessons_learned),
-                    metadata={"type": "lesson", "goal": str(state.get("current_goal", ""))[:100]},
+                    tags=["lesson", str(state.get("current_goal", ""))[:50]],
                 )
             except Exception as e:
                 logger.warning(f"Failed to store lessons: {e}")

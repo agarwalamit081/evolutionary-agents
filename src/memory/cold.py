@@ -8,7 +8,7 @@ import sqlalchemy as sa
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import ColdMemory
+from src.db.models import ColdMemory as ColdMemoryModel
 
 
 class ColdMemory:
@@ -45,7 +45,7 @@ class ColdMemory:
         import uuid
 
         memory_id = str(uuid.uuid4())
-        entry = ColdMemory(
+        entry = ColdMemoryModel(
             id=uuid.UUID(memory_id),
             episode_type=episode_type,
             content=content,
@@ -78,23 +78,22 @@ class ColdMemory:
             List of similar memories with similarity scores.
         """
         # Use cosine distance via pgvector
-
-        distance = ColdMemory.embedding.cosine_distance(query_embedding)
+        distance = ColdMemoryModel.embedding.cosine_distance(query_embedding)
         query = (
             sa.select(
-                ColdMemory,
+                ColdMemoryModel,
                 distance.label("distance"),
             )
             .where(
-                ColdMemory.embedding.isnot(None),
-                ColdMemory.importance >= min_importance,
+                ColdMemoryModel.embedding.isnot(None),
+                ColdMemoryModel.importance >= min_importance,
             )
             .order_by(distance)
             .limit(limit)
         )
 
         if episode_type:
-            query = query.where(ColdMemory.episode_type == episode_type)
+            query = query.where(ColdMemoryModel.episode_type == episode_type)
 
         result = await self._session.execute(query)
         rows = result.all()
@@ -106,7 +105,7 @@ class ColdMemory:
                 "content": row[0].content,
                 "importance": row[0].importance,
                 "context_tags": row[0].context_tags,
-                "similarity": 1.0 - float(row[1]),  # Convert distance to similarity
+                "similarity": 1.0 - float(row[1]),
             }
             for row in rows
         ]
@@ -125,11 +124,10 @@ class ColdMemory:
         Returns:
             List of matching memories.
         """
-        # JSONB contains any match
         query = (
-            sa.select(ColdMemory)
-            .where(ColdMemory.context_tags.bool_op("?|")(tags))
-            .order_by(ColdMemory.importance.desc())
+            sa.select(ColdMemoryModel)
+            .where(ColdMemoryModel.context_tags.bool_op("?|")(tags))
+            .order_by(ColdMemoryModel.importance.desc())
             .limit(limit)
         )
 
@@ -167,9 +165,9 @@ class ColdMemory:
 
         # Decay importance of old memories
         result = await self._session.execute(
-            sa.select(ColdMemory).where(
-                ColdMemory.created_at < cutoff,
-                ColdMemory.importance > min_importance,
+            sa.select(ColdMemoryModel).where(
+                ColdMemoryModel.created_at < cutoff,
+                ColdMemoryModel.importance > min_importance,
             )
         )
         old_entries = result.scalars().all()

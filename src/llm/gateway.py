@@ -34,12 +34,12 @@ from src.llm.rate_limiter import RateLimiterRegistry
 from src.llm.structured_output import StructuredOutputManager
 
 
-# Transient errors that warrant retry
+# Transient errors that warrant retry (litellm exposes these at runtime)
 _TRANSIENT_ERRORS = (
-    litellm.RateLimitError,
-    litellm.Timeout,
-    litellm.ServiceUnavailableError,
-    litellm.APIConnectionError,
+    litellm.RateLimitError,  # type: ignore[attr-defined]
+    litellm.Timeout,  # type: ignore[attr-defined]
+    litellm.ServiceUnavailableError,  # type: ignore[attr-defined]
+    litellm.APIConnectionError,  # type: ignore[attr-defined]
 )
 
 # Max retries for transient errors
@@ -118,6 +118,8 @@ class LLMGateway:
             model = self._model_router.route(complexity)
         elif model is None:
             model = self._model_router.route(TaskComplexity.SIMPLE)
+
+        assert model is not None  # guaranteed by routing logic
 
         provider = self._extract_provider(model)
 
@@ -202,6 +204,8 @@ class LLMGateway:
         elif model is None:
             model = self._model_router.route(TaskComplexity.SIMPLE)
 
+        assert model is not None  # guaranteed by routing logic
+
         provider = self._extract_provider(model)
         await self._rate_limiter.acquire(provider, self._estimate_tokens(messages))
 
@@ -213,7 +217,7 @@ class LLMGateway:
                 stream=True,
                 **kwargs,
             )
-            async for chunk in response:
+            async for chunk in response:  # type: ignore[union-attr]
                 delta = chunk.choices[0].delta.content
                 if delta:
                     yield delta
@@ -229,7 +233,7 @@ class LLMGateway:
                         stream=True,
                         **fb_kwargs,
                     )
-                    async for chunk in response:
+                    async for chunk in response:  # type: ignore[union-attr]
                         delta = chunk.choices[0].delta.content
                         if delta:
                             yield delta
@@ -286,7 +290,7 @@ class LLMGateway:
         self,
         messages: list[dict[str, Any]],
         model: str,
-        provider: str,
+        provider: str,  # noqa: ARG002 — kept for caller API compat
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
         temperature: float = 0.5,
@@ -328,7 +332,7 @@ class LLMGateway:
                     f"LLM call failed for {attempt_model}: {exc.__class__.__name__}: {exc}"
                 )
                 continue
-            except (litellm.AuthenticationError, litellm.BadRequestError) as exc:
+            except (litellm.AuthenticationError, litellm.BadRequestError) as exc:  # type: ignore[attr-defined]
                 logger.error(f"Non-retryable error for {attempt_model}: {exc}")
                 continue
             except Exception as exc:
@@ -345,7 +349,7 @@ class LLMGateway:
         stop=stop_after_attempt(_MAX_RETRIES),
         wait=wait_exponential_jitter(initial=1, max=30, jitter=2),
         before_sleep=lambda state: logger.warning(
-            f"Retrying LLM call (attempt {state.attempt_number}): {state.outcome.exception()}"
+            f"Retrying LLM call (attempt {state.attempt_number}): {state.outcome.exception()}"  # type: ignore[union-attr]
         ),
     )
     async def _retry_call(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
@@ -466,7 +470,7 @@ class LLMGateway:
 
     def _configure_litellm(self) -> None:
         """Configure litellm global settings."""
-        litellm.set_verbose = False
+        litellm.set_verbose = False  # type: ignore[attr-defined]
         litellm.drop_params = True  # Drop unsupported params instead of erroring
         litellm.success_callback = []
         litellm.failure_callback = []

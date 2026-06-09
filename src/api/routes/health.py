@@ -42,7 +42,7 @@ async def ready() -> dict[str, Any]:
 
         settings = get_settings()
         client = aioredis.from_url(settings.redis.redis_url)
-        await client.ping()
+        await client.ping()  # type: ignore[union-attr]
         await client.aclose()
         checks["redis"] = True
     except Exception:

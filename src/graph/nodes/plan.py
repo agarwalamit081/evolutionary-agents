@@ -7,8 +7,8 @@ from uuid import uuid4
 
 from loguru import logger
 
-from src.graph.enums import GoalStatus, Phase, Strategy
-from src.graph.models import PlanStep
+from src.graph.enums import GoalStatus, Phase, Strategy, TaskComplexity
+from src.graph.models import Goal, PlanStep
 from src.graph.state import AgentState
 
 if TYPE_CHECKING:
@@ -63,7 +63,7 @@ async def plan_node(
 
 async def _llm_plan(
     gateway: LLMGateway,
-    goal: object,
+    goal: Goal,
     strategy: Strategy,
     state: AgentState,
 ) -> list[PlanStep] | None:
@@ -102,10 +102,8 @@ async def _llm_plan(
         if plan is None or not plan.steps:
             return None
 
-        from src.graph.enums import GoalStatus
-
         steps: list[PlanStep] = []
-        for i, gen_step in enumerate(plan.steps):
+        for gen_step in plan.steps:
             steps.append(PlanStep(
                 id=uuid4().hex[:8],
                 description=gen_step.description,

@@ -4,5 +4,7 @@
   "pythonVersion": "3.12",
   "typeCheckingMode": "basic",
   "reportMissingImports": true,
-  "reportMissingTypeStubs": false
+  "reportMissingTypeStubs": false,
+  "extraPaths": ["."],
+  "pythonPath": "/home/amiagarw/aiml01/bin/python"
 }

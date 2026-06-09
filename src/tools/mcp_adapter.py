@@ -41,10 +41,10 @@ class MCPToolAdapter:
             from langchain_mcp_adapters.client import MultiServerMCPClient
 
             client = MultiServerMCPClient(
-                {server_name: {"command": server_command[0], "args": server_command[1:], "env": env}},
+                {server_name: {"command": server_command[0], "args": server_command[1:], "env": env}},  # type: ignore[arg-type]
             )
 
-            tools = client.get_tools()
+            tools = await client.get_tools()  # type: ignore[misc]
             registered: list[str] = []
 
             for tool in tools:
@@ -55,7 +55,7 @@ class MCPToolAdapter:
                     name=name,
                     handler=self._wrap_mcp_tool(client, tool.name),
                     description=description,
-                    parameters=tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                    parameters=tool.inputSchema if hasattr(tool, "inputSchema") else getattr(tool, "args_schema", {}),  # type: ignore[union-attr]
                 )
                 registered.append(name)
 

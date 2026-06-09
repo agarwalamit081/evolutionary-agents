@@ -675,6 +675,7 @@ class CostLedger(Base):
     model: Mapped[str] = mapped_column(Text, nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cached_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

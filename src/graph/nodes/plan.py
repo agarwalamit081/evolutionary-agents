@@ -43,8 +43,13 @@ async def plan_node(
 
     logger.info(f"Planning for goal (strategy={strategy.value}): {goal.text[:80]}...")
 
-    # Generate plan steps based on strategy
-    plan_steps = _generate_plan(goal.text, strategy)
+    # Try LLM planning first, fall back to heuristics
+    plan_steps: list[PlanStep] | None = None
+    if gateway is not None:
+        plan_steps = await _llm_plan(gateway, goal, strategy, state)
+
+    if plan_steps is None:
+        plan_steps = _generate_plan(goal.text, strategy)
 
     logger.info(f"Generated {len(plan_steps)} plan steps")
 
@@ -54,6 +59,64 @@ async def plan_node(
         "current_step_index": 0,
         "iteration_count": iteration_count + 1,
     }
+
+
+async def _llm_plan(
+    gateway: LLMGateway,
+    goal: object,
+    strategy: Strategy,
+    state: AgentState,
+) -> list[PlanStep] | None:
+    """Attempt LLM-based plan generation. Returns None on failure."""
+    try:
+        from src.graph.prompts import PLAN_SYSTEM, PLAN_USER
+        from src.graph.schemas import GeneratedPlan
+        from src.llm.structured_output import StructuredOutputManager
+
+        # Build memory context if available
+        memories = state.get("retrieved_memories", [])
+        memory_ctx = ""
+        if memories:
+            memory_ctx = "\nRelevant context from memory:\n" + "\n".join(
+                f"- {m}" for m in memories[:5]
+            )
+
+        user_prompt = PLAN_USER.format(
+            goal_text=goal.text,
+            strategy=strategy.value,
+            complexity=goal.complexity.value if goal.complexity else "simple",
+            estimated_steps="auto",
+            memory_context=memory_ctx,
+        )
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": PLAN_SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ]
+        response = await gateway.acompletion(
+            messages=messages,
+            model="gpt-4o-mini-2024-07-18",
+        )
+
+        extractor = StructuredOutputManager()
+        plan = await extractor.extract(response.content, GeneratedPlan)
+        if plan is None or not plan.steps:
+            return None
+
+        from src.graph.enums import GoalStatus
+
+        steps: list[PlanStep] = []
+        for i, gen_step in enumerate(plan.steps):
+            steps.append(PlanStep(
+                id=uuid4().hex[:8],
+                description=gen_step.description,
+                status=GoalStatus.PENDING,
+            ))
+
+        logger.info(f"LLM generated {len(steps)} plan steps")
+        return steps
+    except Exception as e:
+        logger.debug(f"LLM planning failed, using heuristics: {e}")
+        return None
 
 
 def _generate_plan(goal_text: str, strategy: Strategy) -> list[PlanStep]:

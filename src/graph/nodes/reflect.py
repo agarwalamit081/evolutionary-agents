@@ -22,29 +22,44 @@ async def reflect_node(
     """Perform self-reflection on the execution so far.
 
     Evaluates completed steps, tool results, and progress toward the goal.
-    Determines whether to continue, replan, or trigger evolution.
+    When gateway is provided, uses LLM for deeper analysis.
+    Otherwise falls back to heuristic reflection.
 
     Args:
         state: Current agent state with execution results.
+        gateway: Optional LLM gateway for LLM-enhanced reflection.
 
     Returns:
         Partial state update with reflection results.
     """
     goal = state.get("current_goal")
     completed_steps = state.get("completed_steps", [])
-    tool_results = state.get("tool_results", [])
     errors = state.get("errors", [])
 
     goal_text = goal.text if goal else "Unknown goal"
     logger.info(f"Reflecting on execution of: {goal_text[:60]}...")
 
-    # Calculate completion ratio
+    # Try LLM reflection first, fall back to heuristics
+    if gateway is not None:
+        result = await _llm_reflect(gateway, state)
+        if result is not None:
+            return result
+
+    return _heuristic_reflect(state, goal_text, completed_steps, errors)
+
+
+def _heuristic_reflect(
+    state: AgentState,
+    goal_text: str,
+    completed_steps: list[Any],
+    errors: list[str],
+) -> dict[str, Any]:
+    """Heuristic-based reflection using completion ratios."""
     plan_steps = state.get("plan_steps", [])
     total_steps = len(plan_steps) if plan_steps else 1
     completed_count = len(completed_steps) if completed_steps else 0
     completion_ratio = completed_count / total_steps if total_steps > 0 else 0.0
 
-    # Determine confidence based on progress
     has_errors = bool(errors)
     if has_errors:
         confidence = Confidence.LOW
@@ -55,7 +70,6 @@ async def reflect_node(
     else:
         confidence = Confidence.LOW
 
-    # Build reflection result
     lessons: list[str] = []
     memory_obs: list[str] = []
 
@@ -66,10 +80,7 @@ async def reflect_node(
         lessons.append(f"Encountered {len(errors)} errors during execution")
         memory_obs.append(f"Error pattern: {errors[-1][:100] if errors else 'none'}")
 
-    # Determine if replanning is needed
     should_replan = completion_ratio < 0.3 and has_errors
-
-    # Determine if evolution should be triggered
     should_evolve = (
         completion_ratio >= 0.5
         and confidence in {Confidence.HIGH, Confidence.VERY_HIGH}
@@ -98,3 +109,85 @@ async def reflect_node(
         "confidence": confidence,
         "memory_observations": memory_obs,
     }
+
+
+async def _llm_reflect(
+    gateway: LLMGateway,
+    state: AgentState,
+) -> dict[str, Any] | None:
+    """Attempt LLM-based reflection. Returns None on failure."""
+    try:
+        from src.graph.prompts import REFLECT_SYSTEM, REFLECT_USER
+        from src.graph.schemas import ReflectionAnalysis
+        from src.llm.structured_output import StructuredOutputManager
+
+        goal = state.get("current_goal")
+        completed_steps = state.get("completed_steps", [])
+        plan_steps = state.get("plan_steps", [])
+        errors = state.get("errors", [])
+        tool_results = state.get("tool_results", [])
+
+        goal_text = goal.text if goal else "Unknown goal"
+        total_steps = len(plan_steps) if plan_steps else 1
+        completed_count = len(completed_steps) if completed_steps else 0
+
+        completed_summary = "\n".join(
+            f"- {s.description}" for s in completed_steps[-5:]
+        ) if completed_steps else "None yet"
+
+        errors_summary = "\n".join(f"- {e[:100]}" for e in errors[-3:]) if errors else "None"
+
+        user_prompt = REFLECT_USER.format(
+            goal_text=goal_text,
+            completed_count=completed_count,
+            total_steps=total_steps,
+            completed_summary=completed_summary,
+            error_count=len(errors),
+            errors_summary=errors_summary,
+        )
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": REFLECT_SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        response = await gateway.acompletion(
+            messages=messages,
+            model="gpt-4o-mini-2024-07-18",
+        )
+
+        extractor = StructuredOutputManager()
+        analysis = await extractor.extract(response.content, ReflectionAnalysis)
+        if analysis is None:
+            return None
+
+        # Map LLM confidence to enum
+        conf = Confidence.HIGH if analysis.confidence >= 0.7 else (
+            Confidence.MEDIUM if analysis.confidence >= 0.4 else Confidence.LOW
+        )
+
+        reflection = ReflectionResult(
+            summary=analysis.progress_assessment[:200],
+            lessons_learned=analysis.lessons_learned,
+            confidence=conf,
+            should_evolve=analysis.should_evolve,
+            should_replan=analysis.should_replan,
+            memory_observations=analysis.memory_observations,
+            cost_efficiency=1.0,
+        )
+
+        logger.info(
+            f"LLM Reflection: confidence={conf.value}, "
+            f"should_evolve={analysis.should_evolve}, "
+            f"should_replan={analysis.should_replan}"
+        )
+
+        return {
+            "phase": Phase.VERIFY,
+            "reflection": reflection,
+            "confidence": conf,
+            "memory_observations": analysis.memory_observations,
+        }
+    except Exception as e:
+        logger.debug(f"LLM reflection failed, using heuristics: {e}")
+        return None

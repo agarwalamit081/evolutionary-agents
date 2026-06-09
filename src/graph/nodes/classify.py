@@ -17,7 +17,7 @@ from src.graph.models import Goal
 from src.graph.state import AgentState
 
 if TYPE_CHECKING:
-    pass
+    from src.llm.gateway import LLMGateway
 
 # Heuristic keyword-based classification for fast path
 _COMPLEXITY_KEYWORDS: dict[TaskComplexity, list[str]] = {
@@ -47,8 +47,8 @@ async def classify_node(
 ) -> dict[str, Any]:
     """Classify task complexity and select execution strategy.
 
-    Uses keyword heuristics for fast classification. When a gateway is
-    provided, LLM-based classification can enhance ambiguous cases.
+    When a gateway is provided, uses LLM for classification.
+    Falls back to keyword heuristics when gateway is unavailable.
 
     Args:
         state: Current agent state.
@@ -64,19 +64,28 @@ async def classify_node(
             "errors": ["classify: No goal text provided"],
         }
 
-    goal_text = goal.text.lower()
+    goal_text = goal.text
     logger.info(f"Classifying task: {goal_text[:100]}...")
 
-    # ─── Classify Complexity ────────────────────────────────────────────
-    complexity = _classify_complexity(goal_text)
+    # Try LLM classification first, fall back to heuristics
+    if gateway is not None:
+        result = await _llm_classify(gateway, goal_text)
+        if result is not None:
+            complexity, strategy, estimated_steps, confidence = result
+            logger.info(
+                f"LLM classification: complexity={complexity.value}, "
+                f"strategy={strategy.value}, "
+                f"steps={estimated_steps}, "
+                f"confidence={confidence:.2f}"
+            )
+        else:
+            complexity, strategy, estimated_steps = _heuristic_classify(goal_text.lower())
+            confidence = Confidence.MEDIUM
+    else:
+        complexity, strategy, estimated_steps = _heuristic_classify(goal_text.lower())
+        confidence = Confidence.MEDIUM
 
-    # ─── Select Strategy ────────────────────────────────────────────────
-    strategy = _select_strategy(goal_text)
-
-    # ─── Estimate Steps ─────────────────────────────────────────────────
-    estimated_steps = _estimate_steps(complexity)
-
-    # ─── Build Updated Goal ─────────────────────────────────────────────
+    # Build updated goal
     updated_goal = Goal(
         id=goal.id,
         text=goal.text,
@@ -98,23 +107,68 @@ async def classify_node(
         "phase": Phase.PLAN,
         "current_goal": updated_goal,
         "strategy": strategy,
-        "confidence": Confidence.MEDIUM,
+        "confidence": confidence,
     }
+
+
+async def _llm_classify(
+    gateway: LLMGateway,
+    goal_text: str,
+) -> tuple[TaskComplexity, Strategy, int, Confidence] | None:
+    """Attempt LLM-based classification. Returns None on failure."""
+    try:
+        from src.graph.prompts import CLASSIFY_SYSTEM, CLASSIFY_USER
+        from src.graph.schemas import TaskClassification
+        from src.llm.structured_output import StructuredOutputManager
+
+        user_prompt = CLASSIFY_USER.format(goal_text=goal_text)
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": CLASSIFY_SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ]
+        response = await gateway.acompletion(
+            messages=messages,
+            model="gpt-4o-mini-2024-07-18",
+        )
+
+        extractor = StructuredOutputManager()
+        classification = await extractor.extract(response.content, TaskClassification)
+        if classification is None:
+            return None
+
+        conf = Confidence.HIGH if classification.confidence >= 0.7 else Confidence.MEDIUM
+
+        return (
+            classification.complexity,
+            classification.strategy,
+            classification.estimated_steps,
+            conf,
+        )
+    except Exception as e:
+        logger.debug(f"LLM classification failed, using heuristics: {e}")
+        return None
+
+
+def _heuristic_classify(
+    goal_text: str,
+) -> tuple[TaskComplexity, Strategy, int]:
+    """Classify using keyword heuristics."""
+    complexity = _classify_complexity(goal_text)
+    strategy = _select_strategy(goal_text)
+    estimated_steps = _estimate_steps(complexity)
+    return complexity, strategy, estimated_steps
 
 
 def _classify_complexity(goal_text: str) -> TaskComplexity:
     """Determine task complexity from goal text using keyword matching."""
-    # Check critical first (highest priority)
     for keyword in _COMPLEXITY_KEYWORDS.get(TaskComplexity.CRITICAL, []):
         if keyword in goal_text:
             return TaskComplexity.CRITICAL
 
-    # Check trivial
     for keyword in _COMPLEXITY_KEYWORDS.get(TaskComplexity.TRIVIAL, []):
         if keyword in goal_text:
             return TaskComplexity.TRIVIAL
 
-    # Check for complex indicators
     complex_indicators = [
         "build", "create", "implement", "design", "develop",
         "integrate", "full-stack", "end-to-end", "comprehensive",
@@ -123,7 +177,6 @@ def _classify_complexity(goal_text: str) -> TaskComplexity:
         if keyword in goal_text:
             return TaskComplexity.COMPLEX
 
-    # Default to simple
     return TaskComplexity.SIMPLE
 
 
@@ -134,7 +187,7 @@ def _select_strategy(goal_text: str) -> Strategy:
             if keyword in goal_text:
                 return strategy
 
-    return Strategy.REACT  # Default: ReAct is the most versatile
+    return Strategy.REACT
 
 
 def _estimate_steps(complexity: TaskComplexity) -> int:

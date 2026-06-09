@@ -47,7 +47,7 @@ pyright src/
 
 ```
 START → classify → plan → retrieve_memory → execute ↔ reflect
-  → verify → evolve? → store_memory → hitl? → END
+  → tool_create? → plan → verify → evolve? → store_memory → hitl? → END
 ```
 
 **Dependency injection**: `build_task_graph(gateway, memory, tools)` wraps each node in closures that inject dependencies. When deps are `None`, nodes use heuristic fallback.
@@ -70,7 +70,7 @@ START → classify → plan → retrieve_memory → execute ↔ reflect
 | `src/config/settings.py` | pydantic-settings `BaseSettings` classes for all config |
 | `src/config/model_registry.py` | Model tier definitions and fallback chains |
 | `src/graph/task_graph.py` | Main LangGraph StateGraph with DI pattern |
-| `src/graph/nodes/` | Node functions: classify, plan, execute, reflect, verify, evolve, memory, hitl, error_handler |
+| `src/graph/nodes/` | Node functions: classify, plan, execute, reflect, verify, evolve, tool_create, memory, hitl, error_handler |
 | `src/graph/prompts.py` | Centralized prompt templates for LLM-integrated nodes |
 | `src/graph/schemas.py` | Pydantic models for structured LLM output |
 | `src/graph/routers.py` | Conditional edge routing functions |
@@ -86,6 +86,7 @@ START → classify → plan → retrieve_memory → execute ↔ reflect
 | `src/memory/embeddings.py` | Embedding generation (litellm + hash fallback) |
 | `src/tools/registry.py` | Dynamic tool registry |
 | `src/tools/builtin/` | 7 built-in tools (code_executor, code_validator, web_search, etc.) |
+| `src/tools/dynamic/` | Runtime tool generation (generator, persister, allowlist) |
 | `src/tools/mcp_adapter.py` | MCP server tool integration |
 | `src/evolution/engine.py` | `SelfEvolutionEngine` — 4-phase pipeline |
 | `src/safety/pipeline.py` | 7-layer safety gate |
@@ -103,6 +104,7 @@ START → classify → plan → retrieve_memory → execute ↔ reflect
 - **AsyncPostgresSaver** for LangGraph checkpoints — persistent state across runs
 - **Budget enforcement** — 70% warn, 90% critical, 100% hard-cap with model tier downgrade
 - **Every model has 3-4 fallbacks** across different providers via `FALLBACK_CHAINS`
+- **Runtime tool creation** — Agent detects missing tool capabilities, generates them via LLM with double-barrier security (allowlist + constrained namespace), registers in ToolRegistry, persists to DB. Max 3 tools per run
 
 ## Testing Structure
 

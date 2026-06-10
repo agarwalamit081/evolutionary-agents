@@ -259,6 +259,7 @@ class AgentSettings(BaseSettings):
     max_sub_agents: int = 3
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
+    workspace_root: str = ".turing/workspace"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -334,6 +335,32 @@ class ObservabilitySettings(BaseSettings):
         return v
 
 
+# ─── LangSmith Settings ─────────────────────────────────────────────
+
+
+class LangSmithSettings(BaseSettings):
+    """LangSmith tracing configuration for LangGraph and litellm."""
+
+    langchain_tracing_v2: bool = False
+    langsmith_api_key: Optional[str] = None
+    langsmith_project: str = "turing-agent"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=True,
+    )
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if LangSmith tracing is fully configured."""
+        return self.langchain_tracing_v2 and bool(
+            self.langsmith_api_key and self.langsmith_api_key.strip()
+        )
+
+
 # ─── Root Settings ──────────────────────────────────────────────────
 
 
@@ -349,6 +376,7 @@ class Settings(BaseSettings):
     agent: AgentSettings = AgentSettings()  # type: ignore[assignment]
     logging: LoggingSettings = LoggingSettings()  # type: ignore[assignment]
     observability: ObservabilitySettings = ObservabilitySettings()  # type: ignore[assignment]
+    langsmith: LangSmithSettings = LangSmithSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

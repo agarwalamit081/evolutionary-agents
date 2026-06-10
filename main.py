@@ -16,6 +16,7 @@ import click
 from loguru import logger
 
 from src.config import get_settings
+from src.config.settings import Settings as Settings  # noqa: TC002 — used in annotations
 from src.observability.logging import reset_logging, setup_logging
 
 
@@ -38,7 +39,6 @@ def main(
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
-    os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
     reset_logging()
     settings = get_settings()
     if verbose:
@@ -69,7 +69,7 @@ def main(
 async def _run_agent(
     goal_text: str,
     max_iterations: int = 25,
-    no_evolution: bool = False,
+    no_evolution: bool = False,  # noqa: ARG001 — used in future evolution integration
 ) -> dict:
     """Run the agent graph to completion.
 
@@ -89,6 +89,18 @@ async def _run_agent(
     from src.graph.task_graph import compile_task_graph
 
     settings = get_settings()
+
+    # Configure LangSmith tracing from settings
+    if settings.langsmith.is_configured:
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGSMITH_API_KEY"] = settings.langsmith.langsmith_api_key  # type: ignore[arg-type]
+        os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith.langsmith_project)
+        os.environ.setdefault("LANGSMITH_ENDPOINT", settings.langsmith.langsmith_endpoint)
+        logger.info(
+            f"LangSmith tracing enabled — project: {settings.langsmith.langsmith_project}"
+        )
+    else:
+        os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
     # Create initial state
     thread_id = f"cli-{os.getpid()}-{id(goal_text)}"
@@ -128,7 +140,7 @@ async def _run_agent(
     return dict(result)
 
 
-def _create_gateway(settings: object):
+def _create_gateway(settings: Settings):
     """Create LLMGateway if provider key is available."""
     try:
         from src.llm.gateway import LLMGateway
@@ -139,7 +151,7 @@ def _create_gateway(settings: object):
         return None
 
 
-def _create_memory_manager(settings: object):
+def _create_memory_manager(settings: Settings):  # noqa: ARG001 — public API for sync callers
     """Create MemoryManager if Redis and PostgreSQL are available.
 
     Note: Returns a coroutine that must be awaited.
@@ -147,7 +159,7 @@ def _create_memory_manager(settings: object):
     return _async_create_memory_manager(settings)
 
 
-async def _async_create_memory_manager(settings: object):
+async def _async_create_memory_manager(settings: Settings):
     """Async factory for MemoryManager."""
     try:
         import redis.asyncio as aioredis
@@ -219,7 +231,7 @@ async def _load_sub_agents(registry: object) -> None:
         logger.debug(f"Sub-agent loading skipped: {e}")
 
 
-async def _create_checkpointer(settings: object):
+async def _create_checkpointer(settings: Settings):
     """Create AsyncPostgresSaver checkpointer if PostgreSQL is available."""
     try:
         from src.graph.checkpoint import create_checkpointer

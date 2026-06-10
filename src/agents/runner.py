@@ -147,6 +147,8 @@ def _extract_results(
     spec: SubAgentSpec,
 ) -> dict[str, Any]:
     """Extract structured results from the final sub-agent state."""
+    from src.graph.enums import Confidence
+
     errors = result_state.get("errors", [])
     final_output = result_state.get("final_output", "")
     is_complete = result_state.get("is_complete", False)
@@ -158,8 +160,37 @@ def _extract_results(
     # Calculate tokens
     total_tokens = result_state.get("total_tokens_used", 0)
 
-    # Determine success
-    success = is_complete and not errors
+    # Determine success based on completion and meaningful output.
+    # Transient errors may accumulate via the Annotated reducer but should not
+    # override a completed sub-agent with useful output. Errors are still
+    # reported in the result for observability.
+    #
+    # The main graph's verify node sets is_complete/final_output, but the
+    # sub-agent subgraph only has classify→plan→execute→reflect→END.
+    # When the subgraph reaches END via reflect with high/medium confidence
+    # and completed steps, treat it as success even without explicit
+    # is_complete/final_output.
+    if not is_complete:
+        completed_steps = result_state.get("completed_steps", [])
+        confidence = result_state.get("confidence", Confidence.LOW)
+        if isinstance(confidence, str):
+            confidence = Confidence(confidence)
+
+        if completed_steps and confidence in {
+            Confidence.HIGH, Confidence.VERY_HIGH, Confidence.MEDIUM,
+        }:
+            is_complete = True
+            if not final_output:
+                reflection = result_state.get("reflection")
+                if reflection and hasattr(reflection, "summary"):
+                    final_output = reflection.summary
+                else:
+                    final_output = (
+                        f"Completed {len(completed_steps)} steps for: "
+                        f"{goal[:100]}"
+                    )
+
+    success = is_complete and bool(final_output)
 
     # Quality: average of cost efficiency from reflection
     reflection = result_state.get("reflection")

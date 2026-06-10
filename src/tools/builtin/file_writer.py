@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from loguru import logger
+
+from src.config.settings import get_settings
 
 
 async def file_writer(
     file_path: str,
     content: str,
-    sandbox_root: str = ".",
+    sandbox_root: Optional[str] = None,
     create_dirs: bool = False,
     encoding: str = "utf-8",
 ) -> str:
@@ -19,14 +22,18 @@ async def file_writer(
     Args:
         file_path: Relative path to the file to write.
         content: Content to write.
-        sandbox_root: Root directory for sandboxing.
+        sandbox_root: Root directory for sandboxing. Defaults to
+            ``settings.agent.workspace_root`` (``.turing/workspace``).
         create_dirs: Create parent directories if they don't exist.
         encoding: File encoding.
 
     Returns:
         Confirmation message or error.
     """
+    if sandbox_root is None:
+        sandbox_root = get_settings().agent.workspace_root
     root = Path(sandbox_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
     target = (root / file_path).resolve()
 
     # Security: prevent path traversal

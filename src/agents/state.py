@@ -15,7 +15,7 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
 
 from src.graph.enums import Confidence, Phase, Strategy
-from src.graph.models import CostRecord, PlanStep, ReflectionResult, ToolResult
+from src.graph.models import CostRecord, Goal, GoalStatus, PlanStep, ReflectionResult, ToolResult
 
 
 class SubAgentState(TypedDict, total=False):
@@ -33,6 +33,7 @@ class SubAgentState(TypedDict, total=False):
 
     # ── Goal & Planning ────────────────────────────────────────────────
     goal_text: str
+    current_goal: Goal  # Matches AgentState field used by all shared node functions
     strategy: Strategy
     plan_steps: list[PlanStep]
     current_step_index: int
@@ -88,6 +89,7 @@ def initial_sub_agent_state(
         iteration_count=0,
         max_iterations=max_iterations,
         goal_text=goal_text,
+        current_goal=Goal(text=goal_text, status=GoalStatus.ACTIVE),
         strategy=Strategy.DIRECT,
         plan_steps=[],
         current_step_index=0,

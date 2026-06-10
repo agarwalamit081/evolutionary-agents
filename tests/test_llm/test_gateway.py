@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,8 +23,8 @@ def _make_settings(**overrides: Any) -> Settings:
 
 
 def _make_litellm_response(
-    content: str = "Hello!",
-    model: str = "gpt-4o-mini-2024-07-18",
+    content: str | None = "Hello!",
+    model: str = "gpt-4o-mini-2024-07-18",  # pyright: ignore[reportUnusedParameter]
     input_tokens: int = 10,
     output_tokens: int = 5,
     tool_calls: list[Any] | None = None,
@@ -598,7 +599,7 @@ class TestFallbackChain:
 
         call_count = 0
 
-        async def _side_effect(**kwargs: Any) -> MagicMock:
+        async def _side_effect(**_kwargs: Any) -> MagicMock:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -632,7 +633,7 @@ class TestFallbackChain:
     ) -> None:
         """When all fallback models fail, RuntimeError is raised."""
 
-        async def _always_fail(**kwargs: Any) -> None:
+        async def _always_fail(**_kwargs: Any) -> None:
             raise Exception("unavailable")
 
         with patch("src.llm.gateway.litellm") as mock_litellm:
@@ -661,7 +662,8 @@ class TestConfigureLitellm:
     """Tests for litellm global configuration during init."""
 
     def test_configure_litellm_sets_flags(self) -> None:
-        with patch("src.llm.gateway.litellm") as mock_litellm:
+        with patch("src.llm.gateway.litellm") as mock_litellm, \
+             patch.dict(os.environ, {"LANGCHAIN_TRACING_V2": "false"}):
             gw = LLMGateway.__new__(LLMGateway)
             gw._settings = _make_settings()
             gw._configure_litellm()
@@ -670,3 +672,14 @@ class TestConfigureLitellm:
         mock_litellm.drop_params = True
         assert mock_litellm.success_callback == []
         assert mock_litellm.failure_callback == []
+
+    def test_configure_litellm_with_langsmith_tracing(self) -> None:
+        """litellm callbacks include langsmith when tracing is enabled."""
+        with patch("src.llm.gateway.litellm") as mock_litellm, \
+             patch.dict(os.environ, {"LANGCHAIN_TRACING_V2": "true"}):
+            gw = LLMGateway.__new__(LLMGateway)
+            gw._settings = _make_settings()
+            gw._configure_litellm()
+
+        assert mock_litellm.success_callback == ["langsmith"]
+        assert mock_litellm.failure_callback == ["langsmith"]

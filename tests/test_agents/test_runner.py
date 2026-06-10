@@ -272,8 +272,8 @@ class TestResultExtraction:
         assert result["goal"] == "test goal"
         assert result["sub_agent_name"] == "test_agent"
 
-    def test_extract_results_with_errors(self) -> None:
-        """_extract_results handles errors."""
+    def test_extract_results_complete_with_transient_errors(self) -> None:
+        """_extract_results succeeds when complete with output despite transient errors."""
         from src.agents.runner import _extract_results
 
         result_state = {
@@ -297,8 +297,8 @@ class TestResultExtraction:
             ),
         )
 
-        assert result["success"] is False  # Errors present
-        assert result["errors"] == ["Some error occurred"]
+        assert result["success"] is True  # Complete with output
+        assert result["errors"] == ["Some error occurred"]  # Errors still reported
 
     def test_extract_results_calculates_cost(self) -> None:
         """_extract_results sums cost from cost_records."""
@@ -373,6 +373,166 @@ class TestResultExtraction:
 
         assert result["success"] is True
         assert result.get("quality_rating") is None
+
+    def test_extract_results_incomplete_with_errors(self) -> None:
+        """_extract_results fails when not complete, even with output."""
+        from src.agents.runner import _extract_results
+
+        result_state = {
+            "final_output": "Partial work",
+            "is_complete": False,
+            "errors": ["Execution timed out"],
+            "cost_records": [],
+            "total_tokens_used": 200,
+            "iteration_count": 5,
+        }
+
+        result = _extract_results(
+            result_state=result_state,
+            latency_ms=5000,
+            goal="test goal",
+            spec=SubAgentSpec(
+                name="test_agent",
+                description="Test",
+                goal="test",
+                parent_thread_id="thread-001",
+            ),
+        )
+
+        assert result["success"] is False
+        assert result["errors"] == ["Execution timed out"]
+
+    def test_extract_results_complete_no_output(self) -> None:
+        """_extract_results fails when complete but no output produced."""
+        from src.agents.runner import _extract_results
+
+        result_state = {
+            "final_output": "",
+            "is_complete": True,
+            "errors": [],
+            "cost_records": [],
+            "total_tokens_used": 50,
+            "iteration_count": 1,
+        }
+
+        result = _extract_results(
+            result_state=result_state,
+            latency_ms=100,
+            goal="test goal",
+            spec=SubAgentSpec(
+                name="test_agent",
+                description="Test",
+                goal="test",
+                parent_thread_id="thread-001",
+            ),
+        )
+
+        assert result["success"] is False  # No output despite completion
+
+    def test_extract_results_complete_with_errors_and_output(self) -> None:
+        """_extract_results succeeds with errors + output + completion (regression)."""
+        from src.agents.runner import _extract_results
+
+        result_state = {
+            "final_output": "Comprehensive security analysis completed",
+            "is_complete": True,
+            "errors": [
+                "Provider fallback: deepseek-v4-flash auth error",
+                "Provider fallback: claude-haiku-4-5 rate limit",
+            ],
+            "cost_records": [],
+            "total_tokens_used": 1500,
+            "iteration_count": 6,
+        }
+
+        result = _extract_results(
+            result_state=result_state,
+            latency_ms=3000,
+            goal="Analyze security vulnerabilities",
+            spec=SubAgentSpec(
+                name="security_analyst",
+                description="Security analysis agent",
+                goal="Analyze security",
+                parent_thread_id="thread-001",
+            ),
+        )
+
+        assert result["success"] is True
+        assert result["result"] == "Comprehensive security analysis completed"
+        assert len(result["errors"]) == 2  # Errors still reported for observability
+
+    def test_extract_results_subgraph_no_verify_high_confidence(self) -> None:
+        """_extract_results infers success from completed_steps + high confidence.
+
+        Bug 12: Sub-agent subgraph (classify→plan→execute→reflect→END) lacks
+        the verify node that sets is_complete/final_output. When the subgraph
+        reaches END via reflect with high confidence and completed steps,
+        _extract_results should infer success.
+        """
+        from src.agents.runner import _extract_results as _extract_results
+        from src.graph.enums import Confidence as Confidence
+        from src.graph.models import PlanStep as PlanStep
+
+        result_state = {
+            "final_output": "",
+            "is_complete": False,
+            "errors": [],
+            "cost_records": [],
+            "total_tokens_used": 500,
+            "iteration_count": 7,
+            "completed_steps": [
+                PlanStep(description="Step 1"),
+                PlanStep(description="Step 2"),
+            ],
+            "confidence": Confidence.HIGH,
+            "reflection": MagicMock(summary="Sub-task completed successfully", cost_efficiency=0.9),
+        }
+
+        result = _extract_results(
+            result_state=result_state,
+            latency_ms=2000,
+            goal="Build a port scanner",
+            spec=SubAgentSpec(
+                name="port_scanner_agent",
+                description="Port scanning specialist",
+                goal="test",
+                parent_thread_id="thread-001",
+            ),
+        )
+
+        assert result["success"] is True
+        assert result["result"] != ""  # Should have inferred output
+
+    def test_extract_results_subgraph_low_confidence_stays_failed(self) -> None:
+        """_extract_results does NOT infer success with low confidence."""
+        from src.agents.runner import _extract_results as _extract_results
+        from src.graph.enums import Confidence as Confidence
+        from src.graph.models import PlanStep as PlanStep
+
+        result_state = {
+            "final_output": "",
+            "is_complete": False,
+            "errors": ["Something went wrong"],
+            "cost_records": [],
+            "total_tokens_used": 500,
+            "iteration_count": 3,
+            "completed_steps": [PlanStep(description="Step 1")],
+            "confidence": Confidence.LOW,
+        }
+
+        result = _extract_results(
+            result_state=result_state,
+            latency_ms=1000,
+            goal="Build a port scanner",
+            spec=SubAgentSpec(
+                name="port_scanner_agent",
+                description="Port scanning specialist",
+                goal="test",
+                parent_thread_id="thread-001",
+            ),
+        )
+
+        assert result["success"] is False
 
 
 class TestRunParallel:

@@ -10,6 +10,5 @@
       "root": "src"
     }
   ],
-  "extraPaths": ["/home/amiagarw/code/turing-agent-1"],
-  "pythonPath": "/home/amiagarw/aiml01/bin/python"
+  "extraPaths": ["."]
 }

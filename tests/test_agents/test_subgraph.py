@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+from typing import Any
 
 import pytest
 from unittest.mock import MagicMock
 
+from src.agents.state import SubAgentState
+from src.agents.state import initial_sub_agent_state
 from src.agents.subgraph import build_subgraph, scope_tools
-from src.graph.models import SubAgentSpec
+from src.graph.enums import GoalStatus
+from src.graph.models import Goal, SubAgentSpec
 from src.tools.registry import ToolRegistry
+
+
+def _make_sub_state(**kwargs: Any) -> SubAgentState:
+    """Create a SubAgentState for routing tests, bypassing TypedDict constructor."""
+    return kwargs  # type: ignore[return-value]
 
 
 @pytest.fixture
@@ -337,11 +346,7 @@ class TestRoutingFunctions:
         """_route_after_execute_sub routes to reflect on max iterations."""
         from src.agents.subgraph import _route_after_execute_sub
 
-        state = {
-            "errors": [],
-            "iteration_count": 10,
-            "max_iterations": 10,
-        }
+        state = _make_sub_state(errors=[], iteration_count=10, max_iterations=10)
         result = _route_after_execute_sub(state)
         assert result == "reflect"
 
@@ -349,11 +354,7 @@ class TestRoutingFunctions:
         """_route_after_execute_sub routes to reflect on errors."""
         from src.agents.subgraph import _route_after_execute_sub
 
-        state = {
-            "errors": ["some error"],
-            "iteration_count": 5,
-            "max_iterations": 10,
-        }
+        state = _make_sub_state(errors=["some error"], iteration_count=5, max_iterations=10)
         result = _route_after_execute_sub(state)
         assert result == "reflect"
 
@@ -361,10 +362,7 @@ class TestRoutingFunctions:
         """_route_after_reflect_sub routes to tool_create on gaps."""
         from src.agents.subgraph import _route_after_reflect_sub
 
-        state = {
-            "pending_tool_gaps": ["missing_tool"],
-            "confidence": "high",
-        }
+        state = _make_sub_state(pending_tool_gaps=["missing_tool"], confidence="high")
         result = _route_after_reflect_sub(state)
         assert result == "tool_create"
 
@@ -372,10 +370,7 @@ class TestRoutingFunctions:
         """_route_after_reflect_sub routes to execute on low confidence."""
         from src.agents.subgraph import _route_after_reflect_sub
 
-        state = {
-            "pending_tool_gaps": [],
-            "confidence": "low",
-        }
+        state = _make_sub_state(pending_tool_gaps=[], confidence="low")
         result = _route_after_reflect_sub(state)
         assert result == "execute"
 
@@ -383,10 +378,7 @@ class TestRoutingFunctions:
         """_route_after_reflect_sub routes to END on high confidence."""
         from src.agents.subgraph import _route_after_reflect_sub
 
-        state = {
-            "pending_tool_gaps": [],
-            "confidence": "high",
-        }
+        state = _make_sub_state(pending_tool_gaps=[], confidence="high")
         result = _route_after_reflect_sub(state)
         assert result == "__end__"
 
@@ -394,9 +386,7 @@ class TestRoutingFunctions:
         """_route_after_tool_create_sub routes to plan when tools created."""
         from src.agents.subgraph import _route_after_tool_create_sub
 
-        state = {
-            "tools_created": ["new_tool"],
-        }
+        state = _make_sub_state(tools_created=["new_tool"])
         result = _route_after_tool_create_sub(state)
         assert result == "plan"
 
@@ -404,8 +394,71 @@ class TestRoutingFunctions:
         """_route_after_tool_create_sub routes to execute when no tools created."""
         from src.agents.subgraph import _route_after_tool_create_sub
 
-        state = {
-            "tools_created": [],
-        }
+        state = _make_sub_state(tools_created=[])
         result = _route_after_tool_create_sub(state)
         assert result == "execute"
+
+
+class TestInitialSubAgentStateGoal:
+    """Tests for current_goal field in initial_sub_agent_state()."""
+
+    def test_initial_sub_agent_state_has_current_goal(self) -> None:
+        """initial_sub_agent_state() populates current_goal as a Goal object."""
+        state = initial_sub_agent_state(
+            goal_text="Analyze security vulnerabilities",
+            parent_thread_id="thread-test-001",
+        )
+
+        goal = state.get("current_goal")
+        assert goal is not None
+        assert isinstance(goal, Goal)
+        assert goal.text == "Analyze security vulnerabilities"
+        assert goal.status == GoalStatus.ACTIVE
+
+    def test_initial_sub_agent_state_goal_text_matches_current_goal(self) -> None:
+        """goal_text and current_goal.text are consistent."""
+        state = initial_sub_agent_state(
+            goal_text="Optimize database queries",
+            parent_thread_id="thread-test-002",
+        )
+
+        assert state.get("goal_text") == "Optimize database queries"
+        goal = state.get("current_goal")
+        assert goal is not None
+        assert goal.text == state.get("goal_text")
+
+
+class TestSubAgentSpecDefaultId:
+    """Tests for SubAgentSpec default UUID generation."""
+
+    def test_default_id_is_valid_uuid(self) -> None:
+        """SubAgentSpec with no explicit id produces a valid UUID string."""
+        import uuid
+
+        spec = SubAgentSpec(
+            name="test_uuid_agent",
+            description="Test UUID generation",
+            goal="test uuid",
+            parent_thread_id="thread-uuid-001",
+        )
+
+        # Should not raise ValueError
+        parsed = uuid.UUID(spec.id)
+        assert parsed.version == 4
+
+    def test_default_id_is_unique(self) -> None:
+        """Each SubAgentSpec gets a unique UUID."""
+        spec1 = SubAgentSpec(
+            name="agent_1",
+            description="First",
+            goal="test",
+            parent_thread_id="thread-1",
+        )
+        spec2 = SubAgentSpec(
+            name="agent_2",
+            description="Second",
+            goal="test",
+            parent_thread_id="thread-2",
+        )
+
+        assert spec1.id != spec2.id

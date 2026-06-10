@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from loguru import logger
 
-# Default sandbox root — restricts file access
-_DEFAULT_SANDBOX = Path(".")
+from src.config.settings import get_settings
 
 
 async def file_reader(
     file_path: str,
-    sandbox_root: str = ".",
+    sandbox_root: Optional[str] = None,
     max_lines: int = 200,
     encoding: str = "utf-8",
 ) -> str:
@@ -21,12 +21,16 @@ async def file_reader(
     Args:
         file_path: Relative path to the file to read.
         sandbox_root: Root directory for sandboxing (prevents path traversal).
+            Defaults to ``settings.agent.workspace_root``
+            (``.turing/workspace``).
         max_lines: Maximum number of lines to return.
         encoding: File encoding.
 
     Returns:
         File contents as a string.
     """
+    if sandbox_root is None:
+        sandbox_root = get_settings().agent.workspace_root
     root = Path(sandbox_root).resolve()
     target = (root / file_path).resolve()
 

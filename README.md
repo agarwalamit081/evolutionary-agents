@@ -8,31 +8,95 @@ A production-grade, self-evolving AI agent built with **LangGraph** that continu
 
 The agent follows a **6-layer architecture** with strict separation of concerns:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Presentation Layer       │  CLI (Click + Rich), FastAPI, HITL  │
-├─────────────────────────────────────────────────────────────────┤
-│  Orchestration Layer      │  LangGraph StateGraph, Checkpoints  │
-├─────────────────────────────────────────────────────────────────┤
-│  Agent Layer              │  Task Agent, Meta/Evolution Agent,  │
-│                           │  Model Router, Task Classifier      │
-├─────────────────────────────────────────────────────────────────┤
-│  Evolution Layer          │  Reflector, Mutator, A/B Test,      │
-│                           │  Skill Crystallizer, Version Ctrl   │
-├─────────────────────────────────────────────────────────────────┤
-│  Capability Layer         │  Tool Manager, Memory (3-tier),     │
-│                           │  Planner, Verifier, Retriever       │
-├─────────────────────────────────────────────────────────────────┤
-│  Infrastructure Layer     │  LLM Gateway (litellm), PostgreSQL, │
-│                           │  pgvector, Redis, Docker Sandbox    │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph "Presentation Layer"
+        P1["CLI (Click)"]
+        P2["FastAPI"]
+        P3["Human-in-the-Loop"]
+    end
+
+    subgraph "Orchestration Layer"
+        O1["LangGraph StateGraph"]
+        O2["AsyncPostgresSaver"]
+    end
+
+    subgraph "Agent Layer"
+        A1["Task Agent"]
+        A2["Meta / Evolution Agent"]
+        A3["Model Router"]
+        A4["Task Classifier"]
+    end
+
+    subgraph "Evolution Layer"
+        E1["Reflector"]
+        E2["Mutator"]
+        E3["A/B Test"]
+        E4["Skill Crystallizer"]
+    end
+
+    subgraph "Capability Layer"
+        C1["Tool Registry"]
+        C2["3-Tier Memory"]
+        C3["Planner / Verifier"]
+    end
+
+    subgraph "Infrastructure Layer"
+        I1["LLM Gateway (litellm)"]
+        I2["PostgreSQL + pgvector"]
+        I3["Redis"]
+        I4["Docker Sandbox"]
+    end
+
+    P1 & P2 & P3 --> O1
+    O1 --> A1 & A2
+    A1 --> C1 & C2 & C3
+    A2 --> E1 & E2 & E3 & E4
+    A3 --> I1
+    C1 --> I1
+    C2 --> I2 & I3
+    E2 & E3 --> I4
 ```
 
 ### Agent Workflow
 
+```mermaid
+flowchart TD
+    START([START]) --> classify["classify"]
+    classify --> plan["plan"]
+    plan --> retrieve["retrieve_memory"]
+    retrieve --> execute["execute"]
+
+    execute --> reflect["reflect"]
+    reflect -->|"Agent gaps"| spawn["agent_spawn"]
+    reflect -->|"Tool gaps"| tc["tool_create"]
+    reflect -->|"High confidence"| verify["verify"]
+    reflect -->|"Low confidence"| execute
+
+    spawn --> delegate["delegate"]
+    tc --> plan
+    delegate --> verify
+
+    verify --> evolve["evolve"]
+    verify --> store["store_memory"]
+    evolve --> store
+    store --> hitl["HITL Gate"]
+    store --> END([END])
+    hitl --> END
+
+    classDef node fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef spawn fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    classDef tool fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000
+    class classify,plan,retrieve,execute,reflect,verify,store node
+    class spawn,delegate spawn
+    class tc tool
 ```
-START → classify → plan → retrieve_memory → execute ↔ reflect
-  → agent_spawn? → delegate → tool_create? → plan → verify → evolve? → store_memory → hitl? → END
+
+### Agent Workflow (text)
+
+```
+START -> classify -> plan -> retrieve_memory -> execute <-> reflect
+  -> agent_spawn? -> delegate -> tool_create? -> plan -> verify -> evolve? -> store_memory -> hitl? -> END
 ```
 
 - **Task Agent** handles goal execution via ReAct loop with native LangChain tool calling
@@ -71,7 +135,7 @@ All providers accessed through **litellm** as a unified gateway. Models assigned
 | **Groq** | `llama-3.1-8b-instant` | `llama-3.3-70b-versatile` | — |
 | **Ollama** | `phi4-mini:3.8b` | `qwen3.5:latest` | — |
 
-See `docs/design-docs/02-model-selection.md` for the complete catalog with context windows, max output, and cost per 1M tokens.
+See `docs/ARCHITECTURE.md` for the full architectural overview.
 
 ---
 
@@ -83,91 +147,90 @@ turing-agent/
 ├── requirements.txt
 ├── .env.example
 │
-├── config/                     # pydantic-settings
-│   ├── settings.py             # BaseSettings classes for all config
-│   └── model_registry.py       # Model tier definitions and routing rules
-│
-├── graph/                      # LangGraph graphs + nodes
-│   ├── task_graph.py           # Main StateGraph
-│   ├── evolution_graph.py      # Evolution subgraph
-│   ├── nodes/                  # classify, plan, execute, reflect, verify, etc.
-│   ├── routers.py              # Conditional edge functions
-│   └── state.py                # AgentState, EvolutionState TypedDicts
-│
-├── llm/                        # LLM Gateway (litellm)
-│   ├── gateway.py              # LLMGateway class
-│   ├── model_router.py         # Complexity → model mapping
-│   ├── rate_limiter.py         # aiolimiter per-provider
-│   ├── cost_tracker.py         # PostgreSQL cost logging
-│   ├── cache.py                # Redis prompt cache
-│   ├── structured_output.py    # JSON mode + json-repair
-│   └── batch.py                # Batch API support
-│
-├── memory/                     # 3-tier memory system
-│   ├── manager.py              # Unified memory interface
-│   ├── hot.py                  # Redis hot memory (ephemeral)
-│   ├── warm.py                 # PostgreSQL warm memory
-│   ├── cold.py                 # pgvector cold memory (embeddings)
-│   ├── consolidation.py        # Background consolidation ("dreaming")
-│   └── embeddings.py           # sentence-transformers
-│
-├── tools/                      # Built-in + dynamic tools
-│   ├── registry.py             # Tool registry with @tool decorator
-│   ├── builtin/                # 7 built-in tools
-│   ├── dynamic/                # Runtime tool generation
-│   │   ├── generator.py        # LLM tool generation + validation
-│   │   ├── persister.py        # DB persistence for generated tools
-│   │   └── allowlist.py        # Safe module allowlist + namespace
-│   ├── sandbox.py              # Subprocess/Docker execution
-│   └── mcp_adapter.py          # fastmcp integration
-│
-├── agents/                      # Sub-agent system
-│   ├── registry.py             # Sub-agent registry + spawn
-│   ├── persister.py            # DB persistence + rolling metrics
-│   ├── subgraph.py             # Dynamic LangGraph subgraph builder
-│   ├── runner.py               # Sub-agent executor + parallel delegation
-│   └── state.py                # SubAgentState TypedDict
-│
-├── evolution/                  # Self-evolution engine
-│   ├── engine.py               # SelfEvolutionEngine
-│   ├── analyzer.py             # Performance pattern analysis
-│   ├── mutator.py              # Code/prompt/workflow mutation
-│   ├── ab_test.py              # A/B testing with statistical comparison
-│   ├── crystallizer.py         # Skill crystallization
-│   └── version_control.py      # Git-based versioning + rollback
-│
-├── safety/                     # 7-layer safety pipeline
-│   ├── pipeline.py             # Orchestrates all 7 layers
-│   ├── static_analyzer.py      # AST + ruff checks
-│   ├── security_scanner.py     # Forbidden pattern detection
-│   ├── semantic_checker.py     # Invariant validation
-│   └── sandbox_executor.py     # Isolated code execution
-│
-├── observability/              # Logging, metrics, tracing
-│   ├── logging.py              # loguru + structlog setup
-│   ├── metrics.py              # Prometheus metrics
-│   └── tracing.py              # OpenTelemetry setup
-│
-├── api/                        # FastAPI web interface
-│   ├── app.py                  # FastAPI application
-│   └── routes/                 # health, agent, evolution endpoints
-│
-├── db/                         # SQLAlchemy models + Alembic
-│   ├── engine.py               # Async engine with asyncpg
-│   ├── models.py               # ORM models
-│   └── migrations/             # Alembic migrations
-│
-├── tests/                      # Mirror src structure
-│   ├── test_graph/
-│   ├── test_llm/
-│   ├── test_memory/
-│   ├── test_tools/
-│   ├── test_evolution/
-│   ├── test_safety/
-│   └── test_api/
-│
-└── docs/
-    └── design-docs/            # 18 design specification documents
+└── src/
+    ├── config/                 # pydantic-settings
+    │   ├── settings.py         # BaseSettings classes for all config
+    │   └── model_registry.py   # Model tier definitions and routing rules
+    │
+    ├── graph/                  # LangGraph graphs + nodes
+    │   ├── task_graph.py       # Main StateGraph
+    │   ├── nodes/              # classify, plan, execute, reflect, verify, etc.
+    │   ├── prompts.py          # Centralized prompt templates
+    │   ├── schemas.py          # Pydantic models for structured LLM output
+    │   ├── routers.py          # Conditional edge functions
+    │   └── state.py            # AgentState, EvolutionState TypedDicts
+    │
+    ├── llm/                    # LLM Gateway (litellm)
+    │   ├── gateway.py          # LLMGateway class
+    │   ├── model_router.py     # Complexity → model mapping
+    │   ├── rate_limiter.py     # aiolimiter per-provider
+    │   ├── cost_tracker.py     # PostgreSQL cost logging
+    │   ├── cache.py            # Redis prompt cache
+    │   └── structured_output.py # JSON mode + json-repair
+    │
+    │
+    ├── memory/                    # 3-tier memory system
+    │   ├── manager.py             # Unified memory interface
+    │   ├── hot.py                 # Redis hot memory (ephemeral)
+    │   ├── warm.py                # PostgreSQL warm memory
+    │   ├── cold.py                # pgvector cold memory (embeddings)
+    │   └── embeddings.py          # Embedding generation (litellm + hash fallback)
+    │
+    ├── tools/                     # Built-in + dynamic tools
+    │   ├── registry.py            # Tool registry with @tool decorator
+    │   ├── builtin/               # 7 built-in tools
+    │   ├── dynamic/               # Runtime tool generation
+    │   │   ├── generator.py       # LLM tool generation + validation
+    │   │   ├── persister.py       # DB persistence for generated tools
+    │   │   └── allowlist.py       # Safe module allowlist + namespace
+    │   └── mcp_adapter.py         # fastmcp integration
+    │
+    ├── agents/                    # Sub-agent system
+    │   ├── registry.py            # Sub-agent registry + spawn
+    │   ├── persister.py           # DB persistence + rolling metrics
+    │   ├── subgraph.py            # Dynamic LangGraph subgraph builder
+    │   ├── runner.py              # Sub-agent executor + parallel delegation
+    │   └── state.py               # SubAgentState TypedDict
+    │
+    ├── evolution/                 # Self-evolution engine
+    │   ├── engine.py              # SelfEvolutionEngine (4-phase pipeline)
+    │   ├── git_tracker.py         # Git-based mutation versioning
+    │   ├── report.py              # Evolution reporting
+    │   └── templates.py           # Mutation templates
+    │
+    ├── safety/                    # 7-layer safety pipeline
+    │   └── pipeline.py            # All 7 safety layers (consolidated)
+    │
+    ├── sandbox/                   # Isolated code execution
+    │   └── executor.py            # Subprocess/Docker execution sandbox
+    │
+    ├── observability/             # Logging, metrics, tracing
+    │   ├── logging.py             # loguru structured logging
+    │   ├── metrics.py             # Prometheus metrics
+    │   └── tracing.py             # OpenTelemetry setup
+    │
+    ├── api/                       # FastAPI web interface
+    │   ├── app.py                 # FastAPI application
+    │   └── routes/                # health, agent endpoints
+    │
+    └── db/                        # SQLAlchemy models + Alembic
+        ├── engine.py              # Async engine with asyncpg
+        ├── models.py              # ORM models
+        └── migrations/            # Alembic migrations
+
+tests/                             # Mirror src structure
+├── test_graph/
+├── test_llm/
+├── test_memory/
+├── test_tools/
+├── test_agents/
+├── test_e2e/                     # End-to-end tests (requires OPENAI_API_KEY)
+├── test_evolution/
+├── test_safety/
+└── test_api/
+
+docs/
+└── ARCHITECTURE.md               # Architectural narrative with Mermaid diagrams
 ```
 
 ---
@@ -191,7 +254,7 @@ cp .env.example .env
 # Edit .env — at minimum set:
 #   DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/turing_agent
 #   REDIS_URL=redis://localhost:6379/0
-#   LLM_API_KEY=your-key-here
+#   OPENAI_API_KEY=your-key-here
 ```
 
 All configuration is managed via **pydantic-settings** `BaseSettings` classes. No `os.environ` in application code.
@@ -199,32 +262,35 @@ All configuration is managed via **pydantic-settings** `BaseSettings` classes. N
 ### 3. Run
 
 ```bash
+# Activate the project environment
+source .venv/bin/activate  # or your virtual environment path
+
 # Run with default provider (from .env)
-uv run python main.py --goal "Research the latest developments in LangGraph"
+python main.py --goal "Research the latest developments in LangGraph"
 
 # Specify provider and model
-uv run python main.py --provider deepseek --model deepseek-v4-flash --goal "..."
-uv run python main.py --provider zai --model glm-5-turbo --goal "..."
-uv run python main.py --provider anthropic --model claude-haiku-4-5-20251001 --goal "..."
+python main.py --provider deepseek --model deepseek-v4-flash --goal "..."
+python main.py --provider zai --model glm-5-turbo --goal "..."
+python main.py --provider anthropic --model claude-haiku-4-5-20251001 --goal "..."
 
 # Interactive mode
-uv run python main.py --interactive
+python main.py --interactive
 
 # Skip evolution phase
-uv run python main.py --no-evolution --goal "..."
+python main.py --no-evolution --goal "..."
 ```
 
 ### 4. Run tests
 
 ```bash
 # Unit + integration (no API key needed)
-uv run python -m pytest tests/ -v -k "not e2e"
+python -m pytest tests/ -v -k "not e2e"
 
-# Full suite including E2E (requires LLM_API_KEY)
-LLM_API_KEY=sk-... uv run python -m pytest tests/ -v
+# Full suite including E2E (requires OPENAI_API_KEY)
+OPENAI_API_KEY=sk-... python -m pytest tests/ -v
 
 # Single test
-uv run python -m pytest tests/test_graph/test_nodes.py -v -k "test_classify"
+python -m pytest tests/test_graph/test_nodes/test_classify.py -v -k "test_classify_trivial"
 ```
 
 ---
@@ -245,11 +311,11 @@ All tools use the **LangChain `@tool` decorator** with type-annotated parameters
 
 Tools are registered in a dynamic `ToolRegistry`. Evolved tools generated by the evolution engine are added to the same registry at runtime.
 
-The agent can also **create new tools at runtime** when it detects a capability gap. When the LLM calls a non-existent tool, the reflect node identifies the missing capability, the `tool_create` node generates the tool via LLM, validates it through the 7-layer safety pipeline with a double-barrier security model (static analysis + constrained execution namespace), registers it in the `ToolRegistry` for immediate use, and persists it to PostgreSQL for future runs. Max 3 tools per run. See `docs/design-docs/14-tool-system.md` Section 15 for details.
+The agent can also **create new tools at runtime** when it detects a capability gap. When the LLM calls a non-existent tool, the reflect node identifies the missing capability, the `tool_create` node generates the tool via LLM, validates it through the 7-layer safety pipeline with a double-barrier security model (static analysis + constrained execution namespace), registers it in the `ToolRegistry` for immediate use, and persists it to PostgreSQL for future runs. Max 3 tools per run. See `docs/ARCHITECTURE.md` for details.
 
 ### Sub-Agent Delegation
 
-The agent can also **spawn specialized sub-agents** as isolated LangGraph subgraphs. When the reflect node detects a need for specialized processing, the `agent_spawn` node designs a sub-agent via LLM, validates it through the safety pipeline, persists it to PostgreSQL, and registers it for immediate use. The `delegate` node then routes subtasks to the appropriate sub-agent, tracks performance with rolling metrics (success rate, cost, latency, quality), and auto-deprecates underperformers. Sub-agents are optimized over time by the main agent's evolution engine. Max 3 sub-agents per run. See `docs/design-docs/18-sub-agent-system.md` for details.
+The agent can also **spawn specialized sub-agents** as isolated LangGraph subgraphs. When the reflect node detects a need for specialized processing, the `agent_spawn` node designs a sub-agent via LLM, validates it through the safety pipeline, persists it to PostgreSQL, and registers it for immediate use. The `delegate` node then routes subtasks to the appropriate sub-agent, tracks performance with rolling metrics (success rate, cost, latency, quality), and auto-deprecates underperformers. Sub-agents are optimized over time by the main agent's evolution engine. Max 3 sub-agents per run. See `docs/ARCHITECTURE.md` for details.
 
 ---
 
@@ -300,48 +366,41 @@ All mutations are version-controlled via Git. Rollback is instant.
 
 ## Configuration Reference
 
-All config loaded via `pydantic-settings` from `.env` or environment variables. See `docs/design-docs/03-environment-config.md` for the complete spec.
+All config loaded via `pydantic-settings` from `.env` or environment variables. See `.env.example` for the complete template.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | — | PostgreSQL connection string |
+| `DATABASE_URL` | — | PostgreSQL connection string (asyncpg driver) |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
-| `LLM_API_KEY` | — | Primary LLM provider API key |
-| `FAST_LLM_API_KEY` | — | Fast/cheap model API key (sub-agents) |
-| `LLM_PROVIDER` | `deepseek` | Default LLM provider |
-| `LLM_MODEL` | `deepseek-v4-flash` | Default model |
-| `FAST_LLM_PROVIDER` | `zai` | Fast model provider |
-| `FAST_LLM_MODEL` | `glm-4.5-air` | Fast model |
-| `TOKEN_BUDGET` | `100000` | Per-task token budget |
-| `MAX_COST_USD` | `2.00` | Per-task cost limit |
+| `OPENAI_API_KEY` | — | OpenAI provider API key |
+| `ANTHROPIC_API_KEY` | — | Anthropic provider API key |
+| `DEEPSEEK_API_KEY` | — | DeepSeek provider API key |
+| `ZAI_API_KEY` | — | Zhipu AI / GLM provider API key |
+| `DEFAULT_LLM_PROVIDER` | `deepseek` | Default LLM provider |
+| `DEFAULT_LLM_MODEL` | `deepseek-v4-flash` | Default model |
+| `FAST_LLM_PROVIDER` | `openai` | Fast/cheap model provider |
+| `FAST_LLM_MODEL` | `gpt-4o-mini-2024-07-18` | Fast model for classification/routing |
+| `REASONING_LLM_PROVIDER` | `anthropic` | Reasoning model provider |
+| `REASONING_LLM_MODEL` | `claude-sonnet-4-6` | Reasoning model for complex tasks |
+| `DAILY_TOKEN_BUDGET` | `500000` | Daily token budget |
+| `PER_TASK_TOKEN_LIMIT` | `100000` | Per-task token limit |
 | `EVOLUTION_ENABLED` | `true` | Enable self-evolution |
-| `EVOLUTION_INTERVAL_SECONDS` | `3600` | Evolution cycle frequency |
+| `EVOLUTION_INTERVAL` | `10` | Evolution trigger interval (tasks) |
 | `HITL_ENABLED` | `true` | Enable human-in-the-loop gates |
+| `LANGCHAIN_TRACING_V2` | `false` | Enable LangSmith tracing for LangGraph and litellm |
+| `LANGSMITH_API_KEY` | — | LangSmith API key (required if tracing enabled) |
+| `LANGSMITH_PROJECT` | `turing-agent` | LangSmith project name |
 
 ---
 
-## Design Documents
+## Architecture Documentation
 
-Full technical specifications are in `docs/design-docs/`:
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full architectural narrative covering three generations of the evolutionary agent, detailed Mermaid diagrams for tool creation and sub-agent spawning pipelines, key findings from testing, and design decisions.
 
-| # | Document | Focus |
-|---|---|---|
-| 00 | Project Overview | Mission, architecture, principles |
-| 01 | Dependencies | Package list, versions, rationale |
-| 02 | Model Selection | Provider catalog, cost tiers, routing |
-| 03 | Environment Config | .env template, pydantic-settings classes |
-| 04 | Database Schema | PostgreSQL DDL, pgvector, Redis patterns |
-| 05 | Architecture | 6-layer design, node definitions |
-| 06 | Workflow Design | Graph edges, checkpointing, HITL flow |
-| 07 | Self-Evolution Engine | Mutation pipeline, A/B testing, crystallization |
-| 08 | Memory System | 3-tier hierarchy, consolidation, retrieval |
-| 09 | LLM Integration | Caching, streaming, structured output patterns |
-| 10 | Safety Guardrails | 7-layer defense, sandbox, version control |
-| 11 | Deployment | Docker Compose, CLI, FastAPI, Prometheus |
-| 12 | State Schema | AgentState TypedDict, Pydantic models |
-| 13 | LLM Gateway | litellm wrapper, rate limiting, retry, cost tracking |
-| 14 | Tool System | @tool decorator, registry, MCP integration |
-| 15 | Testing Strategy | 3-layer testing, mock fixtures, CI config |
-| 16 | Error Handling | Taxonomy, failover chains, budget enforcement |
-| 17 | Implementation Guide | Target structure, 5-phase plan, migration path |
-| 18 | Sub-Agent System | Sub-agent delegation, persistence, performance tracking, evolution |
+## License
+
+This project is licensed under the **PolyForm Noncommercial License 1.0.0**. 
+
+**Non-commercial use is permitted.** Any commercial use (including integration into proprietary products, SaaS, or paid services) requires explicit written permission from the copyright holder. 
+
+For commercial licensing inquiries, please contact: agarwalamit081@gmail.com

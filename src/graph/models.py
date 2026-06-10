@@ -66,7 +66,7 @@ class SkillDef(BaseModel):
 class SubAgentSpec(BaseModel):
     """Specification for a sub-agent delegation."""
 
-    id: str = Field(default_factory=lambda: uuid4().hex[:8])
+    id: str = Field(default_factory=lambda: str(uuid4()))
     goal: str
     model_tier: TaskComplexity = TaskComplexity.SIMPLE
     parent_thread_id: str

@@ -10,6 +10,7 @@ All LLM calls flow through this gateway, which provides:
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -401,14 +402,22 @@ class LLMGateway:
         max_tokens: int | None,
         metadata: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Build keyword arguments for litellm call."""
-        kwargs: dict[str, Any] = {"model": model, "temperature": temperature}
+        """Build keyword arguments for litellm call.
+
+        Resolves registry keys (e.g., 'deepseek-v4-flash') to litellm
+        model_ids (e.g., 'deepseek/deepseek-v4-flash') so litellm can
+        identify the correct provider.
+        """
+        # Resolve registry key → litellm model_id
+        spec = MODEL_REGISTRY.get(model)
+        litellm_model = spec.model_id if spec else model
+
+        kwargs: dict[str, Any] = {"model": litellm_model, "temperature": temperature}
 
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
         else:
             # Use model-specific defaults
-            spec = MODEL_REGISTRY.get(model)
             if spec and spec.max_output:
                 kwargs["max_tokens"] = spec.max_output
             else:
@@ -472,6 +481,14 @@ class LLMGateway:
         """Configure litellm global settings."""
         litellm.set_verbose = False  # type: ignore[attr-defined]
         litellm.drop_params = True  # Drop unsupported params instead of erroring
-        litellm.success_callback = []
-        litellm.failure_callback = []
+
+        # Enable LangSmith callbacks for litellm when tracing is active
+        if os.environ.get("LANGCHAIN_TRACING_V2") == "true":
+            litellm.success_callback = ["langsmith"]
+            litellm.failure_callback = ["langsmith"]
+            logger.debug("litellm configured with LangSmith callbacks")
+        else:
+            litellm.success_callback = []
+            litellm.failure_callback = []
+
         logger.debug("litellm configured: drop_params=True, verbose=False")

@@ -46,6 +46,16 @@ async def reflect_node(
     if gateway is not None:
         result = await _llm_reflect(gateway, state)
         if result is not None:
+            # Always run heuristic gap detection — the LLM may miss
+            # sub-agent gaps even when task completes successfully
+            plan_steps = state.get("plan_steps", [])
+            heuristic_gaps = _detect_agent_gaps_heuristic(state, goal_text, plan_steps)
+            if heuristic_gaps:
+                existing_gaps = result.get("pending_agent_gaps", [])
+                # Merge heuristic gaps with any LLM-identified gaps
+                merged = list(set(existing_gaps + heuristic_gaps))
+                result["pending_agent_gaps"] = merged
+                logger.info(f"Sub-agent gaps detected (heuristic): {merged}")
             return result
 
     return _heuristic_reflect(state, goal_text, completed_steps, errors, tools)

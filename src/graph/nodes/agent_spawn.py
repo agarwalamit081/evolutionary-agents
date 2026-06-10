@@ -14,11 +14,12 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from src.agents.registry import MAX_SUB_AGENTS_PER_RUN
-from src.graph.enums import Phase
+from src.graph.enums import Phase, TaskComplexity
 from src.graph.models import SubAgentSpec
 
 if TYPE_CHECKING:
     from src.agents.registry import SubAgentRegistry
+    from src.graph.schemas import SubAgentProposal
     from src.llm.gateway import LLMGateway
     from src.tools.registry import ToolRegistry
 
@@ -137,7 +138,7 @@ async def _spawn_single_agent(
         # Generate proposal via LLM
         from src.llm.structured_output import StructuredOutputManager
 
-        extractor = StructuredOutputManager(SubAgentProposal)
+        extractor = StructuredOutputManager()
         response = await gateway.acompletion(
             messages=[
                 {"role": "system", "content": AGENT_SPAWN_SYSTEM},
@@ -234,14 +235,10 @@ def _validate_proposal(
     return errors
 
 
-def _parse_model_tier(tier_str: str) -> str:
-    """Parse model tier string to TaskComplexity value."""
-    from src.graph.enums import TaskComplexity
-
-    valid_tiers = {t.value for t in TaskComplexity}
-    if tier_str in valid_tiers:
-        return tier_str
-    return TaskComplexity.SIMPLE.value
+def _parse_model_tier(tier_str: str) -> TaskComplexity:
+    """Parse model tier string to TaskComplexity enum."""
+    tier_map = {t.value: t for t in TaskComplexity}
+    return tier_map.get(tier_str, TaskComplexity.SIMPLE)
 
 
 async def _persist_agent(spec: SubAgentSpec) -> None:

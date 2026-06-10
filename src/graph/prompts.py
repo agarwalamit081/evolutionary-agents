@@ -84,6 +84,8 @@ Respond with a JSON object matching this schema:
 - lessons_learned: array of strings, key takeaways from execution so far
 - memory_observations: array of strings, observations worth storing for future tasks
 - next_action: one of "continue", "replan", "evolve", "stop"
+- missing_tools: array of strings, tool capabilities the agent needed but lacked
+- missing_sub_agents: array of strings, descriptions of specialized sub-agents that would help
 
 Evaluate:
 1. Are we making progress toward the goal?
@@ -95,7 +97,17 @@ Evaluate:
 
 If missing capabilities are identified, list them in missing_tools as descriptive
 phrases like "fetch data from HTTP APIs", "calculate statistical metrics",
-"convert between data formats"."""
+"convert between data formats".
+
+Sub-agent detection — check if the task has clearly independent subtask categories
+that would benefit from dedicated specialist agents. Examples:
+- A task combining "data analysis" AND "report writing" AND "visualization"
+- A task requiring "security audit" AND "performance profiling" AND "documentation"
+- A multi-domain task where each domain needs deep specialized reasoning
+
+If the goal has 2+ clearly distinct domains, list each domain in missing_sub_agents
+as a descriptive phrase like "security vulnerability analyst for Python codebases",
+"static type checker specialist", "code complexity metrics calculator"."""
 
 REFLECT_USER = """\
 Goal: {goal_text}

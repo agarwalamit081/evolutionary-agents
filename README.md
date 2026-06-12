@@ -263,7 +263,7 @@ All configuration is managed via **pydantic-settings** `BaseSettings` classes. N
 
 ```bash
 # Activate the project environment
-source .venv/bin/activate  # or your virtual environment path
+source /home/amiagarw/aiml01/bin/activate  # or your virtual environment path
 
 # Run with default provider (from .env)
 python main.py --goal "Research the latest developments in LangGraph"
@@ -315,7 +315,7 @@ The agent can also **create new tools at runtime** when it detects a capability 
 
 ### Sub-Agent Delegation
 
-The agent can also **spawn specialized sub-agents** as isolated LangGraph subgraphs. When the reflect node detects a need for specialized processing, the `agent_spawn` node designs a sub-agent via LLM, validates it through the safety pipeline, persists it to PostgreSQL, and registers it for immediate use. The `delegate` node then routes subtasks to the appropriate sub-agent, tracks performance with rolling metrics (success rate, cost, latency, quality), and auto-deprecates underperformers. Sub-agents are optimized over time by the main agent's evolution engine. Max 3 sub-agents per run. See `docs/ARCHITECTURE.md` for details.
+The agent can also **spawn specialized sub-agents** as isolated LangGraph subgraphs. When the reflect node detects a need for specialized processing, the `agent_spawn` node designs a sub-agent via LLM, validates it through the safety pipeline, persists it to PostgreSQL, and registers it for immediate use. The `delegate` node then routes subtasks to the appropriate sub-agent, tracks performance with rolling metrics (success rate, cost, latency, quality), and auto-deprecates underperformers. Sub-agents are optimized over time by the main agent's evolution engine. Max 3 sub-agents per run. See `docs/ARCHITECTURE.md`, `docs/design-docs/` for details.
 
 ---
 
@@ -395,7 +395,7 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 
 ## Architecture Documentation
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full architectural narrative covering three generations of the evolutionary agent, detailed Mermaid diagrams for tool creation and sub-agent spawning pipelines, key findings from testing, and design decisions.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and `docs/design-docs/` for the full architectural narrative covering three generations of the evolutionary agent, detailed Mermaid diagrams for tool creation and sub-agent spawning pipelines, key findings from testing, and design decisions.
 
 ## License
 

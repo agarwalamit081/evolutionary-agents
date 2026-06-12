@@ -70,15 +70,22 @@ START → classify → plan → retrieve_memory → execute ↔ reflect
 | `src/config/settings.py` | pydantic-settings `BaseSettings` classes for all config |
 | `src/config/model_registry.py` | Model tier definitions and fallback chains |
 | `src/graph/task_graph.py` | Main LangGraph StateGraph with DI pattern |
+| `src/graph/factory.py` | Graph construction factory with DI closures |
+| `src/graph/enums.py` | TaskComplexity, Confidence, Status enumerations |
+| `src/graph/models.py` | Pydantic models: `SubAgentSpec`, `ToolSpec`, etc. |
+| `src/graph/checkpoint.py` | AsyncPostgresSaver factory |
 | `src/graph/nodes/` | Node functions: classify, plan, execute, reflect, verify, evolve, tool_create, agent_spawn, delegate, memory, hitl, error_handler |
 | `src/graph/prompts.py` | Centralized prompt templates for LLM-integrated nodes |
 | `src/graph/schemas.py` | Pydantic models for structured LLM output |
 | `src/graph/routers.py` | Conditional edge routing functions |
-| `src/graph/checkpoint.py` | AsyncPostgresSaver factory |
 | `src/graph/state.py` | `AgentState`, `EvolutionState` TypedDicts |
 | `src/llm/gateway.py` | `LLMGateway` class wrapping litellm |
 | `src/llm/model_router.py` | Complexity → cost tier → model mapping |
+| `src/llm/models.py` | `LLMResponse`, `ModelSpec` dataclasses |
 | `src/llm/structured_output.py` | JSON mode + json-repair fallback |
+| `src/llm/rate_limiter.py` | aiolimiter per-provider rate limiting |
+| `src/llm/cost_tracker.py` | PostgreSQL-based cost logging |
+| `src/llm/cache.py` | Redis prompt cache |
 | `src/memory/manager.py` | Unified 3-tier memory interface |
 | `src/memory/hot.py` | Redis ephemeral cache |
 | `src/memory/warm.py` | PostgreSQL skills, procedures, workflows |
@@ -87,19 +94,25 @@ START → classify → plan → retrieve_memory → execute ↔ reflect
 | `src/tools/registry.py` | Dynamic tool registry |
 | `src/tools/builtin/` | 7 built-in tools (code_executor, code_validator, web_search, etc.) |
 | `src/tools/dynamic/` | Runtime tool generation (generator, persister, allowlist) |
-| `src/agents/` | Sub-agent system (registry, persister, subgraph, runner) |
+| `src/agents/` | Sub-agent system (registry, persister, subgraph, runner, state) |
 | `src/tools/mcp_adapter.py` | MCP server tool integration |
 | `src/evolution/engine.py` | `SelfEvolutionEngine` — 4-phase pipeline |
-| `src/safety/pipeline.py` | 7-layer safety gate |
+| `src/evolution/git_tracker.py` | Git-based mutation versioning and rollback |
+| `src/evolution/report.py` | Evolution reporting |
+| `src/evolution/templates.py` | Mutation templates |
+| `src/safety/pipeline.py` | 7-layer safety gate (consolidated) |
+| `src/sandbox/executor.py` | Isolated code execution sandbox |
 | `src/observability/metrics.py` | Prometheus counters/histograms |
 | `src/observability/tracing.py` | OpenTelemetry tracing setup |
+| `src/db/engine.py` | SQLAlchemy async engine |
+| `src/db/session.py` | async_sessionmaker |
 | `src/db/models.py` | SQLAlchemy ORM models (PostgreSQL + pgvector) |
 
 ### Key Design Decisions
 
 - **litellm** as unified LLM gateway — all chat completions go through `litellm.acompletion()`
 - **PostgreSQL + pgvector** as sole database — no SQLite in production. `aiosqlite` for testing only
-- **Dependency injection via closures** — `build_task_graph(gateway, memory, tools)` wraps nodes. Heuristic fallback when deps are None
+- **Dependency injection via closures** — `build_task_graph(gateway, memory, tools, sub_agent_registry)` wraps nodes. Heuristic fallback when deps are None
 - **LLM-enhanced nodes** — classify, plan, execute, reflect, verify all use LLM when gateway available, fall back to heuristics
 - **pydantic-settings** for all configuration — `BaseSettings` classes with `.env` file loading
 - **AsyncPostgresSaver** for LangGraph checkpoints — persistent state across runs
@@ -107,15 +120,16 @@ START → classify → plan → retrieve_memory → execute ↔ reflect
 - **Every model has 3-4 fallbacks** across different providers via `FALLBACK_CHAINS`
 - **Runtime tool creation** — Agent detects missing tool capabilities, generates them via LLM with double-barrier security (allowlist + constrained namespace), registers in ToolRegistry, persists to DB. Max 3 tools per run
 - **Sub-agent delegation** — Agent detects need for specialized sub-agents, spawns them via LLM with 7-layer safety validation, delegates subtasks, tracks performance with rolling metrics, optimizes via evolution engine. Max 3 sub-agents per run. No sub-agent self-evolution
+- **LangSmith tracing** — `LangSmithSettings` in `src/config/settings.py` controls tracing via `.env` variables (`LANGCHAIN_TRACING_V2`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`). LangGraph auto-detects `LANGCHAIN_TRACING_V2` for graph traces; litellm uses `["langsmith"]` callbacks for LLM call traces. Configured in `main.py` and `LLMGateway._configure_litellm()`
 
 ## Testing Structure
 
 Three layers in `tests/` mirroring the source structure:
 - **Unit** — individual classes (state, memory, tools, gateway), no LLM calls
 - **Integration** — components working together (graph wiring, skill execution, memory consolidation), mocked LLM
-- **E2E** (`@pytest.mark.e2e`) — full agent run, requires provider API key
+- **E2E** (`@pytest.mark.e2e`) — full agent run, requires provider API key. Three E2E test files in `test_e2e/`: `test_agent_e2e.py`, `test_llm_e2e.py`, `test_subgraph_e2e.py`
 
-Tests mock `litellm.acompletion` for deterministic LLM responses. `conftest.py` provides `mock_gateway`, `mock_memory`, `mock_tools`, `sample_state` fixtures.
+`pytest.ini` configures `asyncio_mode = auto` and defines the `e2e` marker. Tests mock `litellm.acompletion` for deterministic LLM responses. `conftest.py` provides `mock_gateway`, `mock_memory`, `mock_tools`, `sample_state` fixtures.
 
 ## Environment Configuration
 
@@ -124,9 +138,10 @@ All configuration via `pydantic-settings` (`src/config/settings.py`). Key variab
 - `REDIS_URL` — Redis connection string
 - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc. — provider-specific keys
 - `DEFAULT_LLM_PROVIDER` / `DEFAULT_LLM_MODEL` — default model selection
+- `LANGCHAIN_TRACING_V2`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` — LangSmith tracing (see `LangSmithSettings`)
 
 `.env.example` has the full template. See `docs/design-docs/03-environment-config.md` for all classes and validators.
 
 ## Design Documents
 
-The 18 documents in `docs/design-docs/` are the authoritative specification for this project. When code and docs conflict, the docs are correct. See `docs/design-docs/00-project-overview.md` for the full document map.
+The 19 documents in `docs/design-docs/` are the authoritative specification for this project. When code and docs conflict, the docs are correct. See `docs/design-docs/00-project-overview.md` for the full document map.

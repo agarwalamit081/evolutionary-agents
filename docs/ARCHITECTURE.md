@@ -298,10 +298,72 @@ flowchart TD
 
     classDef blue fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000
     classDef green fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
-    classDef red fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000
+    classDef red fill:#ffebee,stroke:#c62828,stroke-width:2px,color=#000
     classDef decision fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000
     class B,P decision
 ```
+
+### Parallel Sub-Agent Delegation
+
+The delegate node executes sub-agents in parallel using `asyncio.gather()`:
+
+```python
+async def delegate_node(state: AgentState) -> dict:
+    """Delegate subtasks to spawned sub-agents in parallel."""
+    
+    pending_gaps = state.get("pending_agent_gaps", [])
+    
+    # Build delegation tasks for each gap
+    delegate_tasks = []
+    for gap in pending_gaps:
+        spec = sub_agent_registry.get(gap.sub_agent_name)
+        if spec:
+            task = _delegate_to_sub_agent(spec, gap.subtask, state)
+            delegate_tasks.append(task)
+    
+    # Execute in parallel with concurrency limit
+    MAX_CONCURRENT_SUB_AGENTS = 3
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_SUB_AGENTS)
+    
+    async def execute_with_limit(task):
+        async with semaphore:
+            return await task
+    
+    results = await asyncio.gather(
+        *[execute_with_limit(t) for t in delegate_tasks],
+        return_exceptions=True
+    )
+    
+    # Process results and update metrics
+    delegation_results = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            # Handle failure, update metrics
+            sub_agent_registry.record_failure(
+                pending_gaps[i].sub_agent_name
+            )
+        else:
+            # Record success metrics
+            sub_agent_registry.record_success(
+                pending_gaps[i].sub_agent_name,
+                cost=result.cost,
+                latency=result.latency
+            )
+            delegation_results.append(result)
+    
+    return {"delegation_results": delegation_results}
+```
+
+**Three-Phase Parallel Delegation:**
+
+1. **Spawn Phase** — Create sub-agent specifications via LLM, validate, persist to DB
+2. **Execute Phase** — Run all sub-agent subgraphs in parallel via `run_parallel()`
+3. **Post-Process Phase** — Aggregate results, update rolling metrics, handle failures
+
+**Concurrency Constraints:**
+- `MAX_CONCURRENT_SUB_AGENTS = 3` — Maximum parallel sub-agent executions
+- `MAX_CONCURRENT_TOOLS = 5` — Maximum parallel tool executions per sub-agent
+- Rate limiters prevent resource exhaustion
 
 ### Sub-Agent Design
 

@@ -23,8 +23,42 @@ from src.graph.routers import route_after_execute
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
+    from src.llm.models import LLMResponse
     from src.memory.manager import MemoryManager
     from src.tools.registry import ToolRegistry
+
+
+# ── Model Override Proxy ─────────────────────────────────────────────────
+
+
+class _ModelOverrideProxy:
+    """Thin wrapper around LLMGateway that forces a specific model.
+
+    Used when spawning parallel sub-agents with diverse model assignments.
+    All ``acompletion`` and ``acompletion_with_tools`` calls are routed
+    through the real gateway but with the ``model`` parameter forced.
+
+    Other attributes (cost_tracker, cache, etc.) are delegated to the
+    underlying gateway via ``__getattr__``.
+    """
+
+    def __init__(self, gateway: LLMGateway, model: str) -> None:
+        self._gateway = gateway
+        self._model = model
+
+    async def acompletion(self, messages: list[dict[str, Any]], **kwargs: Any) -> LLMResponse:
+        """Forward to gateway with forced model."""
+        return await self._gateway.acompletion(messages=messages, model=self._model, **kwargs)
+
+    async def acompletion_with_tools(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], **kwargs: Any) -> Any:
+        """Forward to gateway with forced model."""
+        return await self._gateway.acompletion_with_tools(
+            messages=messages, tools=tools, model=self._model, **kwargs
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate all other attributes to the real gateway."""
+        return getattr(self._gateway, name)
 
 
 # ── Closure Wrapper (mirrors src/graph/task_graph.py:_wrap) ─────────────
@@ -345,6 +379,7 @@ def build_subgraph(
     tools: ToolRegistry,
     memory: MemoryManager | None = None,
     budget_remaining: float | None = None,
+    preferred_model: str = "",
 ) -> StateGraph:
     """Build a LangGraph subgraph from a SubAgentSpec definition.
 
@@ -354,6 +389,8 @@ def build_subgraph(
         tools: Parent's ToolRegistry (will be scoped via scope_tools()).
         memory: Optional MemoryManager (isolated for sub-agent).
         budget_remaining: Remaining budget for shared mode.
+        preferred_model: When set, wraps gateway in a proxy that forces
+            this model for all LLM calls (used for diverse sub-agent routing).
 
     Returns:
         StateGraph ready for compilation and execution.
@@ -361,7 +398,15 @@ def build_subgraph(
     # Scope tools
     scoped_tools = scope_tools(spec, tools)
 
-    if spec.template_type == "custom" and spec.node_config:
-        return _build_custom_subgraph(spec, gateway, scoped_tools, memory)
+    # Wrap gateway with model override when a preferred model is specified
+    effective_gateway: LLMGateway | _ModelOverrideProxy = gateway
+    if preferred_model:
+        effective_gateway = _ModelOverrideProxy(gateway, preferred_model)
+        logger.debug(
+            f"Sub-agent '{spec.name}' using model override: {preferred_model}"
+        )
 
-    return _build_fixed_subgraph(spec, gateway, scoped_tools)
+    if spec.template_type == "custom" and spec.node_config:
+        return _build_custom_subgraph(spec, effective_gateway, scoped_tools, memory)
+
+    return _build_fixed_subgraph(spec, effective_gateway, scoped_tools)

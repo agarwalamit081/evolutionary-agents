@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -111,3 +112,47 @@ class TestToolDefinitions:
     def test_seven_tools_registered(self) -> None:
         """Exactly 7 built-in tools are registered."""
         assert len(ALL_TOOL_DEFINITIONS) == 7
+
+
+class TestCodeExecutorCWD:
+    """Tests for code_executor setting CWD to results directory."""
+
+    @pytest.mark.asyncio
+    async def test_file_created_in_results_dir(self, tmp_path: Path) -> None:
+        """Files created with relative paths land in the results directory."""
+        from src.config.settings import AgentSettings
+
+        mock_settings = AgentSettings(results_root=str(tmp_path))
+        with patch("src.tools.builtin.code_executor.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+            await code_executor(
+                "import pathlib; pathlib.Path('test_output.txt').write_text('hello')"
+            )
+        assert (tmp_path / "test_output.txt").exists()
+        assert (tmp_path / "test_output.txt").read_text() == "hello"
+
+    @pytest.mark.asyncio
+    async def test_results_dir_auto_created(self, tmp_path: Path) -> None:
+        """Results directory is created automatically if missing."""
+        nested = tmp_path / "nested" / "results"
+        from src.config.settings import AgentSettings
+
+        mock_settings = AgentSettings(results_root=str(nested))
+        with patch("src.tools.builtin.code_executor.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+            await code_executor("print('ok')")
+        assert nested.exists()
+
+
+class TestFileWriterResultsDir:
+    """Tests for file_writer defaulting to results_root."""
+
+    @pytest.mark.asyncio
+    async def test_default_sandbox_is_results_root(self, tmp_path: Path) -> None:
+        """file_writer without explicit sandbox_root uses results_root."""
+        from src.config.settings import AgentSettings
+
+        mock_settings = AgentSettings(results_root=str(tmp_path))
+        with patch("src.tools.builtin.file_writer.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+            result = await file_writer("test.txt", "results content", create_dirs=True)
+
+        assert "success" in result.lower() or "wrote" in result.lower()
+        assert (tmp_path / "test.txt").read_text() == "results content"

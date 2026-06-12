@@ -77,6 +77,84 @@ class ModelRouter:
             return chain[0]
         return "qwen3.5-flash"
 
+    def route_reasoning(self) -> str:
+        """Select the configured reasoning model.
+
+        Uses the ``reasoning_llm_model`` from settings (e.g. deepseek-v4-pro).
+        Falls back to ``route(CRITICAL)`` when the provider has no API key.
+
+        Returns:
+            A model identifier string (litellm format).
+        """
+        model = self._settings.llm.reasoning_llm_model
+        provider = self._extract_provider(model)
+        if self._has_provider_key(provider):
+            return model
+        logger.warning(
+            f"Reasoning model {model} provider {provider} has no API key, "
+            f"falling back to CRITICAL routing"
+        )
+        return self.route(TaskComplexity.CRITICAL)
+
+    def route_diverse(
+        self,
+        n: int,
+        complexity: TaskComplexity,
+        exclude_providers: set[str] | None = None,
+    ) -> list[str]:
+        """Return *n* models from different providers for a given complexity.
+
+        Used when spawning parallel sub-agents to spread load across
+        providers and avoid rate limits.  Falls back to cycling through
+        whatever providers are available.
+
+        Args:
+            n: Number of distinct models to return.
+            complexity: Task complexity level for tier selection.
+            exclude_providers: Providers to skip.
+
+        Returns:
+            List of *n* model identifiers, one per provider where possible.
+        """
+        excluded = (exclude_providers or set()) | self._exclude_providers
+        tier, chain_key = COMPLEXITY_TIER_MAP.get(
+            complexity, (ModelTier.CHEAP, "claude-haiku-4-5-20251001")
+        )
+
+        # Collect one model per provider at the target tier
+        provider_to_model: dict[str, str] = {}
+        for model_id, spec in MODEL_REGISTRY.items():
+            if spec.tier != tier:
+                continue
+            provider = self._extract_provider(model_id)
+            if provider in excluded or provider in provider_to_model:
+                continue
+            if self._has_provider_key(provider):
+                provider_to_model[provider] = model_id
+
+        # Supplement from the fallback chain (may cross tiers)
+        if len(provider_to_model) < n:
+            for model_id in FALLBACK_CHAINS.get(chain_key, []):
+                provider = self._extract_provider(model_id)
+                if provider in excluded or provider in provider_to_model:
+                    continue
+                if self._has_provider_key(provider):
+                    provider_to_model[provider] = model_id
+                if len(provider_to_model) >= n:
+                    break
+
+        candidates = list(provider_to_model.values())
+
+        if not candidates:
+            # Absolute fallback: just repeat the default route
+            return [self.route(complexity, exclude_providers)] * max(1, n)
+
+        # Cycle through candidates to fill n slots
+        result: list[str] = []
+        for i in range(n):
+            result.append(candidates[i % len(candidates)])
+        return result
+
     def mark_provider_unhealthy(self, provider: str) -> None:
         """Temporarily exclude a provider from routing."""
         self._exclude_providers.add(provider)

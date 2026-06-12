@@ -8,9 +8,15 @@ from pathlib import Path
 
 from loguru import logger
 
+from src.config.settings import get_settings
+
 
 async def code_executor(code: str, timeout: int = 30) -> str:
     """Execute Python code in a subprocess and return the output.
+
+    The subprocess working directory is set to ``settings.agent.results_root``
+    so that files created via relative paths (e.g. ``plt.savefig("chart.png")``)
+    land in the ``results/`` directory instead of the project root.
 
     Args:
         code: Python source code to execute.
@@ -20,6 +26,10 @@ async def code_executor(code: str, timeout: int = 30) -> str:
         Stdout + stderr from the execution.
     """
     logger.info(f"Executing code ({len(code)} chars, timeout={timeout}s)")
+
+    # Resolve results directory as subprocess CWD
+    results_dir = Path(get_settings().agent.results_root).resolve()
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", prefix="turing_exec_", delete=False
@@ -32,6 +42,7 @@ async def code_executor(code: str, timeout: int = 30) -> str:
             "python", tmp_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=str(results_dir),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 

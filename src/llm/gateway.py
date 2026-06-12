@@ -73,6 +73,10 @@ class LLMGateway:
         self._cost_tracker: CostTracker | None = None
         self._cache: PromptCache | None = None
 
+        # History compression (runs every 5th call to reduce overhead)
+        from src.llm.history_compressor import HistoryCompressor
+        self._history_compressor = HistoryCompressor()
+
         # Configure litellm
         self._configure_litellm()
 
@@ -123,6 +127,9 @@ class LLMGateway:
         assert model is not None  # guaranteed by routing logic
 
         provider = self._extract_provider(model)
+
+        # Compress older messages to reduce token consumption
+        messages = self._history_compressor.compress(messages)
 
         # Rate limiting
         await self._rate_limiter.acquire(provider, self._estimate_tokens(messages))

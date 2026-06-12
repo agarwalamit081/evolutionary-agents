@@ -23,7 +23,7 @@ async def file_writer(
         file_path: Relative path to the file to write.
         content: Content to write.
         sandbox_root: Root directory for sandboxing. Defaults to
-            ``settings.agent.workspace_root`` (``.turing/workspace``).
+            ``settings.agent.results_root`` (``results``).
         create_dirs: Create parent directories if they don't exist.
         encoding: File encoding.
 
@@ -31,7 +31,7 @@ async def file_writer(
         Confirmation message or error.
     """
     if sandbox_root is None:
-        sandbox_root = get_settings().agent.workspace_root
+        sandbox_root = get_settings().agent.results_root
     root = Path(sandbox_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     target = (root / file_path).resolve()

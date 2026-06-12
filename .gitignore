@@ -48,6 +48,9 @@ Thumbs.db
 *.sqlite3
 .turing/
 
+# Agent output files (charts, data exports, reports)
+results/
+
 # Claude Code configuration
 .claude/
 CLAUDE.md

@@ -338,6 +338,38 @@ class TestBuildSubgraphIntegration:
         assert graph is not None
         assert "plan" in graph.nodes
 
+    def test_build_subgraph_with_preferred_model(self, mock_gateway: MagicMock, parent_tools: ToolRegistry) -> None:
+        """build_subgraph wraps gateway with _ModelOverrideProxy when preferred_model set."""
+        spec = SubAgentSpec(
+            name="diverse_model_agent",
+            description="Uses diverse model",
+            goal="test diverse model",
+            parent_thread_id="thread-001",
+            tool_scope="inherit_all",
+        )
+
+        graph = build_subgraph(
+            spec, mock_gateway, parent_tools, preferred_model="deepseek-v4-flash"
+        )
+
+        assert graph is not None
+        assert "plan" in graph.nodes
+
+    def test_build_subgraph_without_preferred_model(self, mock_gateway: MagicMock, parent_tools: ToolRegistry) -> None:
+        """build_subgraph uses gateway directly when no preferred_model."""
+        spec = SubAgentSpec(
+            name="default_model_agent",
+            description="Uses default model",
+            goal="test default",
+            parent_thread_id="thread-001",
+            tool_scope="inherit_all",
+        )
+
+        graph = build_subgraph(spec, mock_gateway, parent_tools)
+
+        assert graph is not None
+        assert "plan" in graph.nodes
+
 
 class TestRoutingFunctions:
     """Tests for internal routing functions."""

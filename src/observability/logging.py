@@ -167,6 +167,36 @@ def _get_json_format() -> str:
     return ""
 
 
+# ─── Category-Based Log Sinks ──────────────────────────────────────────
+
+
+# Mapping from log category name to module path prefixes.
+# Messages from modules matching any prefix are written to <category>.log
+# IN ADDITION to the catch-all turing_agent.log.
+LOG_CATEGORIES: dict[str, list[str]] = {
+    "llm": ["src.llm."],
+    "tools": ["src.tools.", "src.sandbox."],
+    "subagents": ["src.agents."],
+}
+
+
+def _make_module_filter(prefixes: list[str]) -> Any:
+    """Create a loguru filter that matches records from specific module prefixes.
+
+    Args:
+        prefixes: Module path prefixes to match (e.g. ``["src.llm."]``).
+
+    Returns:
+        A filter callable for ``logger.add(filter=...)``.
+    """
+
+    def _filter(record: Any) -> bool:
+        name: str = record.get("name", "")
+        return any(name.startswith(p) for p in prefixes)
+
+    return _filter
+
+
 # Track if setup has been called to ensure idempotency
 _logging_configured: bool = False
 
@@ -240,6 +270,26 @@ def setup_logging(settings: LoggingSettings | None = None) -> None:
         enqueue=True,
     )
 
+    # ─── Category-Specific File Handlers ──────────────────────────────
+    for category, prefixes in LOG_CATEGORIES.items():
+        module_filter = _make_module_filter(prefixes)
+
+        def _category_filter(record: Any, mf: Any = module_filter) -> bool:
+            return mf(record) and pii_redaction_filter(record)
+
+        logger.add(
+            log_dir / f"{category}.log",
+            format=_get_file_format(),
+            level=settings.log_level,
+            rotation=settings.log_rotation,
+            retention=settings.log_retention,
+            compression="zip",
+            backtrace=True,
+            diagnose=True,
+            filter=_category_filter,
+            enqueue=True,
+        )
+
     # ─── JSON Handler (for structured logging) ─────────────────────────
     if settings.log_format == "structured":
         logger.add(
@@ -304,4 +354,6 @@ __all__ = [
     "PIIRedactor",
     "pii_redaction_filter",
     "InterceptHandler",
+    "LOG_CATEGORIES",
+    "_make_module_filter",
 ]

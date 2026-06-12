@@ -43,6 +43,7 @@ class SubAgentRunner:
         self._gateway = gateway
         self._tools = tools
         self._memory = memory
+        self._model_affinity: str = ""  # Set by delegate_node for diverse routing
 
     @property
     def definition(self) -> SubAgentSpec:
@@ -101,7 +102,8 @@ class SubAgentRunner:
         try:
             # Build and compile subgraph
             graph = build_subgraph(
-                spec, self._gateway, self._tools, self._memory, budget
+                spec, self._gateway, self._tools, self._memory, budget,
+                preferred_model=self._model_affinity,
             )
             compiled = graph.compile()
 

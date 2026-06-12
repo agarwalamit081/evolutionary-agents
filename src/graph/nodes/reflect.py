@@ -42,6 +42,15 @@ async def reflect_node(
     goal_text = goal.text if goal else "Unknown goal"
     logger.info(f"Reflecting on execution of: {goal_text[:60]}...")
 
+    # ── Memory Folding Check ────────────────────────────────────────────
+    if gateway is not None:
+        fold_update = await _check_and_fold(state, gateway)
+        if fold_update is not None:
+            # Folding happened — return fold result (includes a summary
+            # message that replaces the conversation history). The normal
+            # reflection logic will run on the next iteration.
+            return fold_update
+
     # Try LLM reflection first, fall back to heuristics
     if gateway is not None:
         result = await _llm_reflect(gateway, state)
@@ -315,3 +324,44 @@ def _detect_agent_gaps_heuristic(
         )
 
     return gaps
+
+
+# ── Memory Folding ─────────────────────────────────────────────────────
+
+
+async def _check_and_fold(
+    state: AgentState,
+    gateway: LLMGateway,
+) -> dict[str, Any] | None:
+    """Check if memory folding is needed and perform it.
+
+    Returns a partial state update if folding occurred, or None.
+    The update replaces the message history with a compressed summary.
+
+    Args:
+        state: Current agent state.
+        gateway: LLM gateway for generating compressed memories.
+
+    Returns:
+        Partial state update dict, or None if no folding needed.
+    """
+    from src.memory.folding import MemoryFolder
+
+    folder = MemoryFolder(gateway)
+
+    if not folder.should_fold(state):
+        return None
+
+    try:
+        result = await folder.fold(state)
+        summary_msg = folder.build_summary_message(result)
+
+        return {
+            "phase": Phase.REFLECT,
+            "messages": [summary_msg],
+            "fold_history": [result.to_dict()],
+            "last_fold_iteration": state.get("iteration_count", 0),
+        }
+    except Exception as exc:
+        logger.warning(f"Memory folding failed (non-fatal): {exc}")
+        return None

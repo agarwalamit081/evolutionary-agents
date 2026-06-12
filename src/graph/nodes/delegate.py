@@ -127,6 +127,21 @@ async def delegate_node(
 
     # Phase 2: Execute all runners in parallel
     if runners_with_params:
+        # Assign diverse models when running multiple sub-agents
+        if len(runners_with_params) > 1 and gateway is not None:
+            from src.graph.enums import TaskComplexity
+
+            models = gateway._model_router.route_diverse(
+                n=len(runners_with_params),
+                complexity=TaskComplexity.SIMPLE,
+            )
+            for i, (runner, *_) in enumerate(runners_with_params):
+                runner._model_affinity = models[i]
+            logger.debug(
+                f"Assigned diverse models to {len(runners_with_params)} sub-agents: "
+                f"{models}"
+            )
+
         from src.agents.runner import run_parallel
 
         parallel_results = await run_parallel(runners_with_params)

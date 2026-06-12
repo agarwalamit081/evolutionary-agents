@@ -58,6 +58,8 @@ def initial_state(
         final_output="",
         is_complete=False,
         errors=[],
+        fold_history=[],
+        last_fold_iteration=0,
         thread_id=thread_id,
         generation=0,
     )

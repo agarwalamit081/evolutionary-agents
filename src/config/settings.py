@@ -50,8 +50,8 @@ class LLMProviderSettings(BaseSettings):
     fast_llm_model: str = "gpt-4o-mini-2024-07-18"
 
     # Heavy model for reasoning, planning, complex analysis
-    reasoning_llm_provider: str = "anthropic"
-    reasoning_llm_model: str = "claude-sonnet-4-6"
+    reasoning_llm_provider: str = "deepseek"
+    reasoning_llm_model: str = "deepseek-v4-pro"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -263,6 +263,13 @@ class AgentSettings(BaseSettings):
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"
+    results_root: str = "results"
+
+    # Memory folding (autonomous context compression)
+    memory_folding_enabled: bool = True
+    memory_folding_interval: int = 10
+    memory_folding_token_threshold: int = 50_000
+    memory_folding_max_folds: int = 3
 
     model_config = SettingsConfigDict(
         env_file=".env",

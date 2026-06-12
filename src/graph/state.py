@@ -82,6 +82,10 @@ class AgentState(TypedDict, total=False):
     is_complete: bool
     errors: Annotated[list[str], operator.add]
 
+    # ─── Memory Folding ─────────────────────────────────────────────────
+    fold_history: Annotated[list[dict[str, Any]], operator.add]
+    last_fold_iteration: int
+
     # ─── Metadata ───────────────────────────────────────────────────────
     thread_id: str
     generation: int

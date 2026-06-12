@@ -22,6 +22,7 @@ PROVIDER_LIMITS: dict[str, tuple[int, int]] = {
     "moonshot": (60, 80_000),
     "minimax": (60, 80_000),
     "openrouter": (30, 50_000),
+    "nvidia": (40, 60_000),
 }
 
 DEFAULT_RPM: int = 60

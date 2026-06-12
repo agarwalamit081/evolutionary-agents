@@ -432,6 +432,10 @@ class LLMGateway:
         if api_key:
             kwargs["api_key"] = api_key
 
+        # NVIDIA API requires explicit base URL
+        if provider == "nvidia":
+            kwargs["api_base"] = "https://integrate.api.nvidia.com/v1"
+
         return kwargs
 
     def _get_api_key(self, provider: str) -> str | None:

@@ -107,6 +107,9 @@ class ModelRouter:
         # litellm format: "provider/model-name" or "model-name"
         if "/" in model:
             return model.split("/")[0]
+        # Registry key prefix for NVIDIA free-tier models
+        if model.startswith("nvidia-"):
+            return "nvidia"
         # Known model prefixes
         if model.startswith("gpt-") or model.startswith("text-embedding-"):
             return "openai"

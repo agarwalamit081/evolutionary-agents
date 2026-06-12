@@ -39,6 +39,7 @@ class LLMProviderSettings(BaseSettings):
     openrouter_api_key: Optional[str] = None
     groq_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
+    nvidia_api_key: Optional[str] = None
 
     # Default model selection
     default_llm_provider: str = "deepseek"
@@ -79,6 +80,7 @@ class LLMProviderSettings(BaseSettings):
             "groq",
             "google",
             "openrouter",
+            "nvidia",
             "ollama",
         }
         if v not in allowed:
@@ -104,6 +106,7 @@ class LLMProviderSettings(BaseSettings):
             "groq": self.groq_api_key,
             "google": self.google_api_key,
             "openrouter": self.openrouter_api_key,
+            "nvidia": self.nvidia_api_key,
             "ollama": None,  # Local, no key needed
         }
         return key_map.get(provider)

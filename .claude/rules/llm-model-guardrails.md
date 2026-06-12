@@ -62,7 +62,7 @@ Use the exact model ID strings below. Do not guess or invent alternatives.
 |---|---|---|---|---|---|---|---|---|
 | `gpt-4.1-mini-2025-04-14` | Cheap | 128K | 32K (~33K) | Text, Image | Text | ✅ | ✅ | ✅ |
 | `gpt-4o-mini-2024-07-18` | Very Cheap | 128K | 16K | Text, Image | Text | ✅ | ✅ | ✅ |
-| `gpt-5-nano-2025-08-07` | Cheap | 128K | 128K | Text, Image | Text | ✅ | ✅ | ✅ |
+| `gpt-5.4-mini` | Moderate | 200K+ | 128K | Text, Image, Audio | Text, Audio | ✅ | ✅ | ✅ |
 | `gpt-5.4-nano-2026-03-17` | Cheap | 128K | 128K | Text, Image | Text | ✅ | ✅ | ✅ |
 | `gpt-5-mini-2025-08-07` | Moderate | 200K+ | 128K | Text, Image, Audio | Text, Audio | ✅ | ✅ | ✅ |
 | `gpt-5-nano-2025-08-07` | Cheap | 128K | 128K | Text, Image | Text | ✅ | ✅ | ✅ |
@@ -125,6 +125,31 @@ Use the exact model ID strings below. Do not guess or invent alternatives.
 | `deepseek-r1:8b` | Local (Free) | 32K-64K | 8K-32K |
 | `gemma4:latest` | Local (Free) | 32K-128K | 8K |
 | `qwen3-vl:8b` | Local (Free) | 32K-128K | 33K |
+
+### NVIDIA (Free Tier via build.nvidia.com)
+
+All models accessed via `NVIDIA_API_KEY`. Registry keys use `nvidia-` prefix (e.g., `nvidia-llama-3.3-70b`). litellm model_id format: `nvidia/<nvidia-api-model-id>`.
+
+| Registry Key | litellm Model ID | Context Window | Max Output | Images |
+|---|---|---|---|---|
+| `nvidia-nemotron-super-120b` | `nvidia/nvidia/nemotron-3-super-120b-a12b` | 128K | 65K | No |
+| `nvidia-nemotron-ultra-550b` | `nvidia/nvidia/nemotron-3-ultra-550b-a55b` | 128K | 65K | No |
+| `nvidia-nemotron-super-49b` | `nvidia/nvidia/llama-3.3-nemotron-super-49b-v1` | 128K | 32K | No |
+| `nvidia-nemotron-super-49b-v1.5` | `nvidia/nvidia/llama-3.3-nemotron-super-49b-v1.5` | 128K | 32K | No |
+| `nvidia-gpt-oss-120b` | `nvidia/openai/gpt-oss-120b` | 128K | 65K | No |
+| `nvidia-qwen3-next-80b` | `nvidia/qwen/qwen3-next-80b-a3b-instruct` | 128K | 65K | No |
+| `nvidia-qwen3.5-397b` | `nvidia/qwen/qwen3.5-397b-a17b` | 128K | 65K | No |
+| `nvidia-qwen3.5-122b` | `nvidia/qwen/qwen3.5-122b-a10b` | 128K | 65K | No |
+| `nvidia-glm-5-1` | `nvidia/z-ai/glm-5.1` | 128K | 65K | No |
+| `nvidia-llama-3.3-70b` | `nvidia/meta/llama-3.3-70b-instruct` | 128K | 32K | No |
+| `nvidia-llama-3.2-90b-vision` | `nvidia/meta/llama-3.2-90b-vision-instruct` | 128K | 32K | Yes |
+| `nvidia-deepseek-v4-flash` | `nvidia/deepseek-ai/deepseek-v4-flash` | 128K | 65K | No |
+| `nvidia-deepseek-v4-pro` | `nvidia/deepseek-ai/deepseek-v4-pro` | 128K | 65K | No |
+| `nvidia-minimax-m2-7` | `nvidia/minimaxai/minimax-m2.7` | 128K | 65K | No |
+| `nvidia-kimi-k2.6` | `nvidia/moonshotai/kimi-k2.6` | 128K | 65K | No |
+| `nvidia-step-3.5-flash` | `nvidia/stepfun-ai/step-3.5-flash` | 128K | 65K | No |
+
+**Note**: The NVIDIA-hosted versions of `glm-5.1` (`nvidia-glm-5-1`) and `minimax-m2.7` (`nvidia-minimax-m2-7`) are FREE on NVIDIA API and are NOT blocked — only the paid provider versions are blocked.
 
 ---
 

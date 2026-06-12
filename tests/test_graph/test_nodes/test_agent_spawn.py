@@ -234,8 +234,9 @@ class TestAgentSpawnNode:
 
         # No new agents spawned in this call (delta is empty)
         assert len(result["sub_agents_spawned"]) == 0
-        # All gaps should be deferred since limit was already reached
-        assert len(result["pending_agent_gaps"]) == MAX_SUB_AGENTS_PER_RUN + 2
+        # Remaining gaps should be converted to tool gaps, not agent gaps
+        assert result["pending_agent_gaps"] == []
+        assert len(result["pending_tool_gaps"]) == MAX_SUB_AGENTS_PER_RUN + 2
 
     @pytest.mark.asyncio
     async def test_validation_failure_skips_agent(self, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock) -> None:
@@ -276,10 +277,11 @@ class TestAgentSpawnNode:
                 sub_agent_registry=mock_registry,
             )
 
-            # Should not spawn, gap should remain
+            # Should not spawn, failed gap should be converted to tool gap
             assert result["phase"] == Phase.EXECUTE
             assert len(result["sub_agents_spawned"]) == 0
-            assert len(result["pending_agent_gaps"]) == 1
+            assert result["pending_agent_gaps"] == []
+            assert len(result["pending_tool_gaps"]) == 1
 
     @pytest.mark.asyncio
     async def test_duplicate_name_validation(self, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock) -> None:
@@ -320,9 +322,10 @@ class TestAgentSpawnNode:
                 sub_agent_registry=mock_registry,
             )
 
-            # Should not spawn duplicate
+            # Should not spawn duplicate, gap converted to tool gap
             assert len(result["sub_agents_spawned"]) == 0
-            assert len(result["pending_agent_gaps"]) == 1
+            assert result["pending_agent_gaps"] == []
+            assert len(result["pending_tool_gaps"]) == 1
 
     @pytest.mark.asyncio
     async def test_llm_failure_returns_none(self, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock) -> None:
@@ -336,9 +339,10 @@ class TestAgentSpawnNode:
             sub_agent_registry=mock_registry,
         )
 
-        # Gap should remain, no agent spawned
+        # Gap should be converted to tool gap, no agent spawned
         assert len(result["sub_agents_spawned"]) == 0
-        assert len(result["pending_agent_gaps"]) == 1
+        assert result["pending_agent_gaps"] == []
+        assert len(result["pending_tool_gaps"]) == 1
 
     @pytest.mark.asyncio
     async def test_registers_spawned_agent(self, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock) -> None:

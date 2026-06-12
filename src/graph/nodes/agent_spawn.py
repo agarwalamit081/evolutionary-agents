@@ -66,7 +66,7 @@ async def agent_spawn_node(
         }
 
     spawned: list[dict[str, Any]] = []
-    remaining_gaps: list[str] = []
+    converted_tool_gaps: list[str] = []
     created_count = len(state.get("sub_agents_spawned", []))
 
     for gap_description in pending_gaps:
@@ -74,12 +74,17 @@ async def agent_spawn_node(
         if created_count >= MAX_SUB_AGENTS_PER_RUN:
             logger.warning(
                 f"Max sub-agents per run ({MAX_SUB_AGENTS_PER_RUN}) reached, "
-                f"remaining gaps deferred"
+                f"converting remaining agent gaps to tool gaps"
             )
-            remaining_gaps.append(gap_description)
-            continue
+            # Convert remaining unhandled agent gaps into tool creation opportunities
+            remaining_idx = pending_gaps.index(gap_description)
+            converted_tool_gaps = [
+                f"tool to handle subtask: {g}"
+                for g in pending_gaps[remaining_idx:]
+            ]
+            break
 
-        result = await _spawn_single_agent(
+        spawn_result = await _spawn_single_agent(
             gap_description=gap_description,
             gateway=gateway,
             tools=tools,
@@ -87,18 +92,25 @@ async def agent_spawn_node(
             state=state,
         )
 
-        if result is not None:
-            spawned.append(result)
+        if spawn_result is not None:
+            spawned.append(spawn_result)
             created_count += 1
-            logger.info(f"Spawned sub-agent '{result['name']}'")
+            logger.info(f"Spawned sub-agent '{spawn_result['name']}'")
         else:
-            remaining_gaps.append(gap_description)
+            # Failed spawn — convert to tool gap as fallback
+            converted_tool_gaps.append(f"tool to handle subtask: {gap_description}")
 
-    return {
+    result: dict[str, Any] = {
         "phase": Phase.DELEGATE if spawned else Phase.EXECUTE,
-        "pending_agent_gaps": remaining_gaps,
+        "pending_agent_gaps": [],
         "sub_agents_spawned": spawned,
     }
+
+    # If remaining gaps were converted to tool gaps, include them
+    if converted_tool_gaps:
+        result["pending_tool_gaps"] = converted_tool_gaps
+
+    return result
 
 
 async def _spawn_single_agent(

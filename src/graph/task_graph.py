@@ -144,6 +144,7 @@ def build_task_graph(
     graph.add_conditional_edges("agent_spawn", route_after_agent_spawn, {
         "delegate": "delegate",
         "plan": "plan",
+        "tool_create": "tool_create",
     })
 
     graph.add_conditional_edges("delegate", route_after_delegate, {

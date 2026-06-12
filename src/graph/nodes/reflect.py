@@ -110,6 +110,20 @@ def _heuristic_reflect(
     if missing_tools:
         lessons.append(f"Missing tool capabilities detected: {', '.join(missing_tools)}")
 
+    # Detect code_executor overuse as a tool gap signal — if the agent
+    # relied on code_executor 3+ times, a dedicated tool may be better
+    code_exec_count = sum(
+        1 for tr in tool_results
+        if hasattr(tr, "tool_name") and tr.tool_name == "code_executor"
+    )
+    if code_exec_count >= 3 and not missing_tools:
+        missing_tools.append(
+            "dedicated tool for recurring code_executor usage pattern"
+        )
+        lessons.append(
+            f"code_executor used {code_exec_count} times — consider a dedicated tool"
+        )
+
     should_replan = completion_ratio < 0.3 and has_errors
     should_evolve = (
         completion_ratio >= 0.5

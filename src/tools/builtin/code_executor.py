@@ -60,9 +60,11 @@ TOOL_DEFINITION = {
     "name": "code_executor",
     "handler": code_executor,
     "description": (
-        "Execute Python code in a subprocess and return stdout/stderr. "
-        "Use for running calculations, data processing, or testing code snippets. "
-        "Code runs in an isolated process with a configurable timeout."
+        "Execute Python code in a subprocess for one-off calculations, quick "
+        "data transformations, and testing code snippets. Code runs in an "
+        "isolated process with a configurable timeout. Do NOT use for: file I/O "
+        "(use file_writer/file_reader), HTTP requests to specific APIs, or "
+        "tasks that recur across steps."
     ),
     "parameters": {
         "type": "object",

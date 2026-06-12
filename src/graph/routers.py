@@ -253,24 +253,26 @@ def route_after_agent_spawn(state: AgentState) -> str:
 
     Returns:
         "delegate" — sub-agents were spawned, delegate subtasks to them
-        "tool_create" — converted tool gaps exist from max-agents fallback
+        "tool_create" — no agents spawned, but converted tool gaps exist
         "plan" — no sub-agents spawned and no tool gaps, replan without them
     """
     sub_agents_spawned = state.get("sub_agents_spawned", [])
     pending_tool_gaps = state.get("pending_tool_gaps", [])
 
     if sub_agents_spawned:
-        # Check if we also have tool gaps from converted agent gaps
+        # Always delegate first when agents exist. Converted tool gaps will be
+        # handled in subsequent reflect → tool_create cycles after delegation.
         if pending_tool_gaps:
             logger.info(
                 f"{len(sub_agents_spawned)} sub-agent(s) spawned + "
-                f"{len(pending_tool_gaps)} tool gap(s), routing to tool_create"
+                f"{len(pending_tool_gaps)} tool gap(s), delegating first "
+                f"(tool gaps handled in next reflect cycle)"
             )
-            return "tool_create"
-        logger.info(
-            f"{len(sub_agents_spawned)} sub-agent(s) spawned, "
-            f"routing to delegate"
-        )
+        else:
+            logger.info(
+                f"{len(sub_agents_spawned)} sub-agent(s) spawned, "
+                f"routing to delegate"
+            )
         return "delegate"
 
     # No agents spawned — check if we can create tools as fallback

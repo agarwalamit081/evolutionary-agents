@@ -51,6 +51,7 @@ async def agent_spawn_node(
         return {
             "phase": Phase.EXECUTE,
             "pending_agent_gaps": [],
+            "attempted_agent_gaps": [],
             "sub_agents_spawned": [],
         }
 
@@ -62,11 +63,13 @@ async def agent_spawn_node(
         return {
             "phase": Phase.EXECUTE,
             "pending_agent_gaps": [],
+            "attempted_agent_gaps": [],
             "sub_agents_spawned": [],
         }
 
     spawned: list[dict[str, Any]] = []
     converted_tool_gaps: list[str] = []
+    attempted: list[str] = []
     created_count = len(state.get("sub_agents_spawned", []))
 
     for gap_description in pending_gaps:
@@ -92,6 +95,8 @@ async def agent_spawn_node(
             state=state,
         )
 
+        attempted.append(gap_description)
+
         if spawn_result is not None:
             spawned.append(spawn_result)
             created_count += 1
@@ -103,6 +108,7 @@ async def agent_spawn_node(
     result: dict[str, Any] = {
         "phase": Phase.DELEGATE if spawned else Phase.EXECUTE,
         "pending_agent_gaps": [],
+        "attempted_agent_gaps": attempted,
         "sub_agents_spawned": spawned,
     }
 
@@ -153,7 +159,7 @@ async def _spawn_single_agent(
         extractor = StructuredOutputManager()
         response = await gateway.acompletion(
             messages=[
-                {"role": "system", "content": AGENT_SPAWN_SYSTEM},
+                {"role": "system", "content": str(AGENT_SPAWN_SYSTEM)},
                 {"role": "user", "content": user_prompt},
             ],
         )

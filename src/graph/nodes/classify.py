@@ -123,7 +123,7 @@ async def _llm_classify(
 
         user_prompt = CLASSIFY_USER.format(goal_text=goal_text)
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": CLASSIFY_SYSTEM},
+            {"role": "system", "content": str(CLASSIFY_SYSTEM)},
             {"role": "user", "content": user_prompt},
         ]
         response = await gateway.acompletion(

@@ -50,6 +50,7 @@ def initial_state(
         pending_tool_gaps=[],
         attempted_tool_gaps=[],
         pending_agent_gaps=[],
+        attempted_agent_gaps=[],
         sub_agents_spawned=[],
         delegation_results=[],
         total_tokens_used=0,

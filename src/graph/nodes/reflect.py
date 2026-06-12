@@ -227,7 +227,7 @@ async def _llm_reflect(
         )
 
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": REFLECT_SYSTEM},
+            {"role": "system", "content": str(REFLECT_SYSTEM)},
             {"role": "user", "content": user_prompt},
         ]
 
@@ -308,6 +308,11 @@ def _detect_agent_gaps_heuristic(
     """
     # Skip if sub-agents already spawned this run
     if state.get("sub_agents_spawned"):
+        return []
+
+    # Skip if agent spawning was already attempted (prevents infinite loop
+    # when spawn fails and heuristic re-detects the same gaps)
+    if state.get("attempted_agent_gaps"):
         return []
 
     gaps: list[str] = []

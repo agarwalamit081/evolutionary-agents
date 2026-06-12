@@ -149,7 +149,7 @@ async def _llm_verify(
         )
 
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": VERIFY_SYSTEM},
+            {"role": "system", "content": str(VERIFY_SYSTEM)},
             {"role": "user", "content": user_prompt},
         ]
 

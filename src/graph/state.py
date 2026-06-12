@@ -69,6 +69,7 @@ class AgentState(TypedDict, total=False):
     # ─── Sub-Agent Delegation ──────────────────────────────────────────
     sub_agents: list[SubAgentSpec]
     pending_agent_gaps: list[str]
+    attempted_agent_gaps: Annotated[list[str], operator.add]
     sub_agents_spawned: Annotated[list[dict[str, Any]], operator.add]
     delegation_results: Annotated[list[dict[str, Any]], operator.add]
 

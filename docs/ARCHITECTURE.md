@@ -384,13 +384,16 @@ All delegation attempts succeeded (9/9 in Q1, 1/1 in Q2, 1/1 in Q3). Sub-agents 
 
 ## Current Known Issues
 
-| Issue | Severity | Details |
-|:---|:---:|---|
-| No dynamic tools created organically | Medium | `code_executor` is a catch-all -- the LLM uses it for everything, so the reflect node never identifies tool gaps. The `missing_tools` field is always empty. This is a design limitation, not a bug. Consider restricting `code_executor` scope or adding explicit gap analysis. |
-| `pending_agent_gaps` accumulates without dedup | Medium | The `Annotated[list, operator.add]` reducer accumulates gaps across cycles. The list can grow to 24+ items with many duplicates. The `sub_agents_spawned` check prevents re-spawning, but the router still routes to `agent_spawn` with stale gaps, consuming iterations. |
-| Workspace files not written | Low | No files written to `.turing/workspace/` -- the agent uses `code_executor` for in-process work rather than `file_writer`. The `file_writer` tool exists but is rarely selected by the LLM. |
-| Max 3 sub-agents limit works correctly | Info | The rate limit fires properly: "Max sub-agents per run (3) reached, remaining gaps deferred". |
-| Memory retrieval works cross-run | Info | Q2 and Q3 both retrieved 5 memories from prior runs, using them for context. |
+| Issue | Severity | Status | Details |
+|:---|:---:|:---:|---|
+| ~~No dynamic tools created organically~~ | Medium | Resolved | `code_executor` was a catch-all. Fixed by: narrowing tool description, adding tool efficiency evaluation to reflect prompt, and heuristic overuse detection (3+ code_executor calls triggers a tool gap). |
+| ~~`pending_agent_gaps` accumulates without dedup~~ | Medium | Resolved | Gaps are now deduplicated against existing state before returning from reflect. Router skips agent_spawn when sub-agents already spawned. |
+| ~~Workspace files not written~~ | Low | Resolved | Execute prompt now includes tool selection guidelines encouraging file_writer for persistent output. code_executor description narrowed to discourage file I/O usage. |
+| ~~Max sub-agents limit discards remaining gaps~~ | Medium | Resolved | When MAX_SUB_AGENTS_PER_RUN is reached, remaining agent gaps are now converted to tool creation opportunities instead of being silently deferred. |
+| Sub-agent tool quality untested | Medium | Open | Sub-agents can now create tools at runtime, but the quality and safety of tools created within sub-agent subgraphs has not been extensively tested end-to-end. |
+| Run history requires workspace directory | Low | Open | RunHistoryGenerator creates the workspace directory on first use. If the parent path is not writable, history generation is silently skipped. |
+| Max 3 sub-agents limit works correctly | Info | -- | The rate limit fires properly: "Max sub-agents per run (3) reached, remaining gaps converted to tool gaps". |
+| Memory retrieval works cross-run | Info | -- | Q2 and Q3 both retrieved 5 memories from prior runs, using them for context. |
 
 ---
 
@@ -405,14 +408,14 @@ Sub-agents are deliberately excluded from the evolution engine. If sub-agents co
 
 Instead, the **main agent evolves on behalf of its sub-agents**. When the evolution engine identifies improvements, it can mutate sub-agent prompts, tool scopes, and model tiers through the main agent's `SubAgentMutation` type.
 
-### Why Sub-Agents Inherit Tools But Cannot Create Their Own
+### Why Sub-Agents Can Now Create Their Own Tools
 
-Allowing sub-agents to create their own tools would create:
-- **Redundant tool creation**: Multiple sub-agents might independently create the same tool
-- **Safety surface expansion**: Each tool creation point multiplies the attack surface for code injection
-- **Coordination overhead**: Tools created by one sub-agent might conflict with those of another
+Sub-agents were initially restricted from creating tools (inheriting only from the parent). This was changed because:
+- **Capability gaps in sub-agents**: Sub-agents handling specialized domains sometimes need tools that the parent does not have (e.g., a data visualization sub-agent needing a chart rendering tool)
+- **Safety is maintained**: All tool creation goes through the same 7-layer safety pipeline with the same 14-module allowlist
+- **The sub-agent subgraph includes tool_create**: The fixed template always includes the `tool_create` node and `_route_after_reflect_sub` router, which routes to tool creation when gaps are detected
 
-By inheriting the parent's tool registry (including dynamically created tools), sub-agents get full capability without the complexity.
+Sub-agents with `tool_scope="inherit_all"` inherit all parent tools AND can create new ones. This gives them both immediate capability and the ability to extend themselves.
 
 ### Why Each Sub-Agent Has Isolated Memory
 
@@ -430,6 +433,43 @@ These limits prevent runaway resource consumption:
 - Each sub-agent spawns its own subgraph with multiple LLM calls
 - In testing, 3 was sufficient for complex multi-domain tasks
 - The limits can be configured via `settings.agent.max_sub_agents`
+
+---
+
+## Recent Improvements
+
+### Jinja2 Prompt Template System
+
+All prompt templates have been externalized from `src/graph/prompts.py` into a jinja2-based template package at `src/graph/prompts/templates/`. The `PromptTemplate` wrapper class provides a `.format()` method that delegates to `jinja2.Template.render()`, maintaining full backward compatibility with all node imports. This enables:
+
+- **Easier prompt tuning** without modifying Python code
+- **Prompt versioning** via git history on `.j2` files
+- **Template composition** using jinja2 features (`{% raw %}`, `{% block %}`, etc.)
+- **Future prompt registry** for A/B testing and evolution
+
+### Gap Deduplication
+
+Both `pending_tool_gaps` and `pending_agent_gaps` now deduplicate against existing state before returning from the reflect node. The router also guards against routing to `agent_spawn` when sub-agents have already been spawned for the current gaps.
+
+### Tool Efficiency Evaluation
+
+The reflect prompt now includes a 7th evaluation criterion: tool efficiency. When the agent uses `code_executor` for recurring patterns (3+ times), the heuristic reflector identifies this as a tool gap and suggests creating a dedicated tool. The `code_executor` tool description has been narrowed to discourage usage for file I/O and recurring tasks.
+
+### Max Sub-Agents Fallback
+
+When `MAX_SUB_AGENTS_PER_RUN` (3) is reached, remaining agent gaps are converted to tool creation opportunities rather than being silently deferred. The `route_after_agent_spawn` router now supports routing to `tool_create` when converted tool gaps exist, and the task graph has a new edge from `agent_spawn` to `tool_create`.
+
+### Run History Generation
+
+After each agent execution, a markdown run history file is generated at `.turing/workspace/run_history_YYYYMMDD_HHMMSS.md`. The file includes:
+
+- Timestamp, thread ID, goal text
+- Classification (strategy, confidence)
+- Plan steps with completion status
+- Tool usage breakdown and new tools created
+- Sub-agents spawned and delegation results
+- Metrics (iterations, tokens, cost)
+- Errors and final output
 
 ---
 

@@ -1,0 +1,71 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: turing-postgres
+    environment:
+      POSTGRES_DB: turing_agent
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - turing-net
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: turing-redis
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - turing-net
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: turing-agent
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/turing_agent
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - turing-workspace:/home/turing/.turing
+      - turing-logs:/home/turing/logs
+    networks:
+      - turing-net
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  turing-workspace:
+  turing-logs:
+
+networks:
+  turing-net:
+    driver: bridge

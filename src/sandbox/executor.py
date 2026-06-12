@@ -95,6 +95,47 @@ class SandboxExecutor:
             return await self._run_docker(code, test_code, effective_timeout)
         return await self._run_subprocess(combined, None, effective_timeout)
 
+    async def execute_with_packages(
+        self,
+        code: str,
+        packages: list[str],
+        timeout: int | None = None,
+    ) -> SandboxResult:
+        """Execute code with pre-approved packages installed in the sandbox.
+
+        Validates all requested packages against SAFE_PIP_PACKAGES before
+        execution. In Docker mode, packages are installed inside the container.
+        In subprocess mode, a temporary venv is created with the packages.
+
+        Args:
+            code: Python source code to execute.
+            packages: Package names to install (must be in SAFE_PIP_PACKAGES).
+            timeout: Maximum execution time in seconds.
+
+        Returns:
+            SandboxResult with execution output.
+        """
+        from src.tools.dynamic.allowlist import SAFE_PIP_PACKAGES
+
+        # Validate all packages against the allowlist
+        invalid = [p for p in packages if p not in SAFE_PIP_PACKAGES]
+        if invalid:
+            return SandboxResult(
+                success=False,
+                exit_code=1,
+                stdout="",
+                stderr=f"Blocked packages not in allowlist: {invalid}",
+                duration_seconds=0,
+                memory_mb=None,
+                timed_out=False,
+            )
+
+        effective_timeout = timeout or self._default_timeout
+
+        if self._mode == "docker":
+            return await self._run_docker_with_packages(code, packages, effective_timeout)
+        return await self._run_subprocess_with_packages(code, packages, effective_timeout)
+
     async def ensure_image(self) -> None:
         """Pull the configured Docker image if it is not available locally.
 
@@ -269,6 +310,114 @@ class SandboxExecutor:
             try:
                 script_path.unlink(missing_ok=True)
                 Path(tmp_dir).rmdir()
+            except OSError:
+                pass
+
+    # ── Package installation modes ────────────────────────────────────
+
+    async def _run_docker_with_packages(
+        self,
+        code: str,
+        packages: list[str],
+        timeout: int,
+    ) -> SandboxResult:
+        """Run code in Docker with pip install of approved packages."""
+        # Prepend pip install to the script
+        install_line = (
+            f"import subprocess; "
+            f"subprocess.run(['pip', 'install', '-q'] + {packages}, check=True)\n"
+        )
+        full_script = install_line + code
+        return await self._run_docker(full_script, None, timeout)
+
+    async def _run_subprocess_with_packages(
+        self,
+        code: str,
+        packages: list[str],
+        timeout: int,
+    ) -> SandboxResult:
+        """Run code in a temp venv with pip install of approved packages."""
+        start = time.monotonic()
+        tmp_dir = tempfile.mkdtemp(prefix="turing_pkg_sandbox_")
+        venv_dir = Path(tmp_dir) / "venv"
+        script_path = Path(tmp_dir) / "script.py"
+
+        try:
+            # Create venv
+            proc = await asyncio.create_subprocess_exec(
+                "python", "-m", "venv", str(venv_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=60)
+
+            # Install packages
+            pip_path = str(venv_dir / "bin" / "pip")
+            proc = await asyncio.create_subprocess_exec(
+                pip_path, "install", "-q", *packages,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=120)
+
+            # Write script
+            async with aiofiles.open(str(script_path), mode="w") as f:
+                await f.write(code)
+
+            # Execute in venv python
+            venv_python = str(venv_dir / "bin" / "python")
+            proc = await asyncio.create_subprocess_exec(
+                venv_python, str(script_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout,
+                )
+                duration = time.monotonic() - start
+                return SandboxResult(
+                    success=proc.returncode == 0,
+                    exit_code=proc.returncode,
+                    stdout=stdout_bytes.decode("utf-8", errors="replace"),
+                    stderr=stderr_bytes.decode("utf-8", errors="replace"),
+                    duration_seconds=round(duration, 4),
+                    memory_mb=None,
+                    timed_out=False,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                duration = time.monotonic() - start
+                return SandboxResult(
+                    success=False,
+                    exit_code=None,
+                    stdout="",
+                    stderr=f"Execution timed out after {timeout}s",
+                    duration_seconds=round(duration, 4),
+                    memory_mb=None,
+                    timed_out=True,
+                )
+
+        except Exception as exc:
+            duration = time.monotonic() - start
+            logger.error("Error in package sandbox: {}", exc)
+            return SandboxResult(
+                success=False,
+                exit_code=None,
+                stdout="",
+                stderr=str(exc),
+                duration_seconds=round(duration, 4),
+                memory_mb=None,
+                timed_out=False,
+            )
+        finally:
+            try:
+                script_path.unlink(missing_ok=True)
+                # Remove venv and tmp dir
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             except OSError:
                 pass
 

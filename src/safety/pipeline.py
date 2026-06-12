@@ -172,7 +172,7 @@ class SafetyPipeline:
         dangerous_modules = {
             "os", "sys", "subprocess", "shutil", "ctypes",
             "multiprocessing", "threading", "socket",
-            "http.server", "xml.etree", "pickle", "marshal",
+            "http.server", "pickle", "marshal",
             "importlib", "pkgutil", "code", "codeop",
         }
 

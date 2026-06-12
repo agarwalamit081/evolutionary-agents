@@ -12,6 +12,7 @@ from typing import Any
 # Modules that generated tool handlers are allowed to import.
 # The safety pipeline will allowlist these when validating generated tool code.
 ALLOWED_MODULES: frozenset[str] = frozenset({
+    # ── Core stdlib ────────────────────────────────────────────────
     "httpx",
     "json",
     "re",
@@ -30,11 +31,41 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     "base64",
     "urllib.parse",
     "html.parser",
+    "csv",
+    "io",
+    "xml.etree.ElementTree",
     "loguru",
+    # ── Data / AI packages ────────────────────────────────────────
+    "aiohttp",
+    "bs4",
+    "pandas",
+    "numpy",
+    "yaml",
+    "lxml",
+    "feedparser",
+    "xmltodict",
+    "jinja2",
+    "PIL",
 })
 
 # Maximum number of tools that can be created per agent run.
 MAX_TOOLS_PER_RUN: int = 3
+
+# Packages that can be pip-installed in the sandbox.
+# Only packages in this set may be requested for installation.
+SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
+    "aiohttp",
+    "beautifulsoup4",
+    "pandas",
+    "numpy",
+    "pyyaml",
+    "lxml",
+    "feedparser",
+    "xmltodict",
+    "jinja2",
+    "Pillow",
+    "httpx",
+})
 
 
 def get_materializer_namespace() -> dict[str, Any]:
@@ -51,11 +82,13 @@ def get_materializer_namespace() -> dict[str, Any]:
     import base64
     import collections
     import copy
+    import csv
     import dataclasses
     import datetime
     import decimal
     import hashlib
     import html.parser
+    import io
     import itertools
     import json
     import math
@@ -64,6 +97,7 @@ def get_materializer_namespace() -> dict[str, Any]:
     import textwrap
     import typing
     import urllib.parse
+    import xml.etree.ElementTree  # noqa: S405 — safe subset, no entity expansion
 
     namespace: dict[str, Any] = {
         "json": json,
@@ -84,27 +118,23 @@ def get_materializer_namespace() -> dict[str, Any]:
         "urllib.parse": urllib.parse,
         "html": html,
         "html.parser": html.parser,
+        "csv": csv,
+        "io": io,
+        "xml.etree.ElementTree": xml.etree.ElementTree,
     }
-
-    # httpx is an optional dependency — only include if installed
-    try:
-        import httpx
-
-        namespace["httpx"] = httpx
-    except ImportError:
-        pass
-
-    # loguru is optional — only include if installed
-    try:
-        import loguru
-
-        namespace["loguru"] = loguru
-    except ImportError:
-        pass
 
     # pathlib.Path as a convenience
     import pathlib
 
     namespace["pathlib"] = pathlib
+
+    # Optional packages — only include if installed
+    for mod_name in ("httpx", "loguru", "aiohttp", "bs4", "pandas", "numpy",
+                     "yaml", "lxml", "feedparser", "xmltodict", "jinja2", "PIL"):
+        try:
+            mod = __import__(mod_name)
+            namespace[mod_name] = mod
+        except ImportError:
+            pass
 
     return namespace

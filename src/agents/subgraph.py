@@ -175,7 +175,9 @@ def _build_fixed_subgraph(
     graph.add_edge("plan", "execute")
 
     # Conditional: execute loop
-    has_tool_create = spec.tool_scope == "self_create"
+    # Always enable tool creation for sub-agents — they can create tools
+    # regardless of whether they inherit parent tools or start empty
+    has_tool_create = True
     execute_targets = {
         "reflect": "reflect",
         "execute": "execute",

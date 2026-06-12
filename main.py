@@ -137,6 +137,19 @@ async def _run_agent(
     result = await compiled.ainvoke(state)
 
     logger.info("Agent execution complete")
+
+    # Generate run history (non-blocking, best-effort)
+    try:
+        from src.graph.run_history import RunHistoryGenerator
+
+        history_gen = RunHistoryGenerator(
+            workspace_root=settings.agent.workspace_root
+        )
+        history_path = await history_gen.generate(dict(result))
+        logger.info(f"Run history written to: {history_path}")
+    except Exception as e:
+        logger.debug(f"Run history generation skipped: {e}")
+
     return dict(result)
 
 

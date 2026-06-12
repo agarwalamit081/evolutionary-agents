@@ -1,9 +1,8 @@
 """delegate node — delegates subtasks to existing sub-agents.
 
 Selects the best sub-agent from the registry for the current subtask,
-executes it via SubAgentRunner, collects results, and records metrics.
-
-Supports parallel delegation for multiple independent subtasks.
+executes them via SubAgentRunner with parallel delegation, collects
+results, and records metrics.
 """
 
 from __future__ import annotations
@@ -69,6 +68,11 @@ async def delegate_node(
     new_tool_results: list[ToolResult] = []
     all_success = True
 
+    # Phase 1: Validate all agents and spawn runners
+    runners_with_params: list[tuple[Any, str, str, float | None, int]] = []
+    runner_agent_names: list[str] = []
+    runner_specs: list[Any] = []
+
     for agent_info in spawned:
         agent_name = agent_info.get("name", "")
         spec = sub_agent_registry.get(agent_name)
@@ -84,113 +88,86 @@ async def delegate_node(
             all_success = False
             continue
 
-        result = await _delegate_single(
-            spec=spec,
-            state=state,
+        goal_text = _build_delegation_goal(spec, state)
+        parent_thread_id = state.get("thread_id", "unknown")
+        budget_remaining = state.get("budget_remaining")
+
+        if tools is None:
+            delegation_results.append({
+                "sub_agent_name": agent_name,
+                "success": False,
+                "result": "",
+                "errors": ["No tool registry available for delegation"],
+            })
+            all_success = False
+            continue
+
+        runner = sub_agent_registry.spawn(
+            name=agent_name,
+            goal=goal_text,
+            parent_thread_id=parent_thread_id,
             gateway=gateway,
             tools=tools,
-            registry=sub_agent_registry,
             memory=memory,
         )
 
-        delegation_results.append(result)
-
-        if result.get("success"):
-            # Add result as a tool result for the parent agent to use
-            new_tool_results.append(ToolResult(
-                tool_name=f"sub_agent:{agent_name}",
-                success=True,
-                output=result.get("result", ""),
-                tokens_used=result.get("tokens_used", 0),
-                duration_ms=result.get("latency_ms", 0),
-            ))
-        else:
+        if runner is None:
+            delegation_results.append({
+                "sub_agent_name": agent_name,
+                "success": False,
+                "result": "",
+                "errors": ["Failed to spawn sub-agent runner"],
+            })
             all_success = False
-            new_tool_results.append(ToolResult(
-                tool_name=f"sub_agent:{agent_name}",
-                success=False,
-                output=result.get("result", ""),
-                error="; ".join(result.get("errors", [])),
-                tokens_used=result.get("tokens_used", 0),
-                duration_ms=result.get("latency_ms", 0),
-            ))
+            continue
 
-        # Record metrics (best-effort)
-        await _record_metrics(spec, result, state)
+        runners_with_params.append((runner, goal_text, parent_thread_id, budget_remaining, 0))
+        runner_agent_names.append(agent_name)
+        runner_specs.append(spec)
 
-        # Auto-deprecation check
-        sub_agent_registry.check_deprecation(agent_name)
+    # Phase 2: Execute all runners in parallel
+    if runners_with_params:
+        from src.agents.runner import run_parallel
+
+        parallel_results = await run_parallel(runners_with_params)
+
+        # Phase 3: Post-process results
+        for i, result in enumerate(parallel_results):
+            agent_name = runner_agent_names[i]
+            spec = runner_specs[i]
+
+            delegation_results.append(result)
+
+            if result.get("success"):
+                new_tool_results.append(ToolResult(
+                    tool_name=f"sub_agent:{agent_name}",
+                    success=True,
+                    output=result.get("result", ""),
+                    tokens_used=result.get("tokens_used", 0),
+                    duration_ms=result.get("latency_ms", 0),
+                ))
+            else:
+                all_success = False
+                new_tool_results.append(ToolResult(
+                    tool_name=f"sub_agent:{agent_name}",
+                    success=False,
+                    output=result.get("result", ""),
+                    error="; ".join(result.get("errors", [])),
+                    tokens_used=result.get("tokens_used", 0),
+                    duration_ms=result.get("latency_ms", 0),
+                ))
+
+            # Record metrics (best-effort)
+            await _record_metrics(spec, result, state)
+
+            # Auto-deprecation check
+            sub_agent_registry.check_deprecation(agent_name)
 
     return {
         "phase": Phase.VERIFY if all_success else Phase.EXECUTE,
         "delegation_results": delegation_results,
         "tool_results": new_tool_results,
     }
-
-
-async def _delegate_single(
-    spec: Any,
-    state: dict[str, Any],
-    gateway: LLMGateway,
-    tools: ToolRegistry | None,
-    registry: SubAgentRegistry,
-    memory: MemoryManager | None,
-) -> dict[str, Any]:
-    """Delegate a single subtask to a sub-agent.
-
-    Args:
-        spec: SubAgentSpec for the target sub-agent.
-        state: Current parent agent state.
-        gateway: LLMGateway instance.
-        tools: Parent's ToolRegistry.
-        registry: SubAgentRegistry for spawning.
-        memory: Optional MemoryManager.
-
-    Returns:
-        Result dict from the sub-agent execution.
-    """
-    # Determine the goal for this sub-agent
-    goal_text = _build_delegation_goal(spec, state)
-    parent_thread_id = state.get("thread_id", "unknown")
-    budget_remaining = state.get("budget_remaining")
-
-    # Spawn the runner
-    if tools is None:
-        return {
-            "sub_agent_name": spec.name,
-            "sub_agent_id": spec.id,
-            "success": False,
-            "result": "",
-            "errors": ["No tool registry available for delegation"],
-        }
-
-    runner = registry.spawn(
-        name=spec.name,
-        goal=goal_text,
-        parent_thread_id=parent_thread_id,
-        gateway=gateway,
-        tools=tools,
-        memory=memory,
-    )
-
-    if runner is None:
-        return {
-            "sub_agent_name": spec.name,
-            "sub_agent_id": spec.id,
-            "success": False,
-            "result": "",
-            "errors": ["Failed to spawn sub-agent runner"],
-        }
-
-    # Execute
-    result = await runner.run(
-        goal=goal_text,
-        parent_thread_id=parent_thread_id,
-        budget_remaining=budget_remaining,
-        depth=0,
-    )
-
-    return result
 
 
 def _build_delegation_goal(spec: Any, state: dict[str, Any]) -> str:

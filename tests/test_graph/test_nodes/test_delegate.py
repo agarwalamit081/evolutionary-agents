@@ -564,15 +564,21 @@ class TestRecordMetrics:
             await _record_metrics(sample_spec, result, state)
 
 
-class TestDelegateSingle:
-    """Tests for _delegate_single() helper function."""
+class TestDelegateSingleViaNode:
+    """Tests for single-agent delegation paths through delegate_node.
+
+    Replaces TestDelegateSingle since _delegate_single was inlined into
+    the parallel delegation logic in delegate_node.
+    """
 
     @pytest.mark.asyncio
-    async def test_delegate_single_success(self, sample_spec: SubAgentSpec, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_registry: MagicMock) -> None:
-        """Successfully delegates a single subtask."""
-        from src.graph.nodes.delegate import _delegate_single
+    async def test_single_agent_success(self, sample_spec: SubAgentSpec, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock) -> None:
+        """Successfully delegates a single subtask via parallel path."""
+        from src.graph.nodes.delegate import delegate_node
 
+        mock_registry.get.return_value = sample_spec
         mock_runner = MagicMock()
+        mock_runner.definition = sample_spec
         mock_runner.run = AsyncMock(return_value={
             "success": True,
             "result": "Subtask done",
@@ -587,50 +593,71 @@ class TestDelegateSingle:
         })
         mock_registry.spawn.return_value = mock_runner
 
-        result = await _delegate_single(
-            spec=sample_spec,
-            state=sample_state,
+        state = {
+            "sub_agents_spawned": [{"name": sample_spec.name}],
+            "thread_id": "test-thread",
+            "current_goal": sample_state.get("current_goal"),
+        }
+
+        result = await delegate_node(
+            state,
             gateway=mock_gateway,
             tools=mock_tools,
-            registry=mock_registry,
+            sub_agent_registry=mock_registry,
             memory=None,
         )
 
-        assert result["success"] is True
-        assert result["result"] == "Subtask done"
+        assert result["phase"] == Phase.VERIFY
+        assert len(result["delegation_results"]) == 1
+        assert result["delegation_results"][0]["success"] is True
 
     @pytest.mark.asyncio
-    async def test_delegate_single_no_tools(self, sample_spec: SubAgentSpec, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_registry: MagicMock) -> None:
-        """Returns error when tools is None."""
-        from src.graph.nodes.delegate import _delegate_single
+    async def test_no_tools_returns_error_for_agent(self, sample_spec: SubAgentSpec, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_registry: MagicMock) -> None:
+        """Returns error when tools is None during spawn phase."""
+        from src.graph.nodes.delegate import delegate_node
 
-        result = await _delegate_single(
-            spec=sample_spec,
-            state=sample_state,
+        mock_registry.get.return_value = sample_spec
+
+        state = {
+            "sub_agents_spawned": [{"name": sample_spec.name}],
+            "thread_id": "test-thread",
+            "current_goal": sample_state.get("current_goal"),
+        }
+
+        result = await delegate_node(
+            state,
             gateway=mock_gateway,
             tools=None,
-            registry=mock_registry,
+            sub_agent_registry=mock_registry,
             memory=None,
         )
 
-        assert result["success"] is False
-        assert "No tool registry" in result["errors"][0]
+        assert len(result["delegation_results"]) == 1
+        assert result["delegation_results"][0]["success"] is False
+        assert "No tool registry" in result["delegation_results"][0]["errors"][0]
 
     @pytest.mark.asyncio
-    async def test_delegate_single_spawn_failure(self, sample_spec: SubAgentSpec, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_registry: MagicMock) -> None:
-        """Returns error when spawn fails."""
-        from src.graph.nodes.delegate import _delegate_single
+    async def test_spawn_failure_records_error(self, sample_spec: SubAgentSpec, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock) -> None:
+        """Returns error when spawn fails during spawn phase."""
+        from src.graph.nodes.delegate import delegate_node
 
-        mock_registry.spawn.return_value = None  # Spawn failed
+        mock_registry.get.return_value = sample_spec
+        mock_registry.spawn.return_value = None
 
-        result = await _delegate_single(
-            spec=sample_spec,
-            state=sample_state,
+        state = {
+            "sub_agents_spawned": [{"name": sample_spec.name}],
+            "thread_id": "test-thread",
+            "current_goal": sample_state.get("current_goal"),
+        }
+
+        result = await delegate_node(
+            state,
             gateway=mock_gateway,
             tools=mock_tools,
-            registry=mock_registry,
+            sub_agent_registry=mock_registry,
             memory=None,
         )
 
-        assert result["success"] is False
-        assert "Failed to spawn" in result["errors"][0]
+        assert len(result["delegation_results"]) == 1
+        assert result["delegation_results"][0]["success"] is False
+        assert "Failed to spawn" in result["delegation_results"][0]["errors"][0]

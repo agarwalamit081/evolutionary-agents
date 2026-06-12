@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,9 @@ from src.graph.state import AgentState
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
     from src.tools.registry import ToolRegistry
+
+# Maximum concurrent tool calls per execute step
+MAX_CONCURRENT_TOOLS = 5
 
 
 async def execute_node(
@@ -130,35 +134,9 @@ async def _llm_execute(
         ]
 
         if response.tool_calls:
-            for tc in response.tool_calls:
-                tool_name = tc.get("function", {}).get("name", tc.get("name", ""))
-                tool_args_str = tc.get("function", {}).get("arguments", tc.get("args", "{}"))
-
-                handler = tools.get_handler(tool_name)
-                if handler is None:
-                    new_tool_results.append(ToolResult(
-                        tool_name=tool_name,
-                        success=False,
-                        output="",
-                        error=f"Unknown tool: {tool_name}",
-                    ))
-                    continue
-
-                try:
-                    args = json.loads(tool_args_str) if isinstance(tool_args_str, str) else tool_args_str
-                    result = await handler(**args)
-                    new_tool_results.append(ToolResult(
-                        tool_name=tool_name,
-                        success=True,
-                        output=str(result)[:2000],
-                    ))
-                except Exception as e:
-                    new_tool_results.append(ToolResult(
-                        tool_name=tool_name,
-                        success=False,
-                        output="",
-                        error=str(e)[:500],
-                    ))
+            new_tool_results = await _execute_tool_calls_parallel(
+                response.tool_calls, tools
+            )
 
         # Mark step complete with LLM result
         current_step = plan_steps[step_index]
@@ -210,3 +188,79 @@ async def _simulated_execute(
         "iteration_count": iteration_count + 1,
         "completed_steps": [current_step],
     }
+
+
+async def _execute_tool_call(
+    tc: dict[str, Any],
+    tools: ToolRegistry,
+) -> ToolResult:
+    """Execute a single tool call and return a ToolResult.
+
+    Args:
+        tc: Tool call dict with function.name and function.arguments.
+        tools: Tool registry for handler lookup.
+
+    Returns:
+        ToolResult with success/failure status.
+    """
+    tool_name = tc.get("function", {}).get("name", tc.get("name", ""))
+    tool_args_str = tc.get("function", {}).get("arguments", tc.get("args", "{}"))
+
+    handler = tools.get_handler(tool_name)
+    if handler is None:
+        return ToolResult(
+            tool_name=tool_name,
+            success=False,
+            output="",
+            error=f"Unknown tool: {tool_name}",
+        )
+
+    try:
+        args = json.loads(tool_args_str) if isinstance(tool_args_str, str) else tool_args_str
+        result = await handler(**args)
+        return ToolResult(
+            tool_name=tool_name,
+            success=True,
+            output=str(result)[:2000],
+        )
+    except Exception as e:
+        return ToolResult(
+            tool_name=tool_name,
+            success=False,
+            output="",
+            error=str(e)[:500],
+        )
+
+
+async def _execute_tool_calls_parallel(
+    tool_calls: list[dict[str, Any]],
+    tools: ToolRegistry,
+) -> list[ToolResult]:
+    """Execute multiple tool calls concurrently with semaphore limiting.
+
+    Uses asyncio.gather so independent tool calls run in parallel.
+    A semaphore caps concurrency at MAX_CONCURRENT_TOOLS to avoid
+    overwhelming external services.
+
+    Args:
+        tool_calls: List of tool call dicts from LLM response.
+        tools: Tool registry for handler lookup.
+
+    Returns:
+        List of ToolResult in the same order as tool_calls.
+    """
+    if not tool_calls:
+        return []
+
+    if len(tool_calls) == 1:
+        # Single call — skip gather overhead
+        return [await _execute_tool_call(tool_calls[0], tools)]
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TOOLS)
+
+    async def _limited(tc: dict[str, Any]) -> ToolResult:
+        async with semaphore:
+            return await _execute_tool_call(tc, tools)
+
+    results = await asyncio.gather(*[_limited(tc) for tc in tool_calls])
+    return list(results)

@@ -85,7 +85,10 @@ class TestToolCreateNode:
         result = await tool_create_node(state, gateway=gateway, tools=tools)
         assert result["phase"] == Phase.EXECUTE
         assert len(result["tools_created"]) == 0
-        assert result["pending_tool_gaps"] == ["HTTP fetcher"]
+        # Failed gaps are cleared (not kept) to prevent infinite loops
+        assert result["pending_tool_gaps"] == []
+        # But they are recorded as attempted
+        assert result["attempted_tool_gaps"] == ["HTTP fetcher"]
 
 
 class TestRouteAfterToolCreate:

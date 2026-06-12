@@ -47,6 +47,8 @@ def initial_state(
         evolution_history=[],
         skills_learned=[],
         sub_agents=[],
+        pending_tool_gaps=[],
+        attempted_tool_gaps=[],
         pending_agent_gaps=[],
         sub_agents_spawned=[],
         delegation_results=[],

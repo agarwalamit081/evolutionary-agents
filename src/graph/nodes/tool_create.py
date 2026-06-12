@@ -59,7 +59,7 @@ async def tool_create_node(
     logger.info(f"Attempting to create {len(pending_gaps)} missing tool(s)")
 
     created_tools: list[dict[str, Any]] = []
-    remaining_gaps: list[str] = []
+    failed_gaps: list[str] = []
 
     for gap_description in pending_gaps:
         result = await _create_single_tool(
@@ -74,15 +74,23 @@ async def tool_create_node(
             created_tools.append(result)
             logger.info(f"Successfully created tool: {result['tool_name']}")
         else:
-            remaining_gaps.append(gap_description)
+            failed_gaps.append(gap_description)
             logger.warning(
                 f"Failed to create tool for '{gap_description}': "
                 f"{result.get('reason', 'unknown')}"
             )
 
+    # Always clear pending_tool_gaps after attempting — failed gaps are logged
+    # and should NOT be retried in the same run to prevent infinite loops.
+    if failed_gaps:
+        logger.info(
+            f"Clearing {len(failed_gaps)} failed tool gap(s) to prevent retry loops"
+        )
+
     return {
         "phase": Phase.PLAN if created_tools else Phase.EXECUTE,
-        "pending_tool_gaps": remaining_gaps,
+        "pending_tool_gaps": [],
+        "attempted_tool_gaps": list(pending_gaps),  # record all attempted to prevent re-detection
         "tools_created": created_tools,
     }
 
@@ -140,7 +148,7 @@ async def _create_single_tool(
             "goal_text": goal_text,
             "failed_tools": "; ".join(failed_tools[-3:]) or "none",
             "error_details": "; ".join(error_details[-3:]) or "none",
-            "existing_tools": [t["name"] for t in registry.list_tools()],
+            "existing_tools": registry.list_names(),
         }
 
         generated = await generator.generate(gap_description, context)

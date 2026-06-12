@@ -12,6 +12,7 @@ from src.graph.nodes.reflect import _detect_agent_gaps_heuristic, _heuristic_ref
 def _make_state(
     pending_tool_gaps: list[str] | None = None,
     pending_agent_gaps: list[str] | None = None,
+    attempted_tool_gaps: list[str] | None = None,
     sub_agents_spawned: list[dict[str, Any]] | None = None,
     tool_results: list[Any] | None = None,
     errors: list[str] | None = None,
@@ -25,6 +26,7 @@ def _make_state(
         "iteration_count": 1,
         "max_iterations": 25,
         "pending_tool_gaps": pending_tool_gaps or [],
+        "attempted_tool_gaps": attempted_tool_gaps or [],
         "pending_agent_gaps": pending_agent_gaps or [],
         "sub_agents_spawned": sub_agents_spawned or [],
         "tool_results": tool_results or [],
@@ -45,9 +47,9 @@ class TestToolGapDedup:
     """Verify pending_tool_gaps deduplicates against existing state."""
 
     def test_no_duplicate_tool_gaps(self) -> None:
-        """If gap already exists in state, heuristic should not add it again."""
+        """If gap already attempted, heuristic should not add it again."""
         state = _make_state(
-            pending_tool_gaps=["tool matching 'web_scraper' capability"],
+            attempted_tool_gaps=["tool matching 'web_scraper' capability"],
             tool_results=[MockToolResult("web_scraper", "Unknown tool: web_scraper")],
         )
         result = _heuristic_reflect(
@@ -68,7 +70,7 @@ class TestToolGapDedup:
         registry = ToolRegistry()  # Empty — json_parser is truly missing
 
         state = _make_state(
-            pending_tool_gaps=["tool matching 'web_scraper' capability"],
+            attempted_tool_gaps=["tool matching 'web_scraper' capability"],
             tool_results=[MockToolResult("json_parser", "Unknown tool: json_parser")],
         )
         result = _heuristic_reflect(

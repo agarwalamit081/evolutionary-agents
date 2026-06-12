@@ -53,7 +53,8 @@ class SubAgentState(TypedDict, total=False):
     confidence: Confidence
 
     # ── Dynamic Tool Creation ──────────────────────────────────────────
-    pending_tool_gaps: Annotated[list[str], operator.add]
+    pending_tool_gaps: list[str]
+    attempted_tool_gaps: Annotated[list[str], operator.add]
     tools_created: Annotated[list[dict[str, Any]], operator.add]
 
     # ── Cost & Budget ──────────────────────────────────────────────────
@@ -106,6 +107,7 @@ def initial_sub_agent_state(
         reflection=None,
         confidence=Confidence.MEDIUM,
         pending_tool_gaps=[],
+        attempted_tool_gaps=[],
         tools_created=[],
         total_tokens_used=0,
         cost_records=[],

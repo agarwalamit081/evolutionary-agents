@@ -155,9 +155,9 @@ def _heuristic_reflect(
     }
 
     if missing_tools:
-        # Deduplicate against gaps already accumulated in state
-        existing_tool_gaps = state.get("pending_tool_gaps", [])
-        new_tool_gaps = [g for g in missing_tools if g not in existing_tool_gaps]
+        # Deduplicate against gaps already attempted (prevents infinite retry loops)
+        attempted = state.get("attempted_tool_gaps", [])
+        new_tool_gaps = [g for g in missing_tools if g not in attempted]
         if new_tool_gaps:
             result["pending_tool_gaps"] = new_tool_gaps
 
@@ -262,9 +262,9 @@ async def _llm_reflect(
 
         # Propagate missing tool gaps identified by LLM
         if analysis.missing_tools:
-            # Deduplicate against gaps already accumulated in state
-            existing_tool_gaps = state.get("pending_tool_gaps", [])
-            new_tool_gaps = [g for g in analysis.missing_tools if g not in existing_tool_gaps]
+            # Deduplicate against gaps already attempted (prevents infinite retry loops)
+            attempted = state.get("attempted_tool_gaps", [])
+            new_tool_gaps = [g for g in analysis.missing_tools if g not in attempted]
             if new_tool_gaps:
                 result["pending_tool_gaps"] = new_tool_gaps
 

@@ -62,12 +62,13 @@ class AgentState(TypedDict, total=False):
     skills_learned: Annotated[list[SkillDef], operator.add]
 
     # ─── Dynamic Tool Creation ──────────────────────────────────────────
-    pending_tool_gaps: Annotated[list[str], operator.add]
+    pending_tool_gaps: list[str]
+    attempted_tool_gaps: Annotated[list[str], operator.add]
     tools_created: Annotated[list[dict[str, Any]], operator.add]
 
     # ─── Sub-Agent Delegation ──────────────────────────────────────────
     sub_agents: list[SubAgentSpec]
-    pending_agent_gaps: Annotated[list[str], operator.add]
+    pending_agent_gaps: list[str]
     sub_agents_spawned: Annotated[list[dict[str, Any]], operator.add]
     delegation_results: Annotated[list[dict[str, Any]], operator.add]
 

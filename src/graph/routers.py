@@ -72,8 +72,13 @@ def route_after_reflect(state: AgentState) -> str:
     # Check for sub-agent gaps first — highest priority
     pending_agent_gaps = state.get("pending_agent_gaps", [])
     if pending_agent_gaps:
-        logger.info(f"Sub-agent gaps detected: {pending_agent_gaps}, routing to agent_spawn")
-        return "agent_spawn"
+        # Guard: skip if sub-agents were already spawned for these gaps
+        sub_agents_spawned = state.get("sub_agents_spawned", [])
+        if not sub_agents_spawned:
+            logger.info(f"Sub-agent gaps detected: {pending_agent_gaps}, routing to agent_spawn")
+            return "agent_spawn"
+        # Agents already spawned — don't re-route to agent_spawn
+        logger.debug("Sub-agents already spawned, skipping agent_spawn")
 
     # Check for tool gaps — second priority
     pending_gaps = state.get("pending_tool_gaps", [])

@@ -52,10 +52,14 @@ async def reflect_node(
             heuristic_gaps = _detect_agent_gaps_heuristic(state, goal_text, plan_steps)
             if heuristic_gaps:
                 existing_gaps = result.get("pending_agent_gaps", [])
-                # Merge heuristic gaps with any LLM-identified gaps
+                # Deduplicate: merge heuristic gaps with LLM-identified gaps,
+                # then filter against what is already accumulated in state
+                state_gaps = state.get("pending_agent_gaps", [])
                 merged = list(set(existing_gaps + heuristic_gaps))
-                result["pending_agent_gaps"] = merged
-                logger.info(f"Sub-agent gaps detected (heuristic): {merged}")
+                new_merged = [g for g in merged if g not in state_gaps]
+                if new_merged:
+                    result["pending_agent_gaps"] = new_merged
+                    logger.info(f"Sub-agent gaps detected (heuristic): {new_merged}")
             return result
 
     return _heuristic_reflect(state, goal_text, completed_steps, errors, tools)
@@ -137,13 +141,21 @@ def _heuristic_reflect(
     }
 
     if missing_tools:
-        result["pending_tool_gaps"] = missing_tools
+        # Deduplicate against gaps already accumulated in state
+        existing_tool_gaps = state.get("pending_tool_gaps", [])
+        new_tool_gaps = [g for g in missing_tools if g not in existing_tool_gaps]
+        if new_tool_gaps:
+            result["pending_tool_gaps"] = new_tool_gaps
 
     # Detect sub-agent gaps: complex multi-part tasks with 6+ steps suggest
     # the need for specialized sub-agents to handle independent subtask categories
     missing_agents = _detect_agent_gaps_heuristic(state, goal_text, plan_steps)
     if missing_agents:
-        result["pending_agent_gaps"] = missing_agents
+        # Deduplicate against gaps already accumulated in state
+        existing_agent_gaps = state.get("pending_agent_gaps", [])
+        new_agent_gaps = [g for g in missing_agents if g not in existing_agent_gaps]
+        if new_agent_gaps:
+            result["pending_agent_gaps"] = new_agent_gaps
 
     return result
 
@@ -236,11 +248,19 @@ async def _llm_reflect(
 
         # Propagate missing tool gaps identified by LLM
         if analysis.missing_tools:
-            result["pending_tool_gaps"] = analysis.missing_tools
+            # Deduplicate against gaps already accumulated in state
+            existing_tool_gaps = state.get("pending_tool_gaps", [])
+            new_tool_gaps = [g for g in analysis.missing_tools if g not in existing_tool_gaps]
+            if new_tool_gaps:
+                result["pending_tool_gaps"] = new_tool_gaps
 
         # Propagate missing sub-agent gaps identified by LLM
         if analysis.missing_sub_agents:
-            result["pending_agent_gaps"] = analysis.missing_sub_agents
+            # Deduplicate against gaps already accumulated in state
+            existing_agent_gaps = state.get("pending_agent_gaps", [])
+            new_agent_gaps = [g for g in analysis.missing_sub_agents if g not in existing_agent_gaps]
+            if new_agent_gaps:
+                result["pending_agent_gaps"] = new_agent_gaps
 
         return result
     except Exception as e:

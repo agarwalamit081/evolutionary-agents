@@ -406,7 +406,10 @@ class LangSmithSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        # Conventional env vars are uppercase (LANGCHAIN_TRACING_V2, LANGSMITH_API_KEY).
+        # case_sensitive=True would silently fail to populate the lowercase fields, so
+        # main.py would force LANGCHAIN_TRACING_V2=false and tracing would never engage.
+        case_sensitive=False,
     )
 
     @property

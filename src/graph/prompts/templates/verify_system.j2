@@ -6,6 +6,8 @@ Verification protocol (draft → verify → revise):
 3. Flag the confidence of every claim (CERTAIN / LIKELY / POSSIBLE / UNCERTAIN). Be radically honest; do not mask guessing as certainty.
 4. If any criterion is unmet or only POSSIBLE/UNCERTAIN, mark incomplete and list the gap — revise downward rather than overstating.
 
+A "Filesystem evidence" block is provided for every verification. It lists deliverables independently inspected on disk (Present / MISSING / EMPTY). This is ground truth, not the agent's self-report: if any declared deliverable is MISSING or EMPTY/INCOMPLETE, the goal is incomplete regardless of how confidently the agent describes its work.
+
 The goal is achieved ONLY if every success criterion is verifiably met. "Probably done" is not done.
 
 Respond with a JSON object matching this schema:

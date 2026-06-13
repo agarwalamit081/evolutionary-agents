@@ -11,6 +11,25 @@ from loguru import logger
 from src.config.settings import get_settings
 
 
+# Prepended to every executed script. The subprocess CWD is already the results
+# directory, so relative-path writes persist — but a generator script that does
+# ``open("design_patterns/x.md", "w")`` without first ``os.makedirs``-ing the
+# subdir fails silently, leaving deliverables missing (the F8 gap). This shim
+# auto-creates parent directories for relative write/append/exclusive paths so
+# such scripts succeed. Absolute paths and read modes are left untouched.
+_WRITE_BOOTSTRAP = (
+    "import builtins as _turing_b, os as _turing_os\n"
+    "_turing_open_orig = _turing_b.open\n"
+    "def _turing_open(p, m='r', *a, **k):\n"
+    "    if any(c in str(m) for c in 'wax'):\n"
+    "        _d = _turing_os.path.dirname(str(p))\n"
+    "        if _d and not _turing_os.path.isabs(str(p)):\n"
+    "            _turing_os.makedirs(_d, exist_ok=True)\n"
+    "    return _turing_open_orig(p, m, *a, **k)\n"
+    "_turing_b.open = _turing_open\n"
+)
+
+
 async def code_executor(code: str, timeout: int = 30) -> str:
     """Execute Python code in a subprocess and return the output.
 
@@ -35,7 +54,7 @@ async def code_executor(code: str, timeout: int = 30) -> str:
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", prefix="turing_exec_", delete=False
     ) as tmp:
-        tmp.write(code)
+        tmp.write(_WRITE_BOOTSTRAP + code)
         tmp_path = tmp.name
 
     try:
@@ -73,10 +92,13 @@ TOOL_DEFINITION = {
     "handler": code_executor,
     "description": (
         "Execute Python code in a subprocess for one-off calculations, quick "
-        "data transformations, and testing code snippets. Code runs in an "
-        "isolated process with a configurable timeout. Do NOT use for: file I/O "
-        "(use file_writer/file_reader), HTTP requests to specific APIs, or "
-        "tasks that recur across steps."
+        "data transformations, and testing code snippets. The working directory "
+        "is the results/ folder, so files written via relative paths persist "
+        "there (parent directories are created automatically); for final "
+        "deliverables prefer file_writer. A configurable timeout (default 30s) "
+        "is enforced: avoid infinite loops, and use http_request/web_scraper "
+        "for network access instead of raw sockets (which can hang until the "
+        "timeout fires)."
     ),
     "parameters": {
         "type": "object",

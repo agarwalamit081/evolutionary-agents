@@ -19,6 +19,8 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+import json_repair
+
 from langchain_core.messages import HumanMessage, RemoveMessage
 from loguru import logger
 
@@ -161,7 +163,6 @@ class MemoryFolder:
         self._message_count_floor = message_count_floor
         self._message_count_threshold = message_count_threshold
         self._max_folds = max_folds
-        self._fold_count = 0
 
     def should_fold(self, state: dict[str, Any]) -> bool:
         """Check if memory folding is needed based on state thresholds.
@@ -270,7 +271,10 @@ class MemoryFolder:
             working_memory_prompt,
         )
 
-        self._fold_count += 1
+        # Derive the sequence number from state so it stays correct (1, 2, 3, …)
+        # across the whole run, even though reflect_node instantiates a fresh
+        # MemoryFolder per call (which would otherwise reset an instance counter).
+        fold_number = len(state.get("fold_history", [])) + 1
         messages = state.get("messages", [])
         goal_text = self._extract_goal(state)
         history_text = _serialize_messages(messages)
@@ -287,7 +291,7 @@ class MemoryFolder:
         tokens_saved = old_chars // 4
 
         logger.info(
-            f"Memory fold #{self._fold_count}: compressing {len(messages)} messages "
+            f"Memory fold #{fold_number}: compressing {len(messages)} messages "
             f"(~{tokens_saved} tokens) at iteration {state.get('iteration_count', 0)}"
         )
 
@@ -311,7 +315,7 @@ class MemoryFolder:
             episode_memory=episode,
             working_memory=working,
             tool_memory=tool,
-            fold_number=self._fold_count,
+            fold_number=fold_number,
             tokens_saved_estimate=tokens_saved,
         )
 
@@ -359,19 +363,37 @@ class MemoryFolder:
                 messages=[{"role": "user", "content": prompt}],
                 complexity=TaskComplexity.TRIVIAL,
                 temperature=0.1,
-                max_tokens=1024,
+                # The tool-memory summary is the richest of the three (it embeds
+                # the full tool history), so it is the most likely to truncate
+                # mid-string and yield "Unterminated string" parse errors. Give
+                # it room, and salvage with json_repair below regardless.
+                max_tokens=2048,
             )
             content = response.content.strip()
 
-            # Extract JSON from possible markdown fences
+            # Strip markdown fences, then salvage with json_repair which
+            # tolerates truncated/malformed JSON (e.g. a string cut mid-way)
+            # instead of failing the whole fold on a truncated response.
             if "```json" in content:
                 content = content.split("```json", 1)[1].split("```", 1)[0]
             elif "```" in content:
                 content = content.split("```", 1)[1].split("```", 1)[0]
 
-            return json.loads(content.strip())
+            repaired = json_repair.loads(content.strip())
+            if isinstance(repaired, dict):
+                return repaired
+            # Salvaged to a non-object (scalar/list) — treat as a failure so
+            # downstream consumers still get a well-formed dict.
+            logger.warning(
+                f"Generated {memory_type} memory parsed to "
+                f"{type(repaired).__name__}, expected object — using fallback."
+            )
+            return {
+                "error": f"Memory not a JSON object: {type(repaired).__name__}",
+                "memory_type": memory_type,
+            }
 
-        except (json.JSONDecodeError, Exception) as exc:
+        except Exception as exc:
             logger.warning(
                 f"Failed to generate {memory_type} memory: {exc}. "
                 f"Using fallback summary."

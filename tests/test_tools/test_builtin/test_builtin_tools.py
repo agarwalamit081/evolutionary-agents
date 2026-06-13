@@ -149,6 +149,26 @@ class TestCodeExecutorCWD:
             await code_executor("print('ok')")
         assert nested.exists()
 
+    @pytest.mark.asyncio
+    async def test_subdir_writes_auto_create_parents(self, tmp_path: Path) -> None:
+        """F8: ``open('subdir/file')`` in generated code auto-creates the subdir.
+
+        The ``_WRITE_BOOTSTRAP`` shim patches ``builtins.open`` so a generator
+        script that writes to a relative nested path (e.g. ``design_patterns/x.md``)
+        succeeds instead of failing on a missing parent directory — the gap that
+        left ``results/design_patterns/`` empty in the prior e2e run.
+        """
+        from src.config.settings import AgentSettings
+
+        mock_settings = AgentSettings(results_root=str(tmp_path))
+        with patch("src.tools.builtin.code_executor.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+            await code_executor(
+                "with open('design_patterns/singleton.md', 'w') as f:\n"
+                "    f.write('pattern')"
+            )
+        assert (tmp_path / "design_patterns" / "singleton.md").exists()
+        assert (tmp_path / "design_patterns" / "singleton.md").read_text() == "pattern"
+
 
 class TestFileWriterResultsDir:
     """Tests for file_writer defaulting to results_root."""

@@ -4,4 +4,10 @@ Completed steps: {{ completed_summary }}
 Total steps: {{ completed_count }}/{{ total_steps }}
 Errors encountered: {{ error_count }}
 Final output: {{ final_output }}
-Verify whether the goal has been achieved.
+
+Filesystem evidence (independently inspected, NOT the agent's self-report):
+{{ evidence }}
+
+Verify whether the goal has been achieved. Treat any deliverable listed as
+MISSING or EMPTY/INCOMPLETE as an unmet success criterion — the goal is NOT
+complete until every declared output file exists and is non-empty.

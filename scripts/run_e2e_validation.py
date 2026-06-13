@@ -423,8 +423,13 @@ async def _run_single_query(
         # delegated sub-agent activity surfaced by the delegate node).
         "tools_called_count": len(tool_results),
         "tools_created_count": len(tools_created),
+        # tools_created records carry `tool_name` (from tool_create_node), not
+        # a top-level `name` — fall back to `name` for any legacy shape.
         "tool_creation_details": [
-            {"name": t.get("name", "unknown"), "description": t.get("description", "")}
+            {
+                "name": t.get("tool_name", t.get("name", "unknown")),
+                "description": t.get("description", ""),
+            }
             for t in tools_created
         ],
         "tool_results_count": len(tool_results),
@@ -527,7 +532,12 @@ def _generate_report(all_metrics: list[dict[str, Any]], total_duration: float) -
         lines.append("### Metrics")
         lines.append("")
         lines.append(f"- **Complete**: {'Yes' if m['complete'] else 'No'}")
-        lines.append(f"- **Iterations**: {m['iterations']} / {m['max_iterations']}")
+        cap_note = (
+            " (iteration cap reached — partial result)"
+            if not m["complete"] and m["iterations"] >= m["max_iterations"]
+            else ""
+        )
+        lines.append(f"- **Iterations**: {m['iterations']} / {m['max_iterations']}{cap_note}")
         lines.append(f"- **Total Tokens**: {m['total_tokens']:,}")
         lines.append(f"- **Total Cost**: ${m['total_cost']:.4f}")
         lines.append(f"- **Duration**: {m['duration_seconds']}s")
@@ -568,12 +578,14 @@ def _generate_report(all_metrics: list[dict[str, Any]], total_duration: float) -
             lines.append("- _No folds triggered (iteration count < fold interval or not enough messages)_")
         lines.append("")
 
+        lines.append("### Errors")
+        lines.append("")
         if m["errors"]:
-            lines.append("### Errors")
-            lines.append("")
             for err in m["errors"]:
                 lines.append(f"- {err[:200]}")
-            lines.append("")
+        else:
+            lines.append("- None recorded in agent state.")
+        lines.append("")
 
         if m["results_file"]:
             lines.append(f"**Results File**: `{m['results_file']}`")

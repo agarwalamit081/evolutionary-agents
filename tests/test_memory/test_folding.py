@@ -305,3 +305,71 @@ class TestBuildSummaryMessage:
         assert "Episode Memory" in msg.content
         assert "Working Memory" in msg.content
         assert "Tool Memory" in msg.content
+
+
+class TestGenerateMemoryJsonRepair:
+    """F10: _generate_memory must salvage truncated/malformed LLM JSON."""
+
+    @pytest.mark.asyncio
+    async def test_truncated_json_is_salvaged(self) -> None:
+        """A tool-memory JSON truncated mid-string is repaired, not dropped."""
+        gateway = _make_mock_gateway()
+        # Truncated object: closing brace missing, string unterminated.
+        gateway.acompletion = AsyncMock(
+            return_value=_make_mock_response('{"tool": "file_writer", "note": "worked')
+        )
+        folder = MemoryFolder(gateway)
+        result = await folder._generate_memory("prompt", "tool")
+        assert isinstance(result, dict)
+        # Salvaged to a real object, not the error fallback.
+        assert "error" not in result
+        assert result.get("tool") == "file_writer"
+
+    @pytest.mark.asyncio
+    async def test_non_object_json_falls_back(self) -> None:
+        """A response that isn't a JSON object yields the structured fallback."""
+        gateway = _make_mock_gateway()
+        gateway.acompletion = AsyncMock(
+            return_value=_make_mock_response("[1, 2, 3]")
+        )
+        folder = MemoryFolder(gateway)
+        result = await folder._generate_memory("prompt", "episode")
+        assert isinstance(result, dict)
+        assert result.get("memory_type") == "episode"
+
+
+class TestFoldNumberSequence:
+    """Regression test for F2: fold_number must stay sequential across a run.
+
+    reflect_node builds a fresh MemoryFolder per call, so an instance counter
+    would reset and every fold would render "Fold #1". The number is derived
+    from ``len(fold_history) + 1`` so it increments 1, 2, 3 regardless.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fold_number_increments_across_fresh_instances(self) -> None:
+        gateway = _make_mock_gateway()
+        gateway.acompletion = AsyncMock(return_value=_make_mock_response('{"a": 1}'))
+
+        state1 = _make_state(
+            iteration_count=6, messages=_make_messages(14), fold_history=[]
+        )
+        r1 = await MemoryFolder(gateway).fold(state1)
+        assert r1.fold_number == 1
+
+        # reflect creates a brand-new folder after fold #1 was recorded.
+        state2 = _make_state(
+            iteration_count=12,
+            messages=_make_messages(14),
+            fold_history=[r1.to_dict()],
+        )
+        r2 = await MemoryFolder(gateway).fold(state2)
+        assert r2.fold_number == 2
+
+        state3 = _make_state(
+            iteration_count=18,
+            messages=_make_messages(14),
+            fold_history=[r1.to_dict(), r2.to_dict()],
+        )
+        r3 = await MemoryFolder(gateway).fold(state3)
+        assert r3.fold_number == 3

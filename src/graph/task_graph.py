@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 
+from src.config.settings import get_settings
 from src.graph.nodes import (
     agent_spawn_node,
     classify_node,
@@ -29,6 +30,7 @@ from src.graph.nodes import (
     plan_node,
     reflect_node,
     retrieve_memory_node,
+    structure_analysis_node,
     store_memory_node,
     tool_create_node,
     verify_node,
@@ -42,6 +44,7 @@ from src.graph.routers import (
     route_after_hitl,
     route_after_reflect,
     route_after_store,
+    route_after_structure_analysis,
     route_after_tool_create,
     route_after_verify,
 )
@@ -52,6 +55,8 @@ if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
     from src.memory.manager import MemoryManager
     from src.tools.registry import ToolRegistry
+
+from src.tools.result_cache import ToolResultCache
 
 
 # ─── Closure Wrappers ───────────────────────────────────────────────
@@ -73,6 +78,28 @@ def _wrap(
     _wrapped.__name__ = node_fn.__name__
     _wrapped.__doc__ = node_fn.__doc__
     return _wrapped
+
+
+def _folding_cfg_from_settings() -> dict[str, Any]:
+    """Build the memory-folding config dict from ``AgentSettings``.
+
+    Maps the ``memory_folding_*`` settings (previously dead — never passed to
+    ``MemoryFolder``) into the constructor kwargs the folder expects, plus the
+    ``enabled`` flag consumed by ``_check_and_fold``.
+
+    Returns:
+        Folding configuration dict.
+    """
+    agent = get_settings().agent
+    return {
+        "enabled": agent.memory_folding_enabled,
+        "fold_interval": agent.memory_folding_interval,
+        "token_threshold": agent.memory_folding_token_threshold,
+        "message_count_floor": agent.memory_folding_message_floor,
+        "message_count_threshold": agent.memory_folding_message_threshold,
+        "message_token_estimate": agent.memory_folding_message_token_estimate,
+        "max_folds": agent.memory_folding_max_folds,
+    }
 
 
 # ─── Graph Builder ──────────────────────────────────────────────────
@@ -97,17 +124,24 @@ def build_task_graph(
     """
     graph = StateGraph(AgentState)
 
+    # Tool-result cache (Redis, best-effort). Lazily connects on first use,
+    # so constructing it here is free and safe even when Redis is down — a
+    # miss degrades to a no-op and never breaks a tool call. Only opt-in
+    # cacheable tools (web_search, file_reader) are routed through it.
+    result_cache = ToolResultCache.from_settings(get_settings())
+
     # ─── Add Nodes (with dependency injection) ────────────────────────
     # LangGraph's StateNode type is strict about signatures; our closure
     # wrappers match at runtime but Pyright can't verify that statically.
     graph.add_node("classify", _wrap(classify_node, gateway=gateway))  # type: ignore[arg-type]
     graph.add_node("plan", _wrap(plan_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("retrieve_memory", _wrap(retrieve_memory_node, memory=memory))  # type: ignore[arg-type]
-    graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
-    graph.add_node("reflect", _wrap(reflect_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
+    graph.add_node("structure_analysis", _wrap(structure_analysis_node, tools=tools))  # type: ignore[arg-type]
+    graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools, result_cache=result_cache))  # type: ignore[arg-type]
+    graph.add_node("reflect", _wrap(reflect_node, gateway=gateway, tools=tools, memory=memory, folding_cfg=_folding_cfg_from_settings()))  # type: ignore[arg-type]
     graph.add_node("verify", _wrap(verify_node, gateway=gateway))  # type: ignore[arg-type]
     graph.add_node("evolve", _wrap(evolve_node, gateway=gateway))  # type: ignore[arg-type]
-    graph.add_node("store_memory", _wrap(store_memory_node, memory=memory))  # type: ignore[arg-type]
+    graph.add_node("store_memory", _wrap(store_memory_node, memory=memory, gateway=gateway))  # type: ignore[arg-type]
     graph.add_node("tool_create", _wrap(tool_create_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("agent_spawn", _wrap(agent_spawn_node, gateway=gateway, tools=tools, sub_agent_registry=sub_agent_registry))  # type: ignore[arg-type]
     graph.add_node("delegate", _wrap(delegate_node, gateway=gateway, tools=tools, sub_agent_registry=sub_agent_registry, memory=memory))  # type: ignore[arg-type]
@@ -119,7 +153,16 @@ def build_task_graph(
     graph.add_edge(START, "classify")
     graph.add_edge("classify", "plan")
     graph.add_edge("plan", "retrieve_memory")
-    graph.add_edge("retrieve_memory", "execute")
+    graph.add_edge("retrieve_memory", "structure_analysis")
+
+    # Proactive capability detection before the execute loop: routes to
+    # tool_create / agent_spawn when the goal states that intent up front,
+    # otherwise proceeds to execute. Runs at most once (structure_analysis_done).
+    graph.add_conditional_edges("structure_analysis", route_after_structure_analysis, {
+        "agent_spawn": "agent_spawn",
+        "tool_create": "tool_create",
+        "execute": "execute",
+    })
 
     # ─── Conditional Edges ─────────────────────────────────────────────
     graph.add_conditional_edges("execute", route_after_execute, {
@@ -156,6 +199,7 @@ def build_task_graph(
         "evolve": "evolve",
         "store_memory": "store_memory",
         "execute": "execute",
+        "plan": "plan",
     })
 
     graph.add_conditional_edges("evolve", route_after_evolve, {

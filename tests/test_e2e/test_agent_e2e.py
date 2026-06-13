@@ -116,8 +116,8 @@ class TestFullPipelineComplexGoal:
         result = await compiled.ainvoke(dict(state))
         result = dict(result) if not isinstance(result, dict) else result
 
-        # Should have a plan (even if empty for heuristic path)
-        plan_steps = result.get("plan_steps", [])
+        # Should have a plan key present (possibly empty for heuristic path)
+        assert "plan_steps" in result
         # With LLM classify, should detect complexity and plan
         # With heuristic fallback, might still plan based on keywords
 

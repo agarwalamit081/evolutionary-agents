@@ -10,6 +10,7 @@ from src.graph.enums import Phase
 from src.graph.state import AgentState
 
 if TYPE_CHECKING:
+    from src.llm.gateway import LLMGateway
     from src.memory.manager import MemoryManager
 
 
@@ -73,6 +74,28 @@ async def retrieve_memory_node(
                 logger.info(f"Loaded {len(evolved)} evolved prompt(s) from warm memory")
         except Exception as e:
             logger.debug(f"Evolved prompt loading skipped: {e}")
+
+        # Recall folded-memory summaries persisted by earlier runs. Each fold
+        # stores compact episode/working/tool JSON as warm memory so later
+        # runs can reuse compressed context instead of re-deriving it.
+        try:
+            folded = await memory.warm.retrieve(
+                memory_type="folded_memory",
+                min_fitness=0.5,
+                limit=3,
+            )
+            for entry in folded:
+                retrieved.append({
+                    "content": entry.get("content", ""),
+                    "tier": "folded",
+                    "score": entry.get("fitness_score", 0.5),
+                })
+            if folded:
+                logger.info(
+                    f"Loaded {len(folded)} folded memory summary/summaries from warm memory"
+                )
+        except Exception as e:
+            logger.debug(f"Folded memory loading skipped: {e}")
     else:
         logger.debug("No MemoryManager available, returning empty memories")
 
@@ -86,6 +109,7 @@ async def store_memory_node(
     state: AgentState,
     *,
     memory: MemoryManager | None = None,
+    gateway: LLMGateway | None = None,
 ) -> dict[str, Any]:
     """Store execution learnings and observations to memory.
 
@@ -140,6 +164,21 @@ async def store_memory_node(
     else:
         logger.debug("No MemoryManager available, skipping memory storage")
 
-    return {
+    result: dict[str, Any] = {
         "phase": Phase.COMPLETE if is_complete else Phase.HITL_GATE,
     }
+
+    # Flush accumulated LLM cost/token records into graph state. This node is
+    # reached on every terminating path (complete / partial-accepted /
+    # evolve→store), so it is the single sink that populates cost_records and
+    # total_tokens_used for run-history, eval, and report consumers. No other
+    # node writes these fields, so the operator.add reducer sees one append.
+    if gateway is not None:
+        cost_records = gateway.get_cost_records()
+        if cost_records:
+            result["cost_records"] = cost_records
+            result["total_tokens_used"] = sum(
+                r.input_tokens + r.output_tokens for r in cost_records
+            )
+
+    return result

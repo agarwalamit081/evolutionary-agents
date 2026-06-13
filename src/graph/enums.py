@@ -11,6 +11,7 @@ class Phase(str, Enum):
     CLASSIFY = "classify"
     PLAN = "plan"
     RETRIEVE_MEMORY = "retrieve_memory"
+    STRUCTURE_ANALYSIS = "structure_analysis"
     EXECUTE = "execute"
     REFLECT = "reflect"
     VERIFY = "verify"

@@ -116,3 +116,28 @@ class TestPlanNode:
         # Mock gateway returns classify JSON, not plan JSON → falls back to heuristic
         assert result["phase"] == Phase.RETRIEVE_MEMORY
         assert len(result["plan_steps"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_plan_caps_heuristic_plan_to_remaining_iterations(self) -> None:
+        """Plan is capped to the remaining iteration budget (PLANNING=4 steps, budget=3)."""
+        state = initial_state("build end-to-end pipeline", "thread-cap", max_iterations=3)
+        state["strategy"] = Strategy.PLANNING
+        result = await plan_node(state)
+
+        # remaining = max(0, 3 - 0) = 3 → cap = min(planning_max_steps=10, 3) = 3
+        assert result["phase"] == Phase.RETRIEVE_MEMORY
+        assert len(result["plan_steps"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_plan_passes_remaining_iterations_to_prompt(self, mock_gateway: object) -> None:
+        """The LLM plan prompt receives the remaining/max iteration budget."""
+        state = initial_state("implement feature", "thread-budget", max_iterations=10)
+        state["strategy"] = Strategy.REACT
+        await plan_node(state, gateway=mock_gateway)
+
+        # The mock gateway returns classify JSON → acompletion is still called once
+        # before the parse fallback; inspect the user message it received.
+        messages = mock_gateway.acompletion.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        assert "Remaining iterations" in user_content
+        assert "10 / 10" in user_content  # 10 remaining of 10 at iteration 0

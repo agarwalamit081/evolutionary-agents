@@ -33,7 +33,7 @@ async def evolve_node(
     """
     reflection = state.get("reflection")
     generation = state.get("generation", 0)
-    execution_history = state.get("execution_history", [])
+    _execution_history = state.get("execution_history", [])
 
     logger.info(f"Evolution triggered (generation {generation})")
 

@@ -10,6 +10,7 @@ All LLM calls flow through this gateway, which provides:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections.abc import AsyncIterator
@@ -26,10 +27,11 @@ from tenacity import (
 
 from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY, ModelTier
 from src.config.settings import Settings
+from src.graph.enums import TaskComplexity
+from src.graph.models import CostRecord
 from src.llm.cache import PromptCache
 from src.llm.cost_tracker import CostTracker
 from src.llm.model_router import ModelRouter
-from src.graph.enums import TaskComplexity
 from src.llm.models import LLMResponse, ToolCallResponse
 from src.llm.rate_limiter import RateLimiterRegistry
 from src.llm.structured_output import StructuredOutputManager
@@ -72,6 +74,11 @@ class LLMGateway:
         self._structured_output = StructuredOutputManager()
         self._cost_tracker: CostTracker | None = None
         self._cache: PromptCache | None = None
+        # In-memory accumulation of every real LLM call's cost/tokens for this
+        # gateway instance. Flushed into graph state (cost_records /
+        # total_tokens_used) by the store_memory node. A fresh gateway is built
+        # per run, so this is naturally scoped to one graph execution.
+        self._cost_records: list[CostRecord] = []
 
         # History compression (runs every 5th call to reduce overhead)
         from src.llm.history_compressor import HistoryCompressor
@@ -88,6 +95,18 @@ class LLMGateway:
         """Inject a Redis prompt cache."""
         self._cache = cache
 
+    def get_cost_records(self) -> list[CostRecord]:
+        """Return the accumulated cost records for this gateway instance.
+
+        Each real (non-cached) LLM call appends one CostRecord. Used by the
+        store_memory node and the e2e/main runners to populate graph state.
+        """
+        return list(self._cost_records)
+
+    def reset_cost_records(self) -> None:
+        """Clear the accumulated cost records."""
+        self._cost_records.clear()
+
     async def acompletion(
         self,
         messages: list[dict[str, Any]],
@@ -99,6 +118,8 @@ class LLMGateway:
         max_tokens: int | None = None,
         cache_key: str | None = None,
         metadata: dict[str, Any] | None = None,
+        thinking: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Send a completion request with full resilience pipeline.
 
@@ -166,8 +187,25 @@ class LLMGateway:
             temperature=temperature,
             max_tokens=max_tokens,
             metadata=metadata,
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
         )
         latency_ms = int((time.monotonic() - start_time) * 1000)
+
+        # Accumulate this real (non-cached) call's cost in memory so it can be
+        # flushed into graph state (cost_records / total_tokens_used) by the
+        # store_memory node. Cache hits skip this path (they incur no spend).
+        self._cost_records.append(
+            CostRecord(
+                provider=response.provider,
+                model=response.model,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                cached_tokens=0,
+                cost_usd=response.cost_usd,
+                latency_ms=latency_ms,
+            )
+        )
 
         # Cost tracking
         if self._cost_tracker:
@@ -304,6 +342,8 @@ class LLMGateway:
         temperature: float = 0.5,
         max_tokens: int | None = None,
         metadata: dict[str, Any] | None = None,
+        thinking: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Execute an LLM call with automatic fallback on failure."""
         fallback_chain = [model] + FALLBACK_CHAINS.get(model, [])
@@ -325,7 +365,10 @@ class LLMGateway:
         for attempt_model in fallback_chain:
             attempt_provider = self._extract_provider(attempt_model)
             try:
-                kwargs = self._build_kwargs(attempt_model, temperature, max_tokens, metadata)
+                kwargs = self._build_kwargs(
+                    attempt_model, temperature, max_tokens, metadata,
+                    thinking=thinking, reasoning_effort=reasoning_effort,
+                )
                 if tools:
                     kwargs["tools"] = tools
                 if response_format:
@@ -384,6 +427,11 @@ class LLMGateway:
                 for tc in choice.message.tool_calls
             ]
 
+        # Extract reasoning content (DeepSeek thinking mode, etc.)
+        reasoning_content = None
+        if hasattr(choice.message, "reasoning_content") and choice.message.reasoning_content:
+            reasoning_content = str(choice.message.reasoning_content)
+
         usage = response.usage or litellm.Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
         input_tokens = usage.prompt_tokens or 0
         output_tokens = usage.completion_tokens or 0
@@ -400,6 +448,7 @@ class LLMGateway:
             cost_usd=cost,
             finish_reason=choice.finish_reason,
             tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
         )
 
     def _build_kwargs(
@@ -408,6 +457,8 @@ class LLMGateway:
         temperature: float,
         max_tokens: int | None,
         metadata: dict[str, Any] | None,
+        thinking: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """Build keyword arguments for litellm call.
 
@@ -442,6 +493,21 @@ class LLMGateway:
         # NVIDIA API requires explicit base URL
         if provider == "nvidia":
             kwargs["api_base"] = "https://integrate.api.nvidia.com/v1"
+
+        # Pin the Anthropic endpoint so an ambient ANTHROPIC_BASE_URL inherited
+        # from the environment (e.g. a Claude-Code→Z.AI gateway) cannot misroute
+        # the app's own ANTHROPIC_API_KEY to a relay that rejects it. The app
+        # authenticates with the key from settings; it must hit the endpoint that
+        # key is valid for. Override via ANTHROPIC_API_BASE only if intentional.
+        if provider == "anthropic":
+            kwargs["api_base"] = self._settings.llm.anthropic_api_base or "https://api.anthropic.com"
+
+        # DeepSeek thinking mode — pass through thinking/reasoning_effort
+        # LiteLLM standardizes these for DeepSeek models.
+        if thinking is not None:
+            kwargs["thinking"] = thinking
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
 
         return kwargs
 
@@ -492,6 +558,14 @@ class LLMGateway:
         """Configure litellm global settings."""
         litellm.set_verbose = False  # type: ignore[attr-defined]
         litellm.drop_params = True  # Drop unsupported params instead of erroring
+
+        # Silence litellm's internal loggers (DEBUG spam like
+        # "NO SHARED SESSION", "Creating new ClientSession",
+        # "model isn't mapped yet"). These propagate via the stdlib logging
+        # module into loguru; raising them to WARNING removes the noise without
+        # changing behavior.
+        for _litellm_logger in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
+            logging.getLogger(_litellm_logger).setLevel(logging.WARNING)
 
         # Enable LangSmith callbacks for litellm when tracing is active
         if os.environ.get("LANGCHAIN_TRACING_V2") == "true":

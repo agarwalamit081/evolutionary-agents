@@ -34,7 +34,24 @@ async def file_writer(
         sandbox_root = get_settings().agent.results_root
     root = Path(sandbox_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    target = (root / file_path).resolve()
+
+    # Goals embed the workspace name in the save path (e.g. "save to
+    # results/<file>"). Strip a leading workspace-name component so the path
+    # resolves under sandbox_root instead of double-nesting to
+    # results/results/<file>. Covers the literal "results" plus the configured
+    # and resolved results_root names, so per-query workspaces de-nest too.
+    ws_names = {
+        n.lower()
+        for n in (
+            "results",
+            Path(get_settings().agent.results_root).name,
+            root.name,
+        )
+    }
+    parts = Path(file_path).parts
+    while len(parts) > 1 and parts[0].lower() in ws_names:
+        parts = parts[1:]
+    target = (root / Path(*parts)).resolve()
 
     # Security: prevent path traversal
     if not str(target).startswith(str(root)):

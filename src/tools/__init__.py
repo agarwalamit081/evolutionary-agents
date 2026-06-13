@@ -2,6 +2,7 @@
 
 from src.tools.builtin import ALL_TOOL_DEFINITIONS
 from src.tools.registry import ToolRegistry
+from src.tools.result_cache import ToolResultCache
 
 
 def create_default_registry() -> ToolRegistry:
@@ -17,6 +18,7 @@ def create_default_registry() -> ToolRegistry:
             handler=tool_def["handler"],
             description=tool_def["description"],
             parameters=tool_def["parameters"],
+            cacheable=tool_def.get("cacheable", False),
         )
     return registry
 
@@ -25,4 +27,5 @@ __all__ = [
     "ToolRegistry",
     "create_default_registry",
     "ALL_TOOL_DEFINITIONS",
+    "ToolResultCache",
 ]

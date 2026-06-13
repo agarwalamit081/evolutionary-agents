@@ -18,3 +18,9 @@ Guidelines:
 - When a step produces persistent output (reports, data, configurations),
   use file_writer to save it to the workspace rather than relying on
   code_executor's ephemeral execution
+- Size the plan to fit within the remaining iterations — do not emit more
+  steps than the budget can absorb
+- When the goal has many independent units and iterations are scarce, group
+  or batch them rather than emitting one step per unit
+- Prefer delegating independent subtasks to specialized sub-agents (they run
+  in parallel) over a long sequential plan when parallelism is available

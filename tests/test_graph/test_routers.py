@@ -6,7 +6,7 @@ from typing import Any
 
 
 from src.graph.enums import Confidence
-from src.graph.models import ReflectionResult, ToolResult
+from src.graph.models import PlanStep, ReflectionResult, ToolResult
 from src.graph.routers import (
     route_after_error,
     route_after_evolve,
@@ -14,6 +14,7 @@ from src.graph.routers import (
     route_after_hitl,
     route_after_reflect,
     route_after_store,
+    route_after_structure_analysis,
     route_after_verify,
 )
 
@@ -63,6 +64,45 @@ class TestRouteAfterExecute:
         result = route_after_execute(state_with_plan)
         assert result == "execute"
 
+    def test_route_after_execute_forces_reflect_on_message_floor_midplan(self, sample_state: dict[str, Any]) -> None:
+        """Mid-plan with >=10 messages and past the fold window → reflect (fold checkpoint)."""
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="Step 1", status="pending"),
+            PlanStep(id="s2", description="Step 2", status="pending"),
+        ]
+        sample_state["current_step_index"] = 0
+        sample_state["iteration_count"] = 12
+        sample_state["max_iterations"] = 25
+        sample_state["messages"] = list(range(12))  # 12 messages >= floor
+        sample_state["last_fold_iteration"] = 0
+        assert route_after_execute(sample_state) == "reflect"
+
+    def test_route_after_execute_no_force_reflect_within_cooldown(self, sample_state: dict[str, Any]) -> None:
+        """Mid-plan within the fold cooldown → execute (checkpoint suppressed)."""
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="Step 1", status="pending"),
+            PlanStep(id="s2", description="Step 2", status="pending"),
+        ]
+        sample_state["current_step_index"] = 0
+        sample_state["iteration_count"] = 12
+        sample_state["max_iterations"] = 25
+        sample_state["messages"] = list(range(12))
+        sample_state["last_fold_iteration"] = 8  # 12 - 8 = 4 < 6 → cooldown
+        assert route_after_execute(sample_state) == "execute"
+
+    def test_route_after_execute_no_force_reflect_when_few_messages_post_fold(self, sample_state: dict[str, Any]) -> None:
+        """Mid-plan with few messages (post-fold reset) → execute (checkpoint inactive)."""
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="Step 1", status="pending"),
+            PlanStep(id="s2", description="Step 2", status="pending"),
+        ]
+        sample_state["current_step_index"] = 0
+        sample_state["iteration_count"] = 12
+        sample_state["max_iterations"] = 25
+        sample_state["messages"] = list(range(3))  # < floor after a fold reset
+        sample_state["last_fold_iteration"] = 0
+        assert route_after_execute(sample_state) == "execute"
+
 
 class TestRouteAfterVerify:
     """Tests for route_after_verify routing function."""
@@ -95,18 +135,48 @@ class TestRouteAfterVerify:
         assert result == "store_memory"
 
     def test_route_after_verify_retries_on_low_confidence(self, sample_state: dict[str, Any]) -> None:
-        """When not complete with low confidence, route back to execute."""
+        """When not complete with low confidence and steps remaining, route back to execute."""
         sample_state["is_complete"] = False
         sample_state["confidence"] = Confidence.LOW
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="pending step", status="pending"),
+            PlanStep(id="s2", description="another step", status="pending"),
+        ]
+        sample_state["current_step_index"] = 0
         result = route_after_verify(sample_state)
         assert result == "execute"
 
     def test_route_after_verify_retries_on_medium_confidence(self, sample_state: dict[str, Any]) -> None:
-        """When not complete with medium confidence, still retries execute."""
+        """When not complete with medium confidence and steps remaining, still retries execute."""
         sample_state["is_complete"] = False
         sample_state["confidence"] = Confidence.MEDIUM
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="pending step", status="pending"),
+            PlanStep(id="s2", description="another step", status="pending"),
+        ]
+        sample_state["current_step_index"] = 0
         result = route_after_verify(sample_state)
         assert result == "execute"
+
+    def test_route_after_verify_to_store_when_budget_exhausted(self, sample_state: dict[str, Any]) -> None:
+        """When not complete but budget exhausted, accept partial → store_memory (loop guard)."""
+        sample_state["is_complete"] = False
+        sample_state["confidence"] = Confidence.MEDIUM
+        sample_state["iteration_count"] = 10
+        sample_state["max_iterations"] = 10
+        result = route_after_verify(sample_state)
+        assert result == "store_memory"
+
+    def test_route_after_verify_to_plan_when_no_remaining_steps(self, sample_state: dict[str, Any]) -> None:
+        """When partial with no remaining steps and budget remains, re-plan to address gaps."""
+        sample_state["is_complete"] = False
+        sample_state["confidence"] = Confidence.MEDIUM
+        sample_state["plan_steps"] = []
+        sample_state["current_step_index"] = 0
+        sample_state["iteration_count"] = 0
+        sample_state["max_iterations"] = 10
+        result = route_after_verify(sample_state)
+        assert result == "plan"
 
 
 class TestRouteAfterError:
@@ -165,10 +235,18 @@ class TestRouteAfterStore:
         assert result == "complete"
 
     def test_route_after_store_to_execute_when_incomplete(self, sample_state: dict[str, Any]) -> None:
-        """When is_complete is False, route back to execute."""
+        """When is_complete is False and budget remains, route back to execute."""
         sample_state["is_complete"] = False
         result = route_after_store(sample_state)
         assert result == "execute"
+
+    def test_route_after_store_to_complete_when_budget_exhausted(self, sample_state: dict[str, Any]) -> None:
+        """When not complete but budget exhausted, complete with partial result (loop guard)."""
+        sample_state["is_complete"] = False
+        sample_state["iteration_count"] = 10
+        sample_state["max_iterations"] = 10
+        result = route_after_store(sample_state)
+        assert result == "complete"
 
 
 class TestRouteAfterReflect:
@@ -257,6 +335,36 @@ class TestRouteAfterReflectAgentGaps:
         sample_state["pending_tool_gaps"] = ["missing_tool"]
         result = route_after_reflect(sample_state)
         assert result == "tool_create"
+
+
+class TestRouteAfterStructureAnalysis:
+    """Tests for route_after_structure_analysis routing function."""
+
+    def test_routes_to_agent_spawn(self, sample_state: dict[str, Any]) -> None:
+        """Pending sub-agent gaps route to agent_spawn."""
+        sample_state["pending_agent_gaps"] = ["specialized sub-agent for: data gathering"]
+        assert route_after_structure_analysis(sample_state) == "agent_spawn"
+
+    def test_routes_to_tool_create(self, sample_state: dict[str, Any]) -> None:
+        """Pending tool gaps (and no agent gaps) route to tool_create."""
+        sample_state["pending_tool_gaps"] = ["custom tool 'rss_aggregator'"]
+        assert route_after_structure_analysis(sample_state) == "tool_create"
+
+    def test_routes_to_execute_when_no_gaps(self, sample_state: dict[str, Any]) -> None:
+        """No gaps route to the execute loop."""
+        assert route_after_structure_analysis(sample_state) == "execute"
+
+    def test_agent_gaps_skip_when_already_spawned(self, sample_state: dict[str, Any]) -> None:
+        """Agent gaps are suppressed once sub-agents are spawned → execute."""
+        sample_state["pending_agent_gaps"] = ["specialized sub-agent for: data gathering"]
+        sample_state["sub_agents_spawned"] = [{"name": "a", "id": "1"}]
+        assert route_after_structure_analysis(sample_state) == "execute"
+
+    def test_agent_gaps_take_priority_over_tool_gaps(self, sample_state: dict[str, Any]) -> None:
+        """Agent gaps take priority over tool gaps (mirrors route_after_reflect)."""
+        sample_state["pending_agent_gaps"] = ["specialized sub-agent for: data gathering"]
+        sample_state["pending_tool_gaps"] = ["custom tool 'rss_aggregator'"]
+        assert route_after_structure_analysis(sample_state) == "agent_spawn"
 
 
 class TestRouteAfterAgentSpawn:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -67,6 +68,19 @@ def mock_cold() -> MagicMock:
     return cold
 
 
+class _MockedManager(MemoryManager):
+    """MemoryManager test double exposing injected tier mocks for assertions.
+
+    The ``manager`` fixture attaches ``_mock_hot``/``_mock_warm``/``_mock_cold``
+    to a real MemoryManager; this subclass declares them so pyright accepts the
+    access without adding test-only attributes to the production class.
+    """
+
+    _mock_hot: MagicMock
+    _mock_warm: MagicMock
+    _mock_cold: MagicMock
+
+
 @pytest.fixture
 def manager(
     mock_redis: MagicMock,
@@ -75,18 +89,18 @@ def manager(
     mock_hot: MagicMock,
     mock_warm: MagicMock,
     mock_cold: MagicMock,
-) -> MemoryManager:
+) -> _MockedManager:
     """Create a MemoryManager with all tier mocks injected."""
     with (
         patch("src.memory.manager.HotMemoryStore", return_value=mock_hot),
         patch("src.memory.manager.WarmMemoryStore", return_value=mock_warm),
         patch("src.memory.manager.ColdMemoryStore", return_value=mock_cold),
     ):
-        mgr = MemoryManager(
+        mgr = cast(_MockedManager, MemoryManager(
             redis_client=mock_redis,
             db_session=mock_db_session,
             settings=mock_settings,
-        )
+        ))
     # Attach mocks for assertion access
     mgr._mock_hot = mock_hot
     mgr._mock_warm = mock_warm
@@ -105,7 +119,7 @@ class TestMemoryManagerInit:
     ) -> None:
         """Hot tier should be initialized with redis_client and TTL from settings."""
         with patch("src.memory.manager.HotMemoryStore") as hot_cls:
-            mgr = MemoryManager(
+            MemoryManager(
                 redis_client=mock_redis,
                 db_session=mock_db_session,
                 settings=mock_settings,
@@ -123,7 +137,7 @@ class TestMemoryManagerInit:
     ) -> None:
         """Warm tier should be initialized with db_session."""
         with patch("src.memory.manager.WarmMemoryStore") as warm_cls:
-            mgr = MemoryManager(
+            MemoryManager(
                 redis_client=mock_redis,
                 db_session=mock_db_session,
                 settings=mock_settings,
@@ -138,7 +152,7 @@ class TestMemoryManagerInit:
     ) -> None:
         """Cold tier should be initialized with db_session and embedding_dim=768."""
         with patch("src.memory.manager.ColdMemoryStore") as cold_cls:
-            mgr = MemoryManager(
+            MemoryManager(
                 redis_client=mock_redis,
                 db_session=mock_db_session,
                 settings=mock_settings,
@@ -172,7 +186,7 @@ class TestStoreObservation:
     """Tests for MemoryManager.store_observation()."""
 
     @pytest.mark.asyncio
-    async def test_stores_to_hot_tier(self, manager: MemoryManager) -> None:
+    async def test_stores_to_hot_tier(self, manager: _MockedManager) -> None:
         """store_observation should call hot.set with observation data."""
         await manager.store_observation(
             content="agent performed task",
@@ -190,7 +204,7 @@ class TestStoreObservation:
         assert call[1]["ttl"] == 3600
 
     @pytest.mark.asyncio
-    async def test_stores_to_cold_tier(self, manager: MemoryManager) -> None:
+    async def test_stores_to_cold_tier(self, manager: _MockedManager) -> None:
         """store_observation should call cold.store with episode data."""
         await manager.store_observation(
             content="agent reflected",
@@ -207,7 +221,7 @@ class TestStoreObservation:
         )
 
     @pytest.mark.asyncio
-    async def test_default_importance(self, manager: MemoryManager) -> None:
+    async def test_default_importance(self, manager: _MockedManager) -> None:
         """Default importance should be 0.5."""
         await manager.store_observation(content="default test")
 
@@ -215,7 +229,7 @@ class TestStoreObservation:
         assert call[1]["importance"] == 0.5
 
     @pytest.mark.asyncio
-    async def test_default_tags_empty_list(self, manager: MemoryManager) -> None:
+    async def test_default_tags_empty_list(self, manager: _MockedManager) -> None:
         """When tags is None, hot tier should receive empty list."""
         await manager.store_observation(content="no tags")
 
@@ -226,7 +240,7 @@ class TestStoreObservation:
         assert cold_call[1]["context_tags"] is None
 
     @pytest.mark.asyncio
-    async def test_default_episode_type(self, manager: MemoryManager) -> None:
+    async def test_default_episode_type(self, manager: _MockedManager) -> None:
         """Default episode_type should be 'execution'."""
         await manager.store_observation(content="default type")
 
@@ -241,9 +255,9 @@ class TestStoreSkill:
     """Tests for MemoryManager.store_skill()."""
 
     @pytest.mark.asyncio
-    async def test_stores_to_warm_tier(self, manager: MemoryManager) -> None:
+    async def test_stores_to_warm_tier(self, manager: _MockedManager) -> None:
         """store_skill should call warm.store with correct parameters."""
-        result = await manager.store_skill(
+        await manager.store_skill(
             name="code_review",
             content="Review code for quality",
             skill_type="procedure",
@@ -259,7 +273,7 @@ class TestStoreSkill:
         )
 
     @pytest.mark.asyncio
-    async def test_returns_uuid(self, manager: MemoryManager) -> None:
+    async def test_returns_uuid(self, manager: _MockedManager) -> None:
         """store_skill should return the UUID from warm.store."""
         result = await manager.store_skill(
             name="test_skill",
@@ -269,7 +283,7 @@ class TestStoreSkill:
         assert result == "skill-uuid-1234"
 
     @pytest.mark.asyncio
-    async def test_default_skill_type(self, manager: MemoryManager) -> None:
+    async def test_default_skill_type(self, manager: _MockedManager) -> None:
         """Default skill_type should be 'procedure'."""
         await manager.store_skill(name="s1", content="c1")
 
@@ -277,7 +291,7 @@ class TestStoreSkill:
         assert call[1]["memory_type"] == "procedure"
 
     @pytest.mark.asyncio
-    async def test_default_tags_none(self, manager: MemoryManager) -> None:
+    async def test_default_tags_none(self, manager: _MockedManager) -> None:
         """When tags is None, warm.store should receive None."""
         await manager.store_skill(name="s1", content="c1")
 
@@ -290,7 +304,7 @@ class TestRetrieveContext:
 
     @pytest.mark.asyncio
     async def test_aggregates_from_all_tiers_with_tags(
-        self, manager: MemoryManager
+        self, manager: _MockedManager
     ) -> None:
         """retrieve_context should aggregate results from hot, warm, and cold tiers."""
         manager._mock_hot.search = AsyncMock(return_value=[
@@ -316,7 +330,7 @@ class TestRetrieveContext:
         assert "cold" in tiers
 
     @pytest.mark.asyncio
-    async def test_respects_limit(self, manager: MemoryManager) -> None:
+    async def test_respects_limit(self, manager: _MockedManager) -> None:
         """retrieve_context should truncate results to the specified limit."""
         manager._mock_hot.search = AsyncMock(return_value=[
             {"content": f"hot-{i}"} for i in range(5)
@@ -335,7 +349,7 @@ class TestRetrieveContext:
         assert len(results) <= 3
 
     @pytest.mark.asyncio
-    async def test_no_tags_skips_cold_tier(self, manager: MemoryManager) -> None:
+    async def test_no_tags_skips_cold_tier(self, manager: _MockedManager) -> None:
         """When tags is None, cold tier should not be queried."""
         manager._mock_hot.search = AsyncMock(return_value=[])
         manager._mock_warm.retrieve = AsyncMock(return_value=[])
@@ -346,7 +360,7 @@ class TestRetrieveContext:
 
     @pytest.mark.asyncio
     async def test_hot_search_uses_obs_pattern(
-        self, manager: MemoryManager
+        self, manager: _MockedManager
     ) -> None:
         """Hot tier search should use 'obs:*' pattern."""
         manager._mock_hot.search = AsyncMock(return_value=[])
@@ -358,7 +372,7 @@ class TestRetrieveContext:
 
     @pytest.mark.asyncio
     async def test_warm_retrieve_with_tags_and_min_fitness(
-        self, manager: MemoryManager
+        self, manager: _MockedManager
     ) -> None:
         """Warm tier retrieve should pass tags and min_fitness=0.3."""
         manager._mock_hot.search = AsyncMock(return_value=[])
@@ -378,7 +392,7 @@ class TestRetrieveContext:
         )
 
     @pytest.mark.asyncio
-    async def test_cold_search_with_tags(self, manager: MemoryManager) -> None:
+    async def test_cold_search_with_tags(self, manager: _MockedManager) -> None:
         """Cold tier should search by tags when tags are provided."""
         manager._mock_hot.search = AsyncMock(return_value=[])
         manager._mock_warm.retrieve = AsyncMock(return_value=[])
@@ -396,7 +410,7 @@ class TestRetrieveContext:
         )
 
     @pytest.mark.asyncio
-    async def test_results_include_tier_field(self, manager: MemoryManager) -> None:
+    async def test_results_include_tier_field(self, manager: _MockedManager) -> None:
         """Each result dict should include a 'tier' field."""
         manager._mock_hot.search = AsyncMock(return_value=[
             {"content": "hot item"},
@@ -416,7 +430,7 @@ class TestUpdateSkillFitness:
     """Tests for MemoryManager.update_skill_fitness()."""
 
     @pytest.mark.asyncio
-    async def test_delegates_to_warm(self, manager: MemoryManager) -> None:
+    async def test_delegates_to_warm(self, manager: _MockedManager) -> None:
         """update_skill_fitness should call warm.update_fitness."""
         await manager.update_skill_fitness("skill-id-123", success=True)
 
@@ -425,7 +439,7 @@ class TestUpdateSkillFitness:
         )
 
     @pytest.mark.asyncio
-    async def test_passes_failure(self, manager: MemoryManager) -> None:
+    async def test_passes_failure(self, manager: _MockedManager) -> None:
         """update_skill_fitness should pass success=False correctly."""
         await manager.update_skill_fitness("skill-id-456", success=False)
 
@@ -438,7 +452,7 @@ class TestConsolidate:
     """Tests for MemoryManager.consolidate()."""
 
     @pytest.mark.asyncio
-    async def test_returns_consolidation_stats(self, manager: MemoryManager) -> None:
+    async def test_returns_consolidation_stats(self, manager: _MockedManager) -> None:
         """consolidate should return stats with cold_deleted count."""
         manager._mock_cold.consolidate = AsyncMock(return_value=5)
 
@@ -448,7 +462,7 @@ class TestConsolidate:
 
     @pytest.mark.asyncio
     async def test_calls_cold_consolidate_with_defaults(
-        self, manager: MemoryManager
+        self, manager: _MockedManager
     ) -> None:
         """consolidate should call cold.consolidate with max_age_days=90 and min_importance=0.1."""
         manager._mock_cold.consolidate = AsyncMock(return_value=0)
@@ -461,7 +475,7 @@ class TestConsolidate:
         )
 
     @pytest.mark.asyncio
-    async def test_zero_deleted(self, manager: MemoryManager) -> None:
+    async def test_zero_deleted(self, manager: _MockedManager) -> None:
         """When no memories are old enough, cold_deleted should be 0."""
         manager._mock_cold.consolidate = AsyncMock(return_value=0)
 

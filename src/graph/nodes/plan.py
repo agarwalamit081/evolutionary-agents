@@ -55,6 +55,20 @@ async def plan_node(
     if plan_steps is None:
         plan_steps = _generate_plan(goal.text, strategy)
 
+    # Budget-aware sizing: cap the plan to fit the remaining iteration budget
+    # so large multi-unit goals decompose within max_iterations instead of
+    # stretching the run to exhaustion. Applies to both LLM and heuristic plans.
+    from src.config import get_settings
+    max_iter = state.get("max_iterations", 20)
+    remaining = max(0, max_iter - iteration_count)
+    max_steps = min(get_settings().agent.planning_max_steps, max(1, remaining))
+    if len(plan_steps) > max_steps:
+        logger.info(
+            f"Capping plan from {len(plan_steps)} to {max_steps} steps "
+            f"(remaining iterations: {remaining})"
+        )
+        plan_steps = plan_steps[:max_steps]
+
     logger.info(f"Generated {len(plan_steps)} plan steps")
 
     return {
@@ -86,11 +100,16 @@ async def _llm_plan(
                 f"- {m}" for m in memories[:5]
             )
 
+        max_iterations = state.get("max_iterations", 20)
+        iteration_count = state.get("iteration_count", 0)
+        remaining_iterations = max(0, max_iterations - iteration_count)
         user_prompt = PLAN_USER.format(
             goal_text=goal.text,
             strategy=strategy.value,
             complexity=goal.complexity.value if goal.complexity else "simple",
             estimated_steps="auto",
+            remaining_iterations=remaining_iterations,
+            max_iterations=max_iterations,
             memory_context=memory_ctx,
         )
         # Build dynamic tool list for the plan prompt

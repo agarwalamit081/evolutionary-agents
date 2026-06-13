@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from src.graph.enums import MutationType, Strategy, TaskComplexity
@@ -80,12 +82,18 @@ class SubAgentProposal(BaseModel):
 
     name: str = Field(description="Snake_case sub-agent name (e.g. data_analyst)")
     description: str = Field(description="What this sub-agent specializes in")
-    template_type: str = Field(default="fixed", description="fixed or custom")
-    tool_scope: str = Field(default="inherit_all", description="inherit_all, inherit_subset, or self_create")
+    template_type: Literal["fixed", "custom"] = Field(default="fixed", description="fixed or custom")
+    tool_scope: Literal["inherit_all", "inherit_subset", "self_create"] = Field(
+        default="inherit_all",
+        description="inherit_all, inherit_subset, or self_create",
+    )
     tool_subset: list[str] = Field(default_factory=list, description="Tool names if inherit_subset")
-    model_tier: str = Field(default="simple", description="trivial, simple, complex, or critical")
+    model_tier: Literal["trivial", "simple", "complex", "critical"] = Field(
+        default="simple",
+        description="trivial, simple, complex, or critical",
+    )
     goal_description: str = Field(description="The subtask category this agent handles")
-    rationale: str = Field(description="Why a dedicated sub-agent is needed")
+    rationale: str = Field(default="", description="Why a dedicated sub-agent is needed")
 
 
 class DelegationPlan(BaseModel):

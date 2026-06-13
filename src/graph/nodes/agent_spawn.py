@@ -153,13 +153,17 @@ async def _spawn_single_agent(
     )
 
     try:
-        # Generate proposal via LLM
+        # Generate proposal via LLM — include JSON schema in system prompt
+        # so the LLM knows the expected output format
         from src.llm.structured_output import StructuredOutputManager
 
         extractor = StructuredOutputManager()
+        system_content = StructuredOutputManager.build_structured_prompt(
+            str(AGENT_SPAWN_SYSTEM), SubAgentProposal,
+        )
         response = await gateway.acompletion(
             messages=[
-                {"role": "system", "content": str(AGENT_SPAWN_SYSTEM)},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_prompt},
             ],
         )
@@ -169,6 +173,24 @@ async def _spawn_single_agent(
             return None
 
         proposal = await extractor.extract(response.content, SubAgentProposal)
+
+        if proposal is None:
+            # Retry with feedback — send the malformed output back to the LLM
+            logger.debug("First parse failed for SubAgentProposal, retrying with feedback")
+            error_msg = (
+                "Your previous response could not be parsed as valid JSON matching "
+                "the SubAgentProposal schema. Please respond with ONLY a valid JSON "
+                "object matching the schema provided in the system prompt."
+            )
+            retry_response = await gateway.acompletion(
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_prompt},
+                    {"role": "assistant", "content": response.content[:2000]},
+                    {"role": "user", "content": error_msg},
+                ],
+            )
+            proposal = await extractor.extract(retry_response.content, SubAgentProposal)
 
         if proposal is None:
             logger.warning(f"Failed to parse SubAgentProposal for: {gap_description}")

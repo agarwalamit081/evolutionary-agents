@@ -185,7 +185,7 @@ def _route_after_tool_create_sub(state: SubAgentState) -> str:
 
 def _build_fixed_subgraph(
     spec: SubAgentSpec,
-    gateway: LLMGateway,
+    gateway: LLMGateway | _ModelOverrideProxy,
     tools: ToolRegistry,
 ) -> StateGraph:
     """Build fixed template: classify → plan → execute ↔ reflect → END.
@@ -273,7 +273,7 @@ def _get_node_function(name: str) -> Callable[..., Any]:
 
 def _build_custom_subgraph(
     spec: SubAgentSpec,
-    gateway: LLMGateway,
+    gateway: LLMGateway | _ModelOverrideProxy,
     tools: ToolRegistry,
     _memory: MemoryManager | None = None,
 ) -> StateGraph:

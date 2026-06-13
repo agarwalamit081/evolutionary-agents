@@ -12,8 +12,8 @@ if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
   exit 0
 fi
 
-# Skip skills, rules, hooks, model registry, and design docs (reference material, not application code)
-if echo "$FILE_PATH" | grep -E '(skills/|rules/|hooks/|model_registry\.py|docs/design-docs/|README\.md)' > /dev/null; then
+# Skip skills, rules, and hooks directories (reference material, not application code)
+if echo "$FILE_PATH" | grep -E '(skills/|rules/|hooks/)' > /dev/null; then
   exit 0
 fi
 
@@ -45,10 +45,10 @@ EXPENSIVE_MODELS=(
   'claude-opus-4-8'
   'claude-opus-4-7'
   'gpt-4\.1-2025-04-14'
-  'gpt-5\.2'
-  'gpt-5\.3'
-  'gpt-5\.4'
-  'gpt-5\.5'
+  'gpt-5\.2([^a-zA-Z0-9._-]|$)'
+  'gpt-5\.3([^a-zA-Z0-9._-]|$)'
+  'gpt-5\.4([^a-zA-Z0-9._-]|$)'
+  'gpt-5\.5([^a-zA-Z0-9._-]|$)'
   'gpt-5-2025'
   'o3-2025-04-16'
   'gpt-4o-2024-08-06'
@@ -57,10 +57,10 @@ EXPENSIVE_MODELS=(
   'gemini-3-pro-image'
   'mistral-large'
   'devstral'
-  'grok-4\.3'
+  'grok-4\.3([^a-zA-Z0-9._-]|$)'
   'glm-5\.1'
-  'glm-5[^-]'
-  'minimax-m2\.7[^-]'
+  'glm-5([^a-zA-Z0-9._-]|$)'
+  'minimax-m2\.7([^a-zA-Z0-9._-]|$)'
 )
 
 for model in "${EXPENSIVE_MODELS[@]}"; do

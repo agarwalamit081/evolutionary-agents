@@ -36,6 +36,9 @@ class AgentState(TypedDict, total=False):
     phase: Phase
     iteration_count: int
     max_iterations: int
+    # Single-shot guard: structure_analysis runs its proactive detection at most
+    # once per run, preventing re-seed loops regardless of reducer semantics.
+    structure_analysis_done: bool
 
     # ─── Goal & Planning ────────────────────────────────────────────────
     current_goal: Goal

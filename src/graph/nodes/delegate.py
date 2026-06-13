@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from langchain_core.messages import HumanMessage
 from loguru import logger
 
 from src.graph.enums import Phase
@@ -66,6 +67,12 @@ async def delegate_node(
     # Collect results from each spawned agent
     delegation_results: list[dict[str, Any]] = []
     new_tool_results: list[ToolResult] = []
+    # Sub-agent tool activity, propagated up so the parent's reducer-backed
+    # tool lists (and the e2e report) reflect delegated work, not just the
+    # sub_agent:* wrapper results.
+    delegated_tool_results: list[ToolResult] = []
+    delegated_tools_created: list[dict[str, Any]] = []
+    delegated_tools_called: list[dict[str, Any]] = []
     all_success = True
 
     # Phase 1: Validate all agents and spawn runners
@@ -153,6 +160,11 @@ async def delegate_node(
 
             delegation_results.append(result)
 
+            # Surface the sub-agent's own tool activity into the parent state.
+            delegated_tool_results.extend(result.get("tool_results") or [])
+            delegated_tools_created.extend(result.get("tools_created") or [])
+            delegated_tools_called.extend(result.get("tools_called") or [])
+
             if result.get("success"):
                 new_tool_results.append(ToolResult(
                     tool_name=f"sub_agent:{agent_name}",
@@ -178,10 +190,27 @@ async def delegate_node(
             # Auto-deprecation check
             sub_agent_registry.check_deprecation(agent_name)
 
+    # Append a concise delegation summary to the conversation thread so the
+    # main agent (now a stateful ReAct loop) sees sub-agent outcomes in its own
+    # context when it resumes execution. Minimum-sufficient: name + status +
+    # short output excerpt per agent.
+    summary_lines = [f"[Delegation complete — {len(new_tool_results)} sub-agent(s)]"]
+    for tr in new_tool_results:
+        status = "success" if tr.success else "failed"
+        excerpt = (tr.output or tr.error or "")[:200]
+        summary_lines.append(f"- {tr.tool_name}: {status} — {excerpt}")
+    delegation_summary = HumanMessage(content="\n".join(summary_lines))
+
     return {
         "phase": Phase.VERIFY if all_success else Phase.EXECUTE,
         "delegation_results": delegation_results,
-        "tool_results": new_tool_results,
+        # Merge the sub_agent:* wrapper results with the delegated sub-agent
+        # tool activity so both the verify node and the e2e report see the
+        # real tool work performed during delegation.
+        "tool_results": new_tool_results + delegated_tool_results,
+        "tools_created": delegated_tools_created,
+        "tools_called": delegated_tools_called,
+        "messages": [delegation_summary],
     }
 
 

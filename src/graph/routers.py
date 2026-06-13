@@ -55,6 +55,25 @@ def route_after_execute(state: AgentState) -> str:
         logger.info("All plan steps executed, routing to reflect")
         return "reflect"
 
+    # Memory folding checkpoint — give should_fold a mid-plan opportunity so
+    # long single-plan runs still get context compression (otherwise reflect
+    # is only reached at plan exhaustion). Conservative: fires at most once
+    # per fold window — after a fold, last_fold_iteration advances and the
+    # message list resets to ~1 (the summary), so both guards reset.
+    messages = state.get("messages", [])
+    last_fold = state.get("last_fold_iteration", 0) or 0
+    has_remaining_steps = bool(plan_steps) and step_index < len(plan_steps)
+    if (
+        has_remaining_steps
+        and len(messages) >= 10
+        and (iteration_count - last_fold) >= 6
+    ):
+        logger.info(
+            f"Folding checkpoint: {len(messages)} messages mid-plan "
+            f"(iteration {iteration_count}), routing to reflect for fold evaluation"
+        )
+        return "reflect"
+
     # More steps to execute → loop back
     return "execute"
 
@@ -109,17 +128,53 @@ def route_after_reflect(state: AgentState) -> str:
     return "verify"
 
 
+def route_after_structure_analysis(state: AgentState) -> str:
+    """Route after the structure_analysis node.
+
+    Proactively dispatches to the spawn nodes when the goal stated tool-creation
+    or sub-agent intent up front, bypassing the reactive reflect-driven path.
+
+    Returns:
+        "agent_spawn" — proactive sub-agent gaps seeded from the goal
+        "tool_create" — proactive tool gaps seeded from the goal
+        "execute" — no proactive gaps; proceed to the execute loop
+    """
+    # Sub-agent gaps take priority (mirrors route_after_reflect).
+    pending_agent_gaps = state.get("pending_agent_gaps", [])
+    if pending_agent_gaps and not state.get("sub_agents_spawned"):
+        logger.info(
+            f"Proactive sub-agent gaps from structure analysis: "
+            f"{pending_agent_gaps}, routing to agent_spawn"
+        )
+        return "agent_spawn"
+
+    pending_tool_gaps = state.get("pending_tool_gaps", [])
+    if pending_tool_gaps:
+        logger.info(
+            f"Proactive tool gaps from structure analysis: {pending_tool_gaps}, "
+            f"routing to tool_create"
+        )
+        return "tool_create"
+
+    return "execute"
+
+
 def route_after_verify(state: AgentState) -> str:
     """Route after the verify node.
 
     Returns:
         "evolve" — verification passed + should_evolve flag
-        "store_memory" — verification passed, no evolution needed
-        "execute" — verification failed or partial, retry
+        "store_memory" — verification passed, or budget exhausted (accept partial)
+        "plan" — verification partial with no remaining steps (re-plan to address gaps)
+        "execute" — verification partial with steps remaining (retry)
     """
     is_complete = state.get("is_complete", False)
     confidence = state.get("confidence", Confidence.MEDIUM)
     reflection = state.get("reflection")
+    iteration_count = state.get("iteration_count", 0)
+    max_iterations = state.get("max_iterations", 25)
+    plan_steps = state.get("plan_steps", [])
+    step_index = state.get("current_step_index", 0)
 
     if is_complete:
         should_evolve = False
@@ -131,7 +186,24 @@ def route_after_verify(state: AgentState) -> str:
             return "evolve"
         return "store_memory"
 
-    # Not complete — check if we should retry
+    # Budget exhausted — accept the partial result rather than looping forever.
+    # Without this guard, partial verification + execute's no-steps path
+    # increments iteration_count unbounded while the cycle never terminates.
+    if iteration_count >= max_iterations:
+        logger.info(
+            f"Max iterations ({max_iterations}) reached, accepting partial result"
+        )
+        return "store_memory"
+
+    # Partial verification with no steps left to execute — re-plan so the
+    # agent can make progress addressing the identified gaps instead of
+    # spinning on an exhausted plan. (verify → plan edge is wired in the graph.)
+    has_remaining_steps = bool(plan_steps) and step_index < len(plan_steps)
+    if not has_remaining_steps:
+        logger.info("Verification partial with no remaining steps, re-planning")
+        return "plan"
+
+    # Partial with steps remaining — retry execution (low or medium confidence)
     if isinstance(confidence, str):
         confidence = Confidence(confidence)
 
@@ -139,7 +211,6 @@ def route_after_verify(state: AgentState) -> str:
         logger.info("Verification failed with low confidence, retrying execute")
         return "execute"
 
-    # Medium confidence — try once more
     logger.info("Verification partial, retrying execute")
     return "execute"
 
@@ -165,16 +236,28 @@ def route_after_store(state: AgentState) -> str:
 
     Returns:
         "hitl_gate" — HITL required (high risk or explicit flag)
-        "complete" — normal completion
+        "complete" — normal completion, or budget exhausted (accept partial)
+        "execute" — not done yet and budget remains
     """
     is_complete = state.get("is_complete", False)
+    iteration_count = state.get("iteration_count", 0)
+    max_iterations = state.get("max_iterations", 25)
 
-    if not is_complete:
-        # Not done yet, continue execution
-        return "execute"
+    if is_complete:
+        # Normal completion. HITL can be enabled via config.
+        return "complete"
 
-    # For now, complete directly. HITL can be enabled via config.
-    return "complete"
+    # Budget exhausted — accept the partial result instead of bouncing back
+    # to execute (which would re-enter the partial-verification cycle).
+    if iteration_count >= max_iterations:
+        logger.info(
+            f"Max iterations ({max_iterations}) reached, "
+            f"completing with partial result"
+        )
+        return "complete"
+
+    # Not done yet, continue execution
+    return "execute"
 
 
 def route_after_hitl(state: AgentState) -> str:

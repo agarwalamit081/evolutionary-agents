@@ -331,6 +331,8 @@ The agent can also **spawn specialized sub-agents** as isolated LangGraph subgra
 
 Background **consolidation** ("dreaming") moves data between tiers: episodic memories in cold storage are periodically analyzed for patterns, which are crystallized into skills in warm storage.
 
+**Autonomous memory folding** keeps long-running tasks within context limits: when the live conversation grows past a token/message threshold, the `reflect` node compresses it in parallel into three structured summaries — episode (key events/decisions), working (current goals/next actions), and tool (usage patterns/rules). Folding genuinely shrinks context (LangGraph `RemoveMessage` deletes the old messages), persists the summaries to warm memory, and recalls them on later runs — bounded by `MEMORY_FOLDING_MAX_FOLDS` per run. See [`docs/design-docs/08-memory-system.md`](docs/design-docs/08-memory-system.md) §13.
+
 ---
 
 ## Self-Evolution
@@ -390,6 +392,12 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | `LANGCHAIN_TRACING_V2` | `false` | Enable LangSmith tracing for LangGraph and litellm |
 | `LANGSMITH_API_KEY` | — | LangSmith API key (required if tracing enabled) |
 | `LANGSMITH_PROJECT` | `turing-agent` | LangSmith project name |
+| `MEMORY_FOLDING_ENABLED` | `true` | Enable autonomous mid-run context folding |
+| `MEMORY_FOLDING_INTERVAL` | `6` | Cooldown window (iterations between folds); tuned to fit `max_iterations` |
+| `MEMORY_FOLDING_TOKEN_THRESHOLD` | `50000` | Live-token trigger for folding |
+| `MEMORY_FOLDING_MESSAGE_FLOOR` | `10` | Minimum messages before folding is considered |
+| `MEMORY_FOLDING_MESSAGE_THRESHOLD` | `14` | Message-count trigger for folding |
+| `MEMORY_FOLDING_MAX_FOLDS` | `3` | Maximum folds per agent run |
 
 ---
 

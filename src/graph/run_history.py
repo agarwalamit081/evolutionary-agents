@@ -177,6 +177,35 @@ class RunHistoryGenerator:
         lines.append(f"- **Cost records**: {len(cost_records)}")
         lines.append("")
 
+        # Models Used breakdown — aggregate cost_records by model
+        if cost_records:
+            lines.append("## Models Used")
+            lines.append("")
+
+            model_usage: dict[str, dict[str, int | float]] = {}
+            for cr in cost_records:
+                model = getattr(cr, "model", cr.get("model", "unknown") if isinstance(cr, dict) else "unknown")
+                provider = getattr(cr, "provider", cr.get("provider", "") if isinstance(cr, dict) else "")
+                inp = int(getattr(cr, "input_tokens", cr.get("input_tokens", 0) if isinstance(cr, dict) else 0))
+                out = int(getattr(cr, "output_tokens", cr.get("output_tokens", 0) if isinstance(cr, dict) else 0))
+                cost_val = float(getattr(cr, "cost_usd", cr.get("cost_usd", 0) if isinstance(cr, dict) else 0))
+
+                key = f"{model} ({provider})" if provider else model
+                if key not in model_usage:
+                    model_usage[key] = {"input_tokens": 0, "output_tokens": 0, "total_cost": 0.0}
+                model_usage[key]["input_tokens"] += inp
+                model_usage[key]["output_tokens"] += out
+                model_usage[key]["total_cost"] += cost_val
+
+            lines.append("| Model (Provider) | Input Tokens | Output Tokens | Cost |")
+            lines.append("|-----------------|-------------|--------------|------|")
+            for model_key, usage in sorted(model_usage.items(), key=lambda x: -x[1]["total_cost"]):
+                lines.append(
+                    f"| {model_key} | {usage['input_tokens']:,} | "
+                    f"{usage['output_tokens']:,} | ${usage['total_cost']:.4f} |"
+                )
+            lines.append("")
+
         # Errors
         errors = state.get("errors", [])
         lines.append("## Errors")

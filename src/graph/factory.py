@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from langchain_core.messages import HumanMessage
+
 from src.graph.enums import (
     Confidence,
     GoalStatus,
@@ -36,7 +38,9 @@ def initial_state(
         strategy=Strategy.DIRECT,
         plan_steps=[],
         current_step_index=0,
-        messages=[],
+        # Seed the conversation thread with the goal so execute feeds real
+        # history into each LLM call and memory folding has context to compress.
+        messages=[HumanMessage(content=goal_text)],
         tools_called=[],
         tool_results=[],
         completed_steps=[],

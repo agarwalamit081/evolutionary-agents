@@ -51,6 +51,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.005,
     ),
     "claude-sonnet-4-6": ModelSpec(
         model_id="claude-sonnet-4-6",
@@ -62,6 +64,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.003,
+        output_cost_per_1k=0.015,
     ),
     # ── DeepSeek ──────────────────────────────────────────────────
     "deepseek-v4-flash": ModelSpec(
@@ -74,6 +78,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.0001,
+        output_cost_per_1k=0.0004,
     ),
     "deepseek-v4-pro": ModelSpec(
         model_id="deepseek/deepseek-v4-pro",
@@ -85,6 +91,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.0005,
+        output_cost_per_1k=0.002,
     ),
     # ── OpenAI ────────────────────────────────────────────────────
     "gpt-4o-mini-2024-07-18": ModelSpec(
@@ -97,6 +105,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.00015,
+        output_cost_per_1k=0.0006,
     ),
     "gpt-4.1-mini-2025-04-14": ModelSpec(
         model_id="gpt-4.1-mini-2025-04-14",
@@ -108,6 +118,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.0004,
+        output_cost_per_1k=0.0016,
     ),
     "gpt-5-nano-2025-08-07": ModelSpec(
         model_id="gpt-5-nano-2025-08-07",
@@ -119,6 +131,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.0001,
+        output_cost_per_1k=0.0004,
     ),
     # ── Z.AI (Zhipu / GLM) ───────────────────────────────────────
     "glm-4.7-flash": ModelSpec(
@@ -131,6 +145,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=False,
+        input_cost_per_1k=0.00005,
+        output_cost_per_1k=0.0001,
     ),
     "glm-4.5-air": ModelSpec(
         model_id="glm-4.5-air",
@@ -142,6 +158,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=False,
+        input_cost_per_1k=0.0001,
+        output_cost_per_1k=0.0002,
     ),
     "glm-4.7": ModelSpec(
         model_id="glm-4.7",
@@ -153,6 +171,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.0005,
+        output_cost_per_1k=0.001,
     ),
     "glm-5-turbo": ModelSpec(
         model_id="glm-5-turbo",
@@ -164,6 +184,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.003,
     ),
     # ── MiniMax ───────────────────────────────────────────────────
     "minimax-m2.5-highspeed": ModelSpec(
@@ -176,6 +198,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.0001,
+        output_cost_per_1k=0.0002,
     ),
     "minimax-m2.5": ModelSpec(
         model_id="minimax-m2.5",
@@ -187,6 +211,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.0005,
+        output_cost_per_1k=0.001,
     ),
     # ── Mistral ───────────────────────────────────────────────────
     "mistral-small-2603": ModelSpec(
@@ -199,6 +225,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=False,
+        input_cost_per_1k=0.0002,
+        output_cost_per_1k=0.0006,
     ),
     "mistral-medium-3-5": ModelSpec(
         model_id="mistral/mistral-medium-3-5",
@@ -210,6 +238,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.002,
+        output_cost_per_1k=0.006,
     ),
     # ── Moonshot ──────────────────────────────────────────────────
     "moonshot-v1-32k": ModelSpec(
@@ -222,6 +252,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=False,
+        input_cost_per_1k=0.0002,
+        output_cost_per_1k=0.0004,
     ),
     "kimi-k2.6": ModelSpec(
         model_id="kimi-k2.6",
@@ -233,6 +265,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.003,
     ),
     # ── Qwen (Alibaba DashScope) ─────────────────────────────────
     "qwen3.5-flash": ModelSpec(
@@ -245,6 +279,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.00005,
+        output_cost_per_1k=0.0001,
     ),
     "qwen3.7-plus": ModelSpec(
         model_id="openai/qwen3.7-plus",
@@ -256,6 +292,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.0003,
+        output_cost_per_1k=0.0006,
     ),
     # ── Google ────────────────────────────────────────────────────
     "gemini-2.5-flash-lite": ModelSpec(
@@ -279,6 +317,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.00015,
+        output_cost_per_1k=0.0006,
     ),
     "gemini-3-flash-preview": ModelSpec(
         model_id="gemini/gemini-3-flash-preview",
@@ -290,6 +330,8 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        input_cost_per_1k=0.00015,
+        output_cost_per_1k=0.0006,
     ),
     # ── Groq ──────────────────────────────────────────────────────
     "llama-3.1-8b-instant": ModelSpec(

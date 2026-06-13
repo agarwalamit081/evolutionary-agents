@@ -10,6 +10,7 @@ from src.graph.nodes.hitl import hitl_gate_node
 from src.graph.nodes.memory import retrieve_memory_node, store_memory_node
 from src.graph.nodes.plan import plan_node
 from src.graph.nodes.reflect import reflect_node
+from src.graph.nodes.structure_analysis import structure_analysis_node
 from src.graph.nodes.tool_create import tool_create_node
 from src.graph.nodes.verify import verify_node
 
@@ -19,6 +20,7 @@ __all__ = [
     "retrieve_memory_node",
     "execute_node",
     "reflect_node",
+    "structure_analysis_node",
     "verify_node",
     "evolve_node",
     "store_memory_node",

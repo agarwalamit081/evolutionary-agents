@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import json
+from typing import TYPE_CHECKING, Any, cast
 
 from loguru import logger
 
@@ -12,6 +13,7 @@ from src.graph.state import AgentState
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
+    from src.memory.manager import MemoryManager
     from src.tools.registry import ToolRegistry
 
 
@@ -20,6 +22,8 @@ async def reflect_node(
     *,
     gateway: LLMGateway | None = None,
     tools: ToolRegistry | None = None,
+    memory: MemoryManager | None = None,
+    folding_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Perform self-reflection on the execution so far.
 
@@ -31,6 +35,9 @@ async def reflect_node(
         state: Current agent state with execution results.
         gateway: Optional LLM gateway for LLM-enhanced reflection.
         tools: Optional ToolRegistry for gap detection.
+        memory: Optional MemoryManager for persisting folded summaries.
+        folding_cfg: Optional memory-folding configuration sourced from
+            ``AgentSettings`` (triggers, thresholds, enabled flag).
 
     Returns:
         Partial state update with reflection results.
@@ -44,10 +51,11 @@ async def reflect_node(
 
     # ── Memory Folding Check ────────────────────────────────────────────
     if gateway is not None:
-        fold_update = await _check_and_fold(state, gateway)
+        fold_update = await _check_and_fold(state, gateway, memory, folding_cfg or {})
         if fold_update is not None:
-            # Folding happened — return fold result (includes a summary
-            # message that replaces the conversation history). The normal
+            # Folding happened — return fold result. The fold reduces the
+            # conversation history (RemoveMessage + a compressed summary) and
+            # persists the structured summaries to warm memory. The normal
             # reflection logic will run on the next iteration.
             return fold_update
 
@@ -334,37 +342,132 @@ def _detect_agent_gaps_heuristic(
 # ── Memory Folding ─────────────────────────────────────────────────────
 
 
+def _derive_verified_actions(tool_results: list[Any]) -> dict[str, dict[str, int]]:
+    """Ground the folded tool memory in real execution, not LLM speculation.
+
+    Implements GenericAgent's "No Execution, No Memory" principle: only tool
+    actions that actually ran and succeeded at least once count as verified.
+    Returns ``{tool_name: {"calls": int, "successes": int}}`` restricted to
+    verified tools, computed purely from the run's own ToolResult records
+    (no extra LLM call). Dict-shaped results are handled for symmetry with
+    ``_serialize_tool_history``.
+    """
+    stats: dict[str, dict[str, int]] = {}
+    for tr in tool_results:
+        if isinstance(tr, dict):
+            name = tr.get("tool_name")
+            success = bool(tr.get("success"))
+        else:
+            name = getattr(tr, "tool_name", None)
+            success = bool(getattr(tr, "success", False))
+        if not name:
+            continue
+        bucket = stats.setdefault(name, {"calls": 0, "successes": 0})
+        bucket["calls"] += 1
+        if success:
+            bucket["successes"] += 1
+    return {
+        name: counts for name, counts in stats.items() if counts["successes"] >= 1
+    }
+
+
 async def _check_and_fold(
     state: AgentState,
     gateway: LLMGateway,
+    memory: MemoryManager | None = None,
+    folding_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Check if memory folding is needed and perform it.
 
-    Returns a partial state update if folding occurred, or None.
-    The update replaces the message history with a compressed summary.
+    Returns a partial state update if folding occurred, or None. The update
+    *reduces* the message history: every existing message is wrapped in a
+    ``RemoveMessage`` (so LangGraph's ``add_messages`` reducer deletes it) and a
+    single compressed summary is appended. The structured episode/working/tool
+    summaries are also persisted to warm memory so later runs can recall them.
 
     Args:
         state: Current agent state.
         gateway: LLM gateway for generating compressed memories.
+        memory: Optional MemoryManager for persisting folded summaries.
+        folding_cfg: Optional folding configuration (triggers, thresholds,
+            ``enabled`` flag). Defaults to ``MemoryFolder`` defaults.
 
     Returns:
         Partial state update dict, or None if no folding needed.
     """
+    cfg = folding_cfg or {}
+    if not cfg.get("enabled", True):
+        return None
+
     from src.memory.folding import MemoryFolder
 
-    folder = MemoryFolder(gateway)
+    # Drop the "enabled" flag — MemoryFolder.__init__ does not accept it.
+    folder_kwargs = {k: v for k, v in cfg.items() if k != "enabled"}
+    folder = MemoryFolder(gateway, **folder_kwargs)
 
-    if not folder.should_fold(state):
+    if not folder.should_fold(cast("dict[str, Any]", state)):
         return None
 
     try:
-        result = await folder.fold(state)
+        result = await folder.fold(cast("dict[str, Any]", state))
+        state_dict = cast("dict[str, Any]", state)
+
+        # Bug B fix: actually shrink the history. add_messages deletes by id
+        # when handed RemoveMessage entries, then appends the summary.
+        removal = folder.build_removal_messages(state_dict)
         summary_msg = folder.build_summary_message(result)
+        new_messages = [*removal, summary_msg]
+
+        # Bug C fix: persist the structured summaries to warm memory so future
+        # runs can recall them via retrieve_memory_node. Best-effort: a store
+        # failure must not break the in-run fold.
+        #
+        # GenericAgent "No Execution, No Memory" + minimum-sufficient pointer:
+        # the tool summary is grounded against the run's real ToolResult
+        # stats (verified_actions) and tagged honestly — "verified" only when
+        # ≥1 tool actually succeeded, "unverified" otherwise. Episode/working
+        # memories stay narrative LLM summaries (they capture the story, not
+        # tool facts), so they keep the plain kind tag.
+        if memory is not None:
+            verified_actions = _derive_verified_actions(
+                state.get("tool_results", [])
+            )
+            payloads = {
+                "episode": result.episode_memory,
+                "working": result.working_memory,
+                "tool": result.tool_memory,
+            }
+            for kind, payload in payloads.items():
+                try:
+                    if kind == "tool":
+                        # Embed the grounded execution anchor alongside the
+                        # LLM summary and label by verification status.
+                        store_payload: Any = {
+                            "summary": payload,
+                            "verified_actions": verified_actions,
+                        }
+                        tag = "verified" if verified_actions else "unverified"
+                        tags = ["folded_memory", kind, tag]
+                    else:
+                        store_payload = payload
+                        tags = ["folded_memory", kind]
+                    await memory.store_skill(
+                        name=f"fold_{result.fold_number}_{kind}",
+                        content=json.dumps(store_payload, ensure_ascii=False),
+                        skill_type="folded_memory",
+                        tags=tags,
+                    )
+                except Exception as exc:
+                    logger.debug(f"Failed to persist folded {kind} memory: {exc}")
 
         return {
             "phase": Phase.REFLECT,
-            "messages": [summary_msg],
-            "fold_history": [result.to_dict()],
+            "messages": new_messages,
+            # fold_history is operator.add-accumulated, so inject the iteration
+            # into each record so every fold carries when it actually fired.
+            "fold_history": [
+                {**result.to_dict(), "iteration": state.get("iteration_count", 0)}
+            ],
             "last_fold_iteration": state.get("iteration_count", 0),
         }
     except Exception as exc:

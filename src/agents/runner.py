@@ -212,6 +212,14 @@ def _extract_results(
         "sub_agent_name": spec.name,
         "sub_agent_id": spec.id,
         "quality_rating": quality_rating,
+        # Propagate the sub-agent's tool activity so the parent's
+        # tool_results/tools_created/tools_called reducers (operator.add)
+        # reflect delegated work — otherwise it stays siloed in the
+        # SubAgentState and the parent's counts (and the e2e report)
+        # understate real activity.
+        "tool_results": list(result_state.get("tool_results", [])),
+        "tools_called": list(result_state.get("tools_called", [])),
+        "tools_created": list(result_state.get("tools_created", [])),
     }
 
 

@@ -170,7 +170,7 @@ class SelfEvolutionEngine:
                 performance_context=perf_ctx or "(no specific performance data)",
             )
             messages: list[dict[str, str]] = [
-                {"role": "system", "content": EVOLUTION_GENERATE_SYSTEM},
+                {"role": "system", "content": str(EVOLUTION_GENERATE_SYSTEM)},
                 {"role": "user", "content": user_prompt},
             ]
 

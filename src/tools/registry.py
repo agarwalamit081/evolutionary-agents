@@ -23,6 +23,7 @@ class ToolRegistry:
         handler: Callable[..., Any],
         description: str = "",
         parameters: dict[str, Any] | None = None,
+        cacheable: bool = False,
     ) -> None:
         """Register a tool in the registry.
 
@@ -31,6 +32,10 @@ class ToolRegistry:
             handler: Async callable that implements the tool.
             description: Human-readable description for LLM tool selection.
             parameters: JSON Schema describing tool parameters.
+            cacheable: When True, successful results of this tool are eligible
+                for the Redis result cache. Reserve this for idempotent,
+                read-only tools (e.g. ``web_search``, ``file_reader``). NEVER
+                mark mutating tools (``file_writer``) cacheable.
         """
         if name in self._tools:
             logger.warning(f"Tool '{name}' already registered, overwriting")
@@ -40,6 +45,7 @@ class ToolRegistry:
             "handler": handler,
             "description": description,
             "parameters": parameters or {},
+            "cacheable": cacheable,
         }
         logger.debug(f"Tool registered: {name}")
 
@@ -48,6 +54,7 @@ class ToolRegistry:
         name: str | None = None,
         description: str = "",
         parameters: dict[str, Any] | None = None,
+        cacheable: bool = False,
     ) -> Callable[..., Any]:
         """Decorator to register a function as a tool.
 
@@ -55,6 +62,7 @@ class ToolRegistry:
             name: Optional tool name (defaults to function name).
             description: Tool description for LLM.
             parameters: JSON Schema for parameters.
+            cacheable: Whether successful results may be cached.
 
         Returns:
             Decorator function.
@@ -63,7 +71,7 @@ class ToolRegistry:
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             tool_name = name or func.__name__
             tool_desc = description or func.__doc__ or ""
-            self.register(tool_name, func, tool_desc, parameters)
+            self.register(tool_name, func, tool_desc, parameters, cacheable)
             return func
 
         return decorator
@@ -78,6 +86,16 @@ class ToolRegistry:
             Tool dict with name, handler, description, parameters or None.
         """
         return self._tools.get(name)
+
+    def is_cacheable(self, name: str) -> bool:
+        """Return whether a tool's successful results may be cached.
+
+        Unknown tools (and any tool registered without ``cacheable=True``)
+        return False, so the cache hook is a safe no-op for everything but
+        the explicit idempotent read-only tools.
+        """
+        tool = self._tools.get(name)
+        return bool(tool and tool.get("cacheable"))
 
     def get_handler(self, name: str) -> Callable[..., Any] | None:
         """Get just the handler function for a tool."""

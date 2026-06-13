@@ -72,6 +72,9 @@ TOOL_DEFINITION = {
         "Supports text files with configurable line limits. "
         "Path traversal attacks are blocked."
     ),
+    # Read-only file access — content is deterministic per (path, max_lines),
+    # so caching repeated reads within/across runs is safe.
+    "cacheable": True,
     "parameters": {
         "type": "object",
         "properties": {

@@ -25,6 +25,11 @@ class LLMProviderSettings(BaseSettings):
 
     # Provider API Keys
     anthropic_api_key: Optional[str] = None
+    # Explicit Anthropic endpoint. When set, the gateway pins Anthropic calls
+    # here instead of inheriting an ambient ANTHROPIC_BASE_URL (e.g. a
+    # Claude-Code→Z.AI gateway) that would misroute the app's own key. Defaults
+    # to the standard public Anthropic API in the gateway.
+    anthropic_api_base: Optional[str] = None
     openai_api_key: Optional[str] = None
     openai_org_id: Optional[str] = None
     deepseek_api_key: Optional[str] = None
@@ -176,6 +181,28 @@ class RedisSettings(BaseSettings):
         return v
 
 
+# ─── Tool Cache Settings ────────────────────────────────────────────
+
+
+class ToolCacheSettings(BaseSettings):
+    """Redis-backed result cache for idempotent, read-only tools.
+
+    Only opt-in read-only tools are cached (web_search, file_reader); mutating
+    tools (file_writer) are never cached. Any Redis failure degrades to a
+    transparent cache miss and never breaks a tool call.
+    """
+
+    tool_cache_enabled: bool = True
+    tool_cache_ttl_seconds: int = 3600  # 1 hour
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=True,
+    )
+
+
 # ─── Budget Settings ────────────────────────────────────────────────
 
 
@@ -267,9 +294,28 @@ class AgentSettings(BaseSettings):
 
     # Memory folding (autonomous context compression)
     memory_folding_enabled: bool = True
-    memory_folding_interval: int = 10
+    # Cooldown between folds. Tuned to the default max_iterations (~18-25): an
+    # interval of 10 couldn't fit a 2nd fold before the cap (needs iter 20).
+    # At 6, folds are feasible at ~iter 6/12/18 (capped at max_folds=3).
+    memory_folding_interval: int = 6
     memory_folding_token_threshold: int = 50_000
     memory_folding_max_folds: int = 3
+    # Primary trigger: fold once the conversation reaches this many messages.
+    memory_folding_message_floor: int = 10
+    memory_folding_message_threshold: int = 14
+    # Tertiary context-size trigger (chars // 4 estimate).
+    memory_folding_message_token_estimate: int = 8_000
+
+    # Planning: cap generated plan length to the iteration budget so large
+    # multi-unit goals decompose within max_iterations instead of blowing the
+    # run budget (the binding constraint — money budget is secondary). 30 lets
+    # complex multi-unit goals (e.g. "document 12 patterns") decompose fully;
+    # plan_node still clamps to the remaining iteration budget via
+    # min(planning_max_steps, remaining), so this never overshoots max_iterations.
+    planning_max_steps: int = 30
+    # Proactive structure analysis: detect tool-creation / parallel sub-agent
+    # intent from the goal before the execute loop and seed the spawn nodes.
+    structure_analysis_enabled: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -278,7 +324,7 @@ class AgentSettings(BaseSettings):
         case_sensitive=True,
     )
 
-    @field_validator("max_iterations", "max_sub_agents")
+    @field_validator("max_iterations", "max_sub_agents", "planning_max_steps")
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
         """Ensure positive integers."""
@@ -387,6 +433,7 @@ class Settings(BaseSettings):
     logging: LoggingSettings = LoggingSettings()  # type: ignore[assignment]
     observability: ObservabilitySettings = ObservabilitySettings()  # type: ignore[assignment]
     langsmith: LangSmithSettings = LangSmithSettings()  # type: ignore[assignment]
+    tool_cache: ToolCacheSettings = ToolCacheSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

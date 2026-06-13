@@ -156,3 +156,39 @@ class TestFileWriterResultsDir:
 
         assert "success" in result.lower() or "wrote" in result.lower()
         assert (tmp_path / "test.txt").read_text() == "results content"
+
+    @pytest.mark.asyncio
+    async def test_strips_results_prefix_no_double_nesting(self, tmp_path: Path) -> None:
+        """A goal-style 'results/<file>' path resolves under the root, not nested."""
+        from src.config.settings import AgentSettings
+
+        mock_settings = AgentSettings(results_root=str(tmp_path))
+        with patch(
+            "src.tools.builtin.file_writer.get_settings",
+            return_value=type("S", (), {"agent": mock_settings}),
+        ):
+            result = await file_writer("results/report.html", "<html/>", create_dirs=True)
+
+        assert "success" in result.lower() or "wrote" in result.lower()
+        # De-nested: lands directly under the workspace root, not under results/.
+        assert (tmp_path / "report.html").exists()
+        assert (tmp_path / "report.html").read_text() == "<html/>"
+        assert not (tmp_path / "results" / "report.html").exists()
+
+    @pytest.mark.asyncio
+    async def test_strips_results_prefix_preserves_subfolder(self, tmp_path: Path) -> None:
+        """'results/<sub>/<file>' de-nests while preserving the subfolder."""
+        from src.config.settings import AgentSettings
+
+        mock_settings = AgentSettings(results_root=str(tmp_path))
+        with patch(
+            "src.tools.builtin.file_writer.get_settings",
+            return_value=type("S", (), {"agent": mock_settings}),
+        ):
+            result = await file_writer(
+                "results/design_patterns/singleton.md", "# Singleton", create_dirs=True
+            )
+
+        assert "success" in result.lower() or "wrote" in result.lower()
+        assert (tmp_path / "design_patterns" / "singleton.md").exists()
+        assert not (tmp_path / "results" / "design_patterns").exists()

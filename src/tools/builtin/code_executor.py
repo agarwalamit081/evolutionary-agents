@@ -16,7 +16,8 @@ async def code_executor(code: str, timeout: int = 30) -> str:
 
     The subprocess working directory is set to ``settings.agent.results_root``
     so that files created via relative paths (e.g. ``plt.savefig("chart.png")``)
-    land in the ``results/`` directory instead of the project root.
+    land in the run's workspace directory (the current working directory) instead
+    of the project root.
 
     Args:
         code: Python source code to execute.

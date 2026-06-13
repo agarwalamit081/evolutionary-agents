@@ -331,3 +331,73 @@ class TestExecuteNodeLLM:
         assert tool_results[0].success is True
         assert tool_results[1].tool_name == "code_executor"
         assert tool_results[1].success is True
+
+
+class TestExecuteReActThread:
+    """WS1: execute maintains a real conversation thread (ReAct), not a stub.
+
+    Guards the regression where execute appended a single throwaway user line
+    per step — starving memory folding of real context to compress. The thread
+    now carries the Human turn, the AI turn (with tool calls), and each Tool
+    result, correlated by ``tool_call_id``. ``result_cache`` defaults to None
+    here, so the cacheable path is not exercised (covered in test_result_cache).
+    """
+
+    @pytest.mark.asyncio
+    async def test_appends_human_ai_tool_messages_in_order(
+        self, state_with_plan: dict[str, Any]
+    ) -> None:
+        """A tool-calling step appends Human → AI(tool_calls) → Tool, in order."""
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(return_value=ToolCallResponse(
+            content="Running code",
+            tool_calls=[{
+                "id": "tc_thread_1",
+                "type": "function",
+                "function": {"name": "code_executor", "arguments": '{"code": "print(1)"}'},
+            }],
+            model="gpt-4o-mini-2024-07-18", provider="openai",
+            input_tokens=10, output_tokens=20, total_tokens=30, cost_usd=0.0001,
+        ))
+        handler = AsyncMock(return_value="1")
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[])
+        tools.get_handler = MagicMock(return_value=handler)
+
+        result = await execute_node(state_with_plan, gateway=gateway, tools=tools)
+
+        msgs = result["messages"]
+        types = [getattr(m, "type", "") for m in msgs]
+        # Human turn → AI turn → exactly one ToolMessage per tool call.
+        assert types[0] == "human"
+        assert types[1] == "ai"
+        assert types[2:] == ["tool"]
+
+        # The AI turn carries the validated tool call.
+        assert msgs[1].tool_calls, "AIMessage must carry the tool call"
+        # The ToolMessage is correlated to the call by id and named for the tool.
+        assert msgs[2].tool_call_id == "tc_thread_1"
+        assert msgs[2].name == "code_executor"
+        # And the ToolResult carries the same id for folding/verification.
+        assert result["tool_results"][0].metadata["tool_call_id"] == "tc_thread_1"
+
+    @pytest.mark.asyncio
+    async def test_gateway_receives_accumulated_history(
+        self, state_with_plan: dict[str, Any]
+    ) -> None:
+        """Prior turns in state['messages'] are fed to the LLM (intra-run memory)."""
+        goal_msg = state_with_plan["messages"][0]  # seeded HumanMessage(goal_text)
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(return_value=ToolCallResponse(
+            content="ok", tool_calls=[],
+            model="gpt-4o-mini-2024-07-18", provider="openai",
+            input_tokens=5, output_tokens=5, total_tokens=10, cost_usd=0.0,
+        ))
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[])
+
+        await execute_node(state_with_plan, gateway=gateway, tools=tools)
+
+        sent = gateway.acompletion_with_tools.call_args.kwargs["messages"]
+        # The seeded goal (a prior HumanMessage) must appear in the history sent.
+        assert any(getattr(goal_msg, "content", "") in str(m) for m in sent)

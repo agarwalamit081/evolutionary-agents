@@ -98,6 +98,20 @@ class TestModuleFilter:
         filt = _make_module_filter(["src.llm."])
         assert filt({"name": ""}) is False
 
+    def test_none_name_does_not_raise(self) -> None:
+        """A None name does not raise AttributeError.
+
+        Regression: ``record["name"]`` is None for dynamically generated tool
+        modules (e.g. ``<generated_tool:...>``). ``dict.get("name", "")``
+        returns None (not the default) when the key is present-but-None, so the
+        filter must coerce None → "" before ``.startswith`` rather than raise.
+        """
+        filt = _make_module_filter(["src.tools."])
+        # Key present but value None — the generated-tool case.
+        assert filt({"name": None}) is False
+        # Key absent entirely must also be safe.
+        assert filt({}) is False
+
 
 class TestCategorySinks:
     """Tests for category-based log file creation."""

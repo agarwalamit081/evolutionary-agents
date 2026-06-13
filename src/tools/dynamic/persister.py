@@ -59,7 +59,7 @@ class ToolPersister:
                         ToolVersion.tool_id == existing.id
                     ).order_by(ToolVersion.version.desc())
                     ver_result = await session.execute(version_stmt)
-                    latest_ver = ver_result.scalar_first()
+                    latest_ver = ver_result.scalars().first()
                     next_version = (latest_ver.version + 1) if latest_ver else 1
 
                     # Deactivate old versions

@@ -117,7 +117,7 @@ class InterceptHandler(logging.Handler):
         )
 
 
-def _configure_stdlib_interception() -> None:
+def _configure_stdlib_interception(log_level: str = "INFO") -> None:
     """Configure stdlib logging to route through loguru."""
     # Remove all existing stdlib handlers
     root_logger = logging.getLogger()
@@ -133,8 +133,14 @@ def _configure_stdlib_interception() -> None:
         logging.getLogger(name).handlers = [intercept_handler]
         logging.getLogger(name).propagate = False
 
-    # Set stdlib root level to NOTSET so loguru handles all levels
-    root_logger.setLevel(logging.NOTSET)
+    # Set stdlib root to a CONCRETE level, NOT NOTSET. When root is NOTSET (0),
+    # Logger.getEffectiveLevel() returns 0 for every NOTSET third-party logger
+    # (litellm, httpx, ...), so isEnabledFor(DEBUG) evaluates to `10 >= 0` = True.
+    # That flips litellm's `_is_debugging_on()` on and unleashes its DEBUG spam
+    # ("Creating new ClientSession", "AiohttpTransport", "model isn't mapped yet").
+    # Root at the configured level restores correct effective-level filtering;
+    # app code logs through loguru directly and is unaffected.
+    root_logger.setLevel(log_level or "INFO")
 
 
 # ─── Logging Configuration ──────────────────────────────────────────────
@@ -191,7 +197,11 @@ def _make_module_filter(prefixes: list[str]) -> Any:
     """
 
     def _filter(record: Any) -> bool:
-        name: str = record.get("name", "")
+        # record["name"] is None for dynamically generated tool modules (e.g.
+        # "<generated_tool:...>"); .get(key, default) only substitutes when the
+        # key is *absent*, so coerce None → "" before .startswith to avoid
+        # AttributeError.
+        name: str = record.get("name") or ""
         return any(name.startswith(p) for p in prefixes)
 
     return _filter
@@ -305,7 +315,7 @@ def setup_logging(settings: LoggingSettings | None = None) -> None:
         )
 
     # ─── Configure stdlib interception ─────────────────────────────────
-    _configure_stdlib_interception()
+    _configure_stdlib_interception(settings.log_level)
 
     # Mark as configured
     _logging_configured = True
@@ -342,6 +352,43 @@ def reset_logging() -> None:
     global _logging_configured
     logger.remove()
     _logging_configured = False
+
+
+def add_query_log_sink(run_id: str, settings: LoggingSettings | None = None) -> None:
+    """Add a query-specific log file alongside the main logs.
+
+    Creates ``logs/<run_id>.log`` that captures all messages for this
+    specific query run.  Call once per e2e query to get per-query logs.
+
+    Args:
+        run_id: Unique identifier for the query run (e.g. "query_1").
+        settings: Optional logging settings.  Falls back to defaults.
+    """
+    if settings is None:
+        try:
+            settings = get_settings().logging
+        except Exception:
+            settings = LoggingSettings()
+
+    log_dir = Path(settings.log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    query_log_path = log_dir / f"{run_id}.log"
+
+    logger.add(
+        query_log_path,
+        format=_get_file_format(),
+        level=settings.log_level,
+        rotation=settings.log_rotation,
+        retention=settings.log_retention,
+        compression="zip",
+        backtrace=True,
+        diagnose=True,
+        filter=pii_redaction_filter,
+        enqueue=True,
+    )
+
+    logger.info(f"Per-query logging enabled: {query_log_path}")
 
 
 # ─── Module Exports ─────────────────────────────────────────────────────

@@ -23,6 +23,7 @@ class LLMResponse:
     thinking_tokens: int = 0
     finish_reason: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None
 
 
 @dataclass

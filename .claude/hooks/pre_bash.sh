@@ -31,7 +31,7 @@ if echo "$COMMAND" | grep -iE '(git\s+push\s+.*--force|git\s+reset\s+--hard\s+HE
 fi
 
 # 3. Block `rm -rf /` or recursive root deletion
-if echo "$COMMAND" | grep -E 'rm\s+-rf\s+/' > /dev/null; then
+if echo "$COMMAND" | grep -E 'rm\s+-rf\s+/(\s|$|;|\*)' > /dev/null; then
   echo "BLOCKED: Dangerous recursive deletion from root." >&2
   exit 2
 fi
@@ -92,6 +92,14 @@ fi
 if echo "$COMMAND" | grep -P '(?<!\w)(python|python3)\s+' > /dev/null; then
   if ! echo "$COMMAND" | grep -E 'uv\s+run' > /dev/null; then
     echo "WARNING: Bare 'python' detected. Use 'uv run python' to ensure the correct virtual environment." >&2
+    exit 0
+  fi
+fi
+
+# 12. Warn on bare psql without PGPASSWORD
+if echo "$COMMAND" | grep -E '\bpsql\b' > /dev/null; then
+  if ! echo "$COMMAND" | grep -E 'PGPASSWORD' > /dev/null; then
+    echo "WARNING: Bare 'psql' detected without PGPASSWORD. Use: PGPASSWORD=\$DB_PASSWORD psql -h localhost -U postgres -d \$DB_NAME -c \"...\"" >&2
     exit 0
   fi
 fi

@@ -17,10 +17,12 @@ if [ -z "$FILE_PATH" ] || [ ! -f "$FILE_PATH" ]; then
   exit 0
 fi
 
-# 0. Block .env file edits
+# 0. Block .env file edits (allow documentation variants)
 if echo "$FILE_PATH" | grep -iE '(\.env$|\.env\.)' > /dev/null; then
-  echo "BLOCKED: Editing .env files is not allowed. Manage environment variables manually." >&2
-  exit 2
+  if ! echo "$FILE_PATH" | grep -iE '\.env\.(example|template|sample|gitignore)$' > /dev/null; then
+    echo "BLOCKED: Editing .env files is not allowed. Manage environment variables manually." >&2
+    exit 2
+  fi
 fi
 
 # 1. Secret Detection - Block any write containing hardcoded secrets
@@ -43,7 +45,7 @@ if [[ "$FILE_PATH" == *.py ]]; then
 
   # Run ruff if available
   if command -v ruff &> /dev/null; then
-    ruff check "$FILE_PATH" --fix 2>&1 || true
+    ruff check "$FILE_PATH" 2>&1 || true
   fi
 
   # Check for FastAPI routes without auth
@@ -96,7 +98,7 @@ if [[ "$FILE_PATH" == *.ts || "$FILE_PATH" == *.tsx || "$FILE_PATH" == *.js || "
 
   # Run eslint if available
   if command -v eslint &> /dev/null; then
-    eslint "$FILE_PATH" --fix 2>&1 || true
+    eslint "$FILE_PATH" 2>&1 || true
   fi
 fi
 

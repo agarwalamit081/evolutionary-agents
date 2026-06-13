@@ -85,6 +85,8 @@ TOOL_DEFINITION = {
         "snippets, and URLs. Useful for finding current information, documentation, "
         "or answers to factual questions."
     ),
+    # Idempotent read-only network fetch — safe to cache within/across runs.
+    "cacheable": True,
     "parameters": {
         "type": "object",
         "properties": {

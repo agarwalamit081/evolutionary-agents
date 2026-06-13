@@ -123,9 +123,10 @@ async def _create_single_tool(
         # Sandbox is optional — best-effort
         sandbox: Any = None
         try:
+            from src.config import get_settings
             from src.sandbox.executor import SandboxExecutor
 
-            sandbox = SandboxExecutor()
+            sandbox = SandboxExecutor(get_settings())
         except Exception:
             logger.debug("SandboxExecutor not available for tool creation")
 

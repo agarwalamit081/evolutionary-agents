@@ -12,9 +12,11 @@ from src.memory.folding import MemoryFolder, MemoryFoldResult, _serialize_messag
 
 
 def _make_mock_gateway() -> MagicMock:
-    """Create a mock LLMGateway with async acompletion."""
+    """Create a mock LLMGateway with async acompletion and empty cost records."""
     gateway = MagicMock()
     gateway.acompletion = AsyncMock()
+    # should_fold reads live token totals from the gateway accumulator.
+    gateway.get_cost_records = MagicMock(return_value=[])
     return gateway
 
 
@@ -79,14 +81,14 @@ class TestShouldFold:
         assert folder.should_fold(state) is False
 
     def test_no_fold_when_few_messages(self) -> None:
-        """Should not fold when messages < 10."""
+        """Should not fold when messages < message_count_floor."""
         gateway = _make_mock_gateway()
         folder = MemoryFolder(gateway)
         state = _make_state(iteration_count=5, messages=_make_messages(5))
         assert folder.should_fold(state) is False
 
     def test_no_fold_when_max_folds_reached(self) -> None:
-        """Should not fold when fold_history exceeds max_folds."""
+        """Should not fold when fold_history reaches max_folds."""
         gateway = _make_mock_gateway()
         folder = MemoryFolder(gateway, max_folds=2)
         state = _make_state(
@@ -96,34 +98,93 @@ class TestShouldFold:
         )
         assert folder.should_fold(state) is False
 
-    def test_fold_on_interval(self) -> None:
-        """Should fold when iteration_count hits the interval."""
+    def test_no_fold_within_cooldown(self) -> None:
+        """Should not fold within fold_interval of the last fold (cooldown)."""
         gateway = _make_mock_gateway()
-        folder = MemoryFolder(gateway, fold_interval=10)
-        state = _make_state(iteration_count=10, messages=_make_messages(15))
+        folder = MemoryFolder(gateway, fold_interval=10, message_count_threshold=14)
+        # 20 messages would normally trigger, but cooldown blocks it.
+        state = _make_state(
+            iteration_count=8,
+            messages=_make_messages(20),
+            last_fold_iteration=5,
+        )
+        assert folder.should_fold(state) is False
+
+    def test_fold_after_cooldown(self) -> None:
+        """Should fold once past the cooldown window with a trigger met."""
+        gateway = _make_mock_gateway()
+        folder = MemoryFolder(gateway, fold_interval=10, message_count_threshold=14)
+        # 25 - 5 = 20 >= 10 → cooldown cleared; 20 msgs >= 14 → count trigger.
+        state = _make_state(
+            iteration_count=25,
+            messages=_make_messages(20),
+            last_fold_iteration=5,
+        )
         assert folder.should_fold(state) is True
 
-    def test_fold_on_token_threshold(self) -> None:
-        """Should fold when total_tokens_used exceeds threshold."""
+    def test_fold_on_live_token_threshold(self) -> None:
+        """Should fold when accumulated gateway token usage reaches threshold."""
         gateway = _make_mock_gateway()
-        folder = MemoryFolder(gateway, token_threshold=1000)
-        state = _make_state(iteration_count=5, total_tokens=5000, messages=_make_messages(15))
+        record = MagicMock()
+        record.input_tokens = 30_000
+        record.output_tokens = 30_000
+        gateway.get_cost_records.return_value = [record]
+        # Raise the message-count threshold so only the live-token trigger fires.
+        folder = MemoryFolder(gateway, token_threshold=50_000, message_count_threshold=999)
+        state = _make_state(iteration_count=10, messages=_make_messages(12))
         assert folder.should_fold(state) is True
 
-    def test_fold_on_message_length(self) -> None:
-        """Should fold when estimated message tokens exceed threshold."""
+    def test_fold_on_message_count(self) -> None:
+        """Should fold when message count reaches message_count_threshold."""
         gateway = _make_mock_gateway()
-        folder = MemoryFolder(gateway, message_token_estimate=100)
-        # 20 messages * 200 chars each = 4000 chars / 4 = 1000 tokens > 100
+        folder = MemoryFolder(gateway, message_count_threshold=14)
+        state = _make_state(iteration_count=10, messages=_make_messages(14))
+        assert folder.should_fold(state) is True
+
+    def test_fold_on_context_size(self) -> None:
+        """Should fold on the tertiary context-size trigger (chars // 4)."""
+        gateway = _make_mock_gateway()
+        # Isolate the context-size trigger: high count + token thresholds.
+        folder = MemoryFolder(
+            gateway,
+            message_token_estimate=100,
+            message_count_threshold=999,
+            token_threshold=10**9,
+        )
+        # 20 messages * ~200 chars = ~4000 chars / 4 = ~1000 >= 100
         state = _make_state(iteration_count=5, messages=_make_messages(20))
         assert folder.should_fold(state) is True
 
     def test_no_fold_when_below_thresholds(self) -> None:
-        """Should not fold when all thresholds are unmet."""
+        """Should not fold when all triggers are unmet."""
         gateway = _make_mock_gateway()
-        folder = MemoryFolder(gateway, fold_interval=100, token_threshold=100000)
+        folder = MemoryFolder(
+            gateway,
+            fold_interval=100,
+            token_threshold=100_000,
+            message_count_threshold=999,
+            message_token_estimate=10**6,
+        )
         state = _make_state(iteration_count=5, messages=_make_messages(12))
         assert folder.should_fold(state) is False
+
+
+class TestBuildRemovalMessages:
+    """Tests for build_removal_messages (history reduction helper)."""
+
+    def test_returns_remove_message_per_idd_message(self) -> None:
+        """One RemoveMessage per message carrying an id."""
+        from langchain_core.messages import HumanMessage, RemoveMessage
+
+        gateway = _make_mock_gateway()
+        folder = MemoryFolder(gateway)
+        with_id = HumanMessage(content="hello", id="msg-1")
+        no_id = HumanMessage(content="world")  # no id → skipped
+        state = _make_state(messages=[with_id, no_id])
+        removal = folder.build_removal_messages(state)
+        assert len(removal) == 1
+        assert isinstance(removal[0], RemoveMessage)
+        assert removal[0].id == "msg-1"
 
 
 class TestMemoryFoldResult:

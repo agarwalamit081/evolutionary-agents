@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import chain, repeat
 from typing import Any
 
 import pytest
@@ -155,6 +156,68 @@ class TestDelegateNode:
         assert result["delegation_results"][0]["result"] == "Subtask completed"
 
     @pytest.mark.asyncio
+    async def test_surfaces_delegated_tool_activity_in_parent_state(
+        self,
+        sample_state: dict[str, Any],
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+        sample_spec: SubAgentSpec,
+    ) -> None:
+        """Sub-agent tool_results/tools_created/tools_called surface in parent state.
+
+        Previously delegated tool activity was siloed in SubAgentState; the
+        delegate node now aggregates it so the parent's reducer-backed lists
+        (and the e2e report) reflect real tool work during delegation.
+        """
+        from src.graph.models import ToolResult
+
+        sample_state["sub_agents_spawned"] = [
+            {"name": "test_agent", "id": "test-id"},
+        ]
+        mock_registry.get.return_value = sample_spec
+
+        inner_tool_result = ToolResult(
+            tool_name="code_executor",
+            success=True,
+            output="ran inside sub-agent",
+        )
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value={
+            "success": True,
+            "result": "Subtask completed",
+            "tokens_used": 100,
+            "cost_usd": 0.01,
+            "latency_ms": 50,
+            "iterations": 1,
+            "errors": [],
+            "goal": "subtask",
+            "sub_agent_name": "test_agent",
+            "sub_agent_id": "test-id",
+            # Propagated from SubAgentState by runner._extract_results.
+            "tool_results": [inner_tool_result],
+            "tools_created": [{"name": "gen_tool", "description": "generated"}],
+            "tools_called": [{"name": "code_executor"}],
+        })
+        mock_registry.spawn.return_value = mock_runner
+
+        result = await delegate_node(
+            sample_state,
+            gateway=mock_gateway,
+            tools=mock_tools,
+            sub_agent_registry=mock_registry,
+        )
+
+        # Parent tool_results include the sub_agent:* wrapper AND the
+        # sub-agent's internal tool activity.
+        tool_names = [getattr(tr, "tool_name", None) for tr in result["tool_results"]]
+        assert "sub_agent:test_agent" in tool_names
+        assert "code_executor" in tool_names
+        # tools_created/tools_called propagate to the parent state.
+        assert result["tools_created"] == [{"name": "gen_tool", "description": "generated"}]
+        assert result["tools_called"] == [{"name": "code_executor"}]
+
+    @pytest.mark.asyncio
     async def test_delegates_multiple_agents(self, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock, sample_spec: SubAgentSpec) -> None:
         """Successfully delegates to multiple agents."""
         mock_registry.get.return_value = sample_spec
@@ -223,39 +286,33 @@ class TestDelegateNode:
 
         mock_runner = MagicMock()
 
-        call_count = 0
-
-        async def mock_run(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return {
-                    "success": True,
-                    "result": "Success",
-                    "tokens_used": 100,
-                    "cost_usd": 0.01,
-                    "latency_ms": 50,
-                    "iterations": 1,
-                    "errors": [],
-                    "goal": "subtask",
-                    "sub_agent_name": "agent1",
-                    "sub_agent_id": "id1",
-                }
-            else:
-                return {
-                    "success": False,
-                    "result": "",
-                    "tokens_used": 0,
-                    "cost_usd": 0.0,
-                    "latency_ms": 10,
-                    "iterations": 0,
-                    "errors": ["Failed"],
-                    "goal": "subtask",
-                    "sub_agent_name": "agent2",
-                    "sub_agent_id": "id2",
-                }
-
-        mock_runner.run = mock_run
+        # First delegation succeeds, all subsequent ones fail ("mixed" outcome).
+        mock_runner.run = AsyncMock(side_effect=chain(
+            [{
+                "success": True,
+                "result": "Success",
+                "tokens_used": 100,
+                "cost_usd": 0.01,
+                "latency_ms": 50,
+                "iterations": 1,
+                "errors": [],
+                "goal": "subtask",
+                "sub_agent_name": "agent1",
+                "sub_agent_id": "id1",
+            }],
+            repeat({
+                "success": False,
+                "result": "",
+                "tokens_used": 0,
+                "cost_usd": 0.0,
+                "latency_ms": 10,
+                "iterations": 0,
+                "errors": ["Failed"],
+                "goal": "subtask",
+                "sub_agent_name": "agent2",
+                "sub_agent_id": "id2",
+            }),
+        ))
         mock_registry.spawn.return_value = mock_runner
 
         result = await delegate_node(
@@ -402,7 +459,7 @@ class TestDelegateNode:
         mock_registry.spawn.return_value = mock_runner
 
         with patch("src.graph.nodes.delegate._record_metrics", new_callable=AsyncMock) as mock_record:
-            result = await delegate_node(
+            await delegate_node(
                 sample_state,
                 gateway=mock_gateway,
                 tools=mock_tools,
@@ -435,7 +492,7 @@ class TestDelegateNode:
         })
         mock_registry.spawn.return_value = mock_runner
 
-        result = await delegate_node(
+        await delegate_node(
             sample_state,
             gateway=mock_gateway,
             tools=mock_tools,

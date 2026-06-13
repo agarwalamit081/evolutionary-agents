@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from src.graph.enums import TaskComplexity
 from src.tools.dynamic.allowlist import (
     ALLOWED_MODULES,
     MAX_TOOLS_PER_RUN,
@@ -86,7 +87,7 @@ class ToolGenerator:
 
             response = await self._gateway.acompletion(
                 messages=messages,
-                complexity="simple",
+                complexity=TaskComplexity.SIMPLE,
             )
 
             extractor = StructuredOutputManager()
@@ -230,7 +231,7 @@ class ToolGenerator:
         )
 
         return [
-            {"role": "system", "content": TOOL_GENERATE_SYSTEM},
+            {"role": "system", "content": str(TOOL_GENERATE_SYSTEM)},
             {"role": "user", "content": user_content},
         ]
 

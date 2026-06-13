@@ -60,7 +60,7 @@ class SafetyPipeline:
         Returns:
             Dict with 'passed' bool, 'layers' results, and 'issues' list.
         """
-        ctx = context or {}
+        _ctx = context or {}
         results: dict[str, dict[str, Any]] = {}
         all_issues: list[str] = []
 

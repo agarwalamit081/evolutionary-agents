@@ -28,6 +28,7 @@ from src.observability.logging import reset_logging, setup_logging
 @click.option("--no-evolution", is_flag=True, help="Disable evolution phase")
 @click.option("--max-iterations", default=25, type=int, help="Maximum graph iterations")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.option("--run-id", default=None, help="Unique run identifier for per-query logging")
 def main(
     goal_text: str | None,
     interactive: bool,
@@ -36,6 +37,7 @@ def main(
     no_evolution: bool,
     max_iterations: int,
     verbose: bool,
+    run_id: str | None,
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -57,7 +59,7 @@ def main(
     click.echo(f"   Max iterations: {max_iterations} | Evolution: {'disabled' if no_evolution else 'enabled'}")
 
     # Run the agent
-    result = asyncio.run(_run_agent(goal_text, max_iterations, no_evolution))
+    result = asyncio.run(_run_agent(goal_text, max_iterations, no_evolution, run_id))
 
     click.echo("\n" + "=" * 60)
     click.echo("📋 Result:")
@@ -70,6 +72,7 @@ async def _run_agent(
     goal_text: str,
     max_iterations: int = 25,
     no_evolution: bool = False,  # noqa: ARG001 — used in future evolution integration
+    run_id: str | None = None,
 ) -> dict:
     """Run the agent graph to completion.
 
@@ -102,12 +105,36 @@ async def _run_agent(
     else:
         os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
+    # Per-query logging — creates a dedicated log file for this run
+    if run_id is not None:
+        try:
+            from src.observability.logging import add_query_log_sink
+
+            add_query_log_sink(run_id, settings.logging)
+        except Exception as e:
+            logger.debug(f"Per-query logging setup skipped: {e}")
+
     # Create initial state
     thread_id = f"cli-{os.getpid()}-{id(goal_text)}"
     state = initial_state(goal_text, thread_id, max_iterations)
 
     # Instantiate dependencies
     gateway = _create_gateway(settings)
+
+    # Inject Redis prompt cache for LLM response caching
+    if gateway is not None:
+        try:
+            import redis.asyncio as _aioredis
+
+            from src.llm.cache import PromptCache
+
+            _redis_client = _aioredis.from_url(settings.redis.redis_url)
+            cache = PromptCache(_redis_client, settings)
+            gateway.set_cache(cache)
+            logger.info("Redis prompt cache injected into gateway")
+        except Exception as e:
+            logger.debug(f"Prompt cache not available: {e}")
+
     memory = await _async_create_memory_manager(settings)
     tools = _create_tool_registry()
 
@@ -134,9 +161,56 @@ async def _run_agent(
     )
 
     logger.info(f"Starting agent with goal: {goal_text[:80]}")
-    result = await compiled.ainvoke(state)
+    recursion_limit = max(max_iterations * 8, 100)
+    result = await compiled.ainvoke(state, config={"recursion_limit": recursion_limit})
+    result_dict = dict(result)
+
+    # Cost/token fallback: if the graph terminated without flushing
+    # cost_records via store_memory (e.g. error_termination), recover from the
+    # gateway's in-memory accumulator so run-history reflects real spend.
+    if gateway is not None:
+        if not result_dict.get("cost_records"):
+            gateway_records = gateway.get_cost_records()
+            if gateway_records:
+                result_dict["cost_records"] = gateway_records
+        if not result_dict.get("total_tokens_used"):
+            records = result_dict.get("cost_records") or []
+            if records:
+                result_dict["total_tokens_used"] = sum(
+                    getattr(r, "input_tokens", 0) + getattr(r, "output_tokens", 0)
+                    for r in records
+                )
 
     logger.info("Agent execution complete")
+
+    # Save results file to results/ directory
+    try:
+        import re as _re
+        from datetime import datetime as _dt, timezone as _tz
+        from pathlib import Path as _Path
+
+        goal_text_safe = _re.sub(r'[^a-zA-Z0-9_-]', '_', goal_text[:50]).strip('_')
+        timestamp = _dt.now(_tz.utc).strftime('%Y%m%d_%H%M%S')
+        results_dir = _Path(settings.agent.results_root)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        results_file = results_dir / f"{goal_text_safe}_{timestamp}.md"
+
+        final_output = result_dict.get("final_output", "")
+        is_complete = result_dict.get("is_complete", False)
+        iteration_count = result_dict.get("iteration_count", 0)
+
+        content = (
+            f"# Agent Results\n\n"
+            f"**Goal**: {goal_text}\n"
+            f"**Timestamp**: {timestamp}\n"
+            f"**Complete**: {'Yes' if is_complete else 'No'}\n"
+            f"**Iterations**: {iteration_count}\n\n"
+            f"## Output\n\n{final_output}\n"
+        )
+        results_file.write_text(content, encoding="utf-8")
+        logger.info(f"Results file saved to: {results_file}")
+    except Exception as e:
+        logger.debug(f"Results file save skipped: {e}")
 
     # Generate run history (non-blocking, best-effort)
     try:
@@ -145,12 +219,12 @@ async def _run_agent(
         history_gen = RunHistoryGenerator(
             workspace_root=settings.agent.workspace_root
         )
-        history_path = await history_gen.generate(dict(result))
+        history_path = await history_gen.generate(result_dict)
         logger.info(f"Run history written to: {history_path}")
     except Exception as e:
         logger.debug(f"Run history generation skipped: {e}")
 
-    return dict(result)
+    return result_dict
 
 
 def _create_gateway(settings: Settings):

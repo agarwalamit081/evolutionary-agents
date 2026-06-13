@@ -19,7 +19,7 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, RemoveMessage
 from loguru import logger
 
 from src.graph.enums import TaskComplexity
@@ -129,30 +129,57 @@ class MemoryFolder:
     """Compresses agent conversation history into structured summaries.
 
     Args:
-        gateway: LLMGateway for making LLM calls.
-        fold_interval: Trigger folding every N iterations.
-        token_threshold: Trigger when total_tokens_used exceeds this.
-        message_token_estimate: Trigger when estimated message tokens exceed this.
+        gateway: LLMGateway for making LLM calls. Also the source of live
+            token totals via ``get_cost_records()`` (the token trigger reads
+            the gateway's per-run accumulator, not graph state, because state's
+            ``total_tokens_used`` is only flushed at the terminal store_memory
+            node — long after folding needs to fire).
+        fold_interval: Minimum iterations between folds (cooldown window).
+        token_threshold: Trigger when accumulated gateway token usage reaches this.
+        message_token_estimate: Tertiary trigger: fold when estimated message
+            tokens (chars // 4) reach this.
+        message_count_floor: Minimum messages before folding is considered.
+        message_count_threshold: Primary trigger: fold when message count
+            reaches this.
         max_folds: Maximum number of folds per agent run.
     """
 
     def __init__(
         self,
         gateway: LLMGateway,
-        fold_interval: int = 10,
+        fold_interval: int = 6,
         token_threshold: int = 50_000,
-        message_token_estimate: int = 30_000,
+        message_token_estimate: int = 8_000,
+        message_count_floor: int = 10,
+        message_count_threshold: int = 14,
         max_folds: int = 3,
     ) -> None:
         self._gateway = gateway
         self._fold_interval = fold_interval
         self._token_threshold = token_threshold
         self._message_token_estimate = message_token_estimate
+        self._message_count_floor = message_count_floor
+        self._message_count_threshold = message_count_threshold
         self._max_folds = max_folds
         self._fold_count = 0
 
     def should_fold(self, state: dict[str, Any]) -> bool:
         """Check if memory folding is needed based on state thresholds.
+
+        Trigger ladder (evaluated in order, first match wins):
+
+        1. **Cap** — already folded ``max_folds`` times this run → False.
+        2. **Min guard** — too early (``iteration_count < 2``) or too few
+           messages (``< message_count_floor``) → False.
+        3. **Cooldown** — within ``fold_interval`` iterations of the last fold
+           → False (prevents back-to-back folds).
+        4. **Live-token trigger** — accumulated gateway token usage
+           (``get_cost_records()``, the real per-run spend) reaches
+           ``token_threshold`` → True.
+        5. **Message-count trigger** — message count reaches
+           ``message_count_threshold`` → True.
+        6. **Context-size trigger** — estimated message tokens (chars // 4)
+           reach ``message_token_estimate`` → True.
 
         Args:
             state: The current agent state dict.
@@ -160,35 +187,73 @@ class MemoryFolder:
         Returns:
             True if folding should be triggered.
         """
-        # Check fold limit
+        # 1. Fold cap
         fold_history = state.get("fold_history", [])
         if len(fold_history) >= self._max_folds:
             return False
 
         iteration_count = state.get("iteration_count", 0)
-        total_tokens = state.get("total_tokens_used", 0)
         messages = state.get("messages", [])
 
-        # Don't fold in the first iteration or with few messages
-        if iteration_count < 2 or len(messages) < 10:
+        # 2. Minimum guard — don't fold too early or with too little history
+        if iteration_count < 2 or len(messages) < self._message_count_floor:
             return False
 
-        # Trigger on interval
-        if iteration_count > 0 and iteration_count % self._fold_interval == 0:
+        # 3. Cooldown — don't re-fold within fold_interval of the last fold
+        last_fold = state.get("last_fold_iteration", 0) or 0
+        if last_fold and (iteration_count - last_fold) < self._fold_interval:
+            return False
+
+        # 4. Live-token trigger — read real accumulated spend from the gateway
+        #    (state["total_tokens_used"] is only flushed at store_memory, long
+        #    after folding must fire, so it reads as 0 during the loop).
+        total_tokens = 0
+        try:
+            for record in self._gateway.get_cost_records():
+                total_tokens += (
+                    getattr(record, "input_tokens", 0)
+                    + getattr(record, "output_tokens", 0)
+                )
+        except Exception:
+            total_tokens = 0
+        if total_tokens >= self._token_threshold:
             return True
 
-        # Trigger on token usage
-        if total_tokens > self._token_threshold:
+        # 5. Message-count trigger
+        if len(messages) >= self._message_count_threshold:
             return True
 
-        # Trigger on estimated message token count (rough: chars / 4)
+        # 6. Context-size trigger (tertiary, for long-message scenarios)
         total_chars = sum(
             len(str(getattr(m, "content", ""))) for m in messages
         )
-        if total_chars // 4 > self._message_token_estimate:
+        if total_chars // 4 >= self._message_token_estimate:
             return True
 
         return False
+
+    def build_removal_messages(self, state: dict[str, Any]) -> list[RemoveMessage]:
+        """Build RemoveMessage entries for every id'd message in state.
+
+        The ``messages`` field uses LangGraph's ``add_messages`` reducer, which
+        appends and dedups by ID but never deletes. Returning
+        ``RemoveMessage(id=...)`` alongside the fold summary instructs the
+        reducer to actually drop the old messages, so folding shrinks context
+        rather than just appending a summary on top of it.
+
+        Args:
+            state: The current agent state dict.
+
+        Returns:
+            One RemoveMessage per existing message that carries an id.
+        """
+        messages = state.get("messages", [])
+        removal: list[RemoveMessage] = []
+        for msg in messages:
+            msg_id = getattr(msg, "id", None)
+            if msg_id:
+                removal.append(RemoveMessage(id=msg_id))
+        return removal
 
     async def fold(self, state: dict[str, Any]) -> MemoryFoldResult:
         """Perform memory folding: compress history into 3 structured summaries.

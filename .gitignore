@@ -61,3 +61,6 @@ docs/design-docs/
 # Unrelated project files
 scanner_module/
 tcp_scanner.py
+
+# External reference agent frameworks (deferred from project scope)
+tmp-code/

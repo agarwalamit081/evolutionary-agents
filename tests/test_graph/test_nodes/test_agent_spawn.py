@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import chain, repeat
 from typing import Any
 
 import pytest
@@ -144,34 +145,27 @@ class TestAgentSpawnNode:
             "Need report generator",
         ]
 
-        # Mock alternating responses
-        call_count = 0
-
-        async def mock_completion(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return LLMResponse(
-                    content='{"name": "data_analyzer", "description": "Analyzes data", "goal_description": "Analyze", "template_type": "fixed", "tool_scope": "inherit_all", "tool_subset": [], "model_tier": "simple"}',
-                    model="gpt-4o-mini",
-                    provider="openai",
-                    input_tokens=100,
-                    output_tokens=50,
-                    total_tokens=150,
-                    cost_usd=0.0001,
-                )
-            else:
-                return LLMResponse(
-                    content='{"name": "report_gen", "description": "Generates reports", "goal_description": "Generate reports", "template_type": "fixed", "tool_scope": "inherit_all", "tool_subset": [], "model_tier": "simple"}',
-                    model="gpt-4o-mini",
-                    provider="openai",
-                    input_tokens=100,
-                    output_tokens=50,
-                    total_tokens=150,
-                    cost_usd=0.0001,
-                )
-
-        mock_gateway.acompletion = mock_completion
+        # First completion proposes data_analyzer, all subsequent ones report_gen.
+        mock_gateway.acompletion = AsyncMock(side_effect=chain(
+            [LLMResponse(
+                content='{"name": "data_analyzer", "description": "Analyzes data", "goal_description": "Analyze", "template_type": "fixed", "tool_scope": "inherit_all", "tool_subset": [], "model_tier": "simple"}',
+                model="gpt-4o-mini",
+                provider="openai",
+                input_tokens=100,
+                output_tokens=50,
+                total_tokens=150,
+                cost_usd=0.0001,
+            )],
+            repeat(LLMResponse(
+                content='{"name": "report_gen", "description": "Generates reports", "goal_description": "Generate reports", "template_type": "fixed", "tool_scope": "inherit_all", "tool_subset": [], "model_tier": "simple"}',
+                model="gpt-4o-mini",
+                provider="openai",
+                input_tokens=100,
+                output_tokens=50,
+                total_tokens=150,
+                cost_usd=0.0001,
+            )),
+        ))
 
         mock_registry.has.return_value = False
 
@@ -179,6 +173,7 @@ class TestAgentSpawnNode:
             mock_extractor = MagicMock()
 
             async def mock_extract(content, schema):
+                _ = schema  # accepted to match extract(content, schema); unused in mock
                 if "data_analyzer" in str(content):
                     return SubAgentProposal(
                         name="data_analyzer",
@@ -245,7 +240,7 @@ class TestAgentSpawnNode:
         from src.graph.schemas import SubAgentProposal
 
         mock_gateway.acompletion.return_value = LLMResponse(
-            content='{"name": "invalid-name", "description": "Invalid", "goal_description": "Invalid", "template_type": "fixed", "tool_scope": "invalid", "tool_subset": [], "model_tier": "simple"}',
+            content='{"name": "invalid-name", "description": "Invalid", "goal_description": "Invalid", "template_type": "fixed", "tool_scope": "inherit_subset", "tool_subset": ["nonexistent_tool"], "model_tier": "simple"}',
             model="gpt-4o-mini",
             provider="openai",
             input_tokens=100,
@@ -255,6 +250,8 @@ class TestAgentSpawnNode:
         )
 
         mock_registry.has.return_value = False
+        # Make mock_tools report nonexistent_tool as unavailable
+        mock_tools.has = MagicMock(side_effect=lambda name: name != "nonexistent_tool")
 
         with patch("src.llm.structured_output.StructuredOutputManager") as mock_extractor_class:
             mock_extractor = MagicMock()
@@ -263,8 +260,8 @@ class TestAgentSpawnNode:
                 description="Invalid",
                 goal_description="Invalid",
                 template_type="fixed",
-                tool_scope="invalid",  # Invalid tool scope
-                tool_subset=[],
+                tool_scope="inherit_subset",  # Valid but requests non-existent tools
+                tool_subset=["nonexistent_tool"],
                 model_tier="simple",
                 rationale="Test rationale",
             ))
@@ -479,44 +476,58 @@ class TestValidateProposal:
         assert any("not found in registry" in e for e in errors)
 
     def test_validate_proposal_invalid_template_type(self, mock_registry: MagicMock, mock_tools: MagicMock) -> None:
-        """Validation fails for invalid template_type."""
+        """Validation fails for invalid template_type — tested at dict level since Literal types reject at construction."""
         from src.graph.schemas import SubAgentProposal
         from src.graph.nodes.agent_spawn import _validate_proposal
 
-        proposal = SubAgentProposal(
+        # Pydantic Literal types reject invalid values at construction,
+        # so we use model_validate with a raw dict (simulating LLM JSON output).
+        # The _validate_proposal function provides defense-in-depth for any
+        # values that slip through.
+        raw_data = {
+            "name": "agent",
+            "description": "Agent",
+            "goal_description": "Goal",
+            "template_type": "invalid",
+            "tool_scope": "inherit_all",
+            "tool_subset": [],
+            "model_tier": "simple",
+        }
+        # Literal type prevents construction — this is the expected behavior
+        with pytest.raises(Exception):
+            SubAgentProposal.model_validate(raw_data)
+
+        # Valid values pass Literal check; _validate_proposal provides
+        # additional defense-in-depth for name uniqueness, tool availability, etc.
+        valid_proposal = SubAgentProposal(
             name="agent",
             description="Agent",
             goal_description="Goal",
-            template_type="invalid",
+            template_type="custom",
             tool_scope="inherit_all",
             tool_subset=[],
             model_tier="simple",
-            rationale="Test rationale",
         )
+        errors = _validate_proposal(valid_proposal, mock_registry, mock_tools)
+        # No errors for a valid custom template type
+        assert not any("Invalid template_type" in e for e in errors)
 
-        errors = _validate_proposal(proposal, mock_registry, mock_tools)
-        assert len(errors) > 0
-        assert any("Invalid template_type" in e for e in errors)
-
-    def test_validate_proposal_invalid_tool_scope(self, mock_registry: MagicMock, mock_tools: MagicMock) -> None:
-        """Validation fails for invalid tool_scope."""
+    def test_validate_proposal_invalid_tool_scope(self) -> None:
+        """Validation fails for invalid tool_scope — tested at dict level since Literal types reject at construction."""
         from src.graph.schemas import SubAgentProposal
-        from src.graph.nodes.agent_spawn import _validate_proposal
 
-        proposal = SubAgentProposal(
-            name="agent",
-            description="Agent",
-            goal_description="Goal",
-            template_type="fixed",
-            tool_scope="invalid_scope",
-            tool_subset=[],
-            model_tier="simple",
-            rationale="Test rationale",
-        )
-
-        errors = _validate_proposal(proposal, mock_registry, mock_tools)
-        assert len(errors) > 0
-        assert any("Invalid tool_scope" in e for e in errors)
+        # Literal type prevents construction with invalid scope
+        raw_data = {
+            "name": "agent",
+            "description": "Agent",
+            "goal_description": "Goal",
+            "template_type": "fixed",
+            "tool_scope": "invalid_scope",
+            "tool_subset": [],
+            "model_tier": "simple",
+        }
+        with pytest.raises(Exception):
+            SubAgentProposal.model_validate(raw_data)
 
 
 class TestParseModelTier:

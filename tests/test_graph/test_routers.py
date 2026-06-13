@@ -267,9 +267,13 @@ class TestRouteAfterReflect:
         assert result == "plan"
 
     def test_route_after_reflect_low_confidence_to_execute(self, sample_state: dict[str, Any]) -> None:
-        """LOW confidence → route back to execute."""
+        """LOW confidence with remaining steps → route back to execute."""
         sample_state["confidence"] = Confidence.LOW
         sample_state["reflection"] = ReflectionResult(summary="low", should_replan=False)
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="pending step", status="pending"),
+        ]
+        sample_state["current_step_index"] = 0
         result = route_after_reflect(sample_state)
         assert result == "execute"
 
@@ -278,6 +282,49 @@ class TestRouteAfterReflect:
         sample_state["reflection"] = None
         result = route_after_reflect(sample_state)
         assert result == "verify"
+
+
+class TestRouteAfterReflectLoopGuards:
+    """Regression tests for F12: reflect↔execute must not loop forever.
+
+    T2 crashed with GraphRecursionError because a low-confidence reflection at
+    the iteration cap routed back to execute; execute had no remaining steps and
+    bounced to reflect, looping until LangGraph's recursion limit. The cap (and
+    the no-remaining-steps pre-cap case) now route to verify instead.
+    """
+
+    def test_at_cap_routes_to_verify_even_when_low_confidence(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """At the iteration cap, low confidence must NOT loop back to execute."""
+        sample_state["iteration_count"] = 10
+        sample_state["max_iterations"] = 10
+        sample_state["confidence"] = Confidence.LOW
+        sample_state["reflection"] = ReflectionResult(summary="low at cap", should_replan=False)
+        assert route_after_reflect(sample_state) == "verify"
+
+    def test_at_cap_routes_to_verify_even_with_pending_gaps(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """At the cap, gap resolution is skipped — gaps would only re-loop."""
+        sample_state["iteration_count"] = 10
+        sample_state["max_iterations"] = 10
+        sample_state["confidence"] = Confidence.LOW
+        sample_state["pending_tool_gaps"] = ["some_missing_tool"]
+        sample_state["reflection"] = ReflectionResult(summary="cap", should_replan=False)
+        assert route_after_reflect(sample_state) == "verify"
+
+    def test_low_confidence_no_remaining_steps_routes_to_verify(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """Pre-cap: low confidence with an exhausted plan must not retry execute."""
+        sample_state["iteration_count"] = 3
+        sample_state["max_iterations"] = 10
+        sample_state["confidence"] = Confidence.LOW
+        sample_state["plan_steps"] = []  # exhausted
+        sample_state["current_step_index"] = 0
+        sample_state["reflection"] = ReflectionResult(summary="stuck", should_replan=False)
+        assert route_after_reflect(sample_state) == "verify"
 
 
 class TestRouteAfterEvolve:

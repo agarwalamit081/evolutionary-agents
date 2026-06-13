@@ -88,6 +88,21 @@ def route_after_reflect(state: AgentState) -> str:
         "execute" — low confidence, retry execution
         "plan" — reflection suggests replanning
     """
+    # HARD CAP GUARD: once the iteration budget is exhausted, never re-enter
+    # execute (or gap resolution) from reflect. Without this, a low-confidence
+    # reflection at the cap loops reflect↔execute forever — execute has no
+    # remaining steps and bounces straight back to reflect — until LangGraph's
+    # recursion limit crashes the run (GraphRecursionError). Route to verify,
+    # which accepts the partial result and terminates. See F12 (T2 crash).
+    iteration_count = state.get("iteration_count", 0)
+    max_iterations = state.get("max_iterations", 25)
+    if iteration_count >= max_iterations:
+        logger.info(
+            f"Max iterations ({max_iterations}) reached on reflect; "
+            f"routing to verify to accept partial result"
+        )
+        return "verify"
+
     # Check for sub-agent gaps first — highest priority
     pending_agent_gaps = state.get("pending_agent_gaps", [])
     if pending_agent_gaps:
@@ -122,6 +137,19 @@ def route_after_reflect(state: AgentState) -> str:
 
     low_confidence_levels = {Confidence.VERY_LOW, Confidence.LOW}
     if confidence in low_confidence_levels:
+        # Pre-cap loop guard: if the plan is already exhausted, retrying
+        # execute is futile — execute has no steps and bounces straight back
+        # to reflect. Route to verify so the partial result is judged
+        # (verify→plan will replan if it finds addressable gaps).
+        plan_steps = state.get("plan_steps", [])
+        step_index = state.get("current_step_index", 0)
+        has_remaining_steps = bool(plan_steps) and step_index < len(plan_steps)
+        if not has_remaining_steps:
+            logger.info(
+                "Low confidence but plan exhausted (no remaining steps); "
+                "routing to verify instead of retrying execute"
+            )
+            return "verify"
         logger.info(f"Low confidence ({confidence.value}), routing back to execute")
         return "execute"
 

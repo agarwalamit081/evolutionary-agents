@@ -62,6 +62,33 @@ class TestFileReader:
         result = await file_reader("/nonexistent/path/file.txt")
         assert "error" in result.lower() or "not found" in result.lower()
 
+    @pytest.mark.asyncio
+    async def test_falls_back_to_results_root_for_outputs(self, tmp_path: Path) -> None:
+        """F13: file_reader reads a file written to results_root via file_writer.
+
+        The default sandbox is workspace_root, but file_writer writes to
+        results_root. A file that exists only under results_root must still be
+        readable under the default sandbox so the agent can confirm its own
+        output (and avoid false-negative verify verdicts).
+        """
+        from src.config.settings import AgentSettings
+
+        workspace = tmp_path / "workspace"
+        results = tmp_path / "results"
+        workspace.mkdir()
+        results.mkdir()
+        (results / "out.txt").write_text("agent output")
+
+        mock_settings = AgentSettings(
+            workspace_root=str(workspace), results_root=str(results)
+        )
+        with patch(
+            "src.tools.builtin.file_reader.get_settings",
+            return_value=type("S", (), {"agent": mock_settings}),
+        ):
+            result = await file_reader("out.txt")  # default sandbox
+        assert "agent output" in result
+
 
 class TestCodeValidator:
     """Tests for the code_validator tool."""

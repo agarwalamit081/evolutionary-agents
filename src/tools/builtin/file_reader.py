@@ -10,6 +10,28 @@ from loguru import logger
 from src.config.settings import get_settings
 
 
+def _results_root_fallback(file_path: str) -> Optional[Path]:
+    """Resolve a relative path under ``results_root`` (the file_writer output dir).
+
+    The read tools default their sandbox to ``workspace_root`` (inputs/fixtures),
+    but ``file_writer`` writes deliverables to ``results_root``. Without this
+    fallback the agent cannot read back its own outputs — it writes a file, then
+    ``file_reader`` reports "not found", which verify misreads as a missing
+    deliverable (F13). Returns the resolved Path if it exists there and stays
+    within ``results_root``; absolute paths return ``None`` (kept blocked).
+    """
+    if file_path is None or Path(file_path).is_absolute():
+        return None
+    try:
+        results_root = Path(get_settings().agent.results_root).resolve()
+    except Exception:
+        return None
+    candidate = (results_root / file_path).resolve()
+    if not str(candidate).startswith(str(results_root)):
+        return None
+    return candidate if candidate.exists() and candidate.is_file() else None
+
+
 async def file_reader(
     file_path: str,
     sandbox_root: Optional[str] = None,
@@ -29,6 +51,7 @@ async def file_reader(
     Returns:
         File contents as a string.
     """
+    default_root_used = sandbox_root is None
     if sandbox_root is None:
         sandbox_root = get_settings().agent.workspace_root
     root = Path(sandbox_root).resolve()
@@ -39,7 +62,18 @@ async def file_reader(
         return f"ERROR: Path traversal blocked: {file_path}"
 
     if not target.exists():
-        return f"ERROR: File not found: {file_path}"
+        # F13: when using the default workspace sandbox, also look under
+        # results_root so the agent can read back files it wrote via
+        # file_writer (which targets results_root). Explicit sandbox_roots
+        # (e.g. in tests) are left untouched.
+        if default_root_used:
+            fallback = _results_root_fallback(file_path)
+            if fallback is not None:
+                target = fallback
+            else:
+                return f"ERROR: File not found: {file_path}"
+        else:
+            return f"ERROR: File not found: {file_path}"
 
     if not target.is_file():
         return f"ERROR: Not a file: {file_path}"

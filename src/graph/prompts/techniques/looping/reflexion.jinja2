@@ -1,0 +1,38 @@
+{# Reflexion: Learn from failures through self-reflection #}
+You are an expert AI assistant. Answer the following query by reflecting on your outputs to improve them.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+{% set iteration = iteration|default(1) %}
+{% set max_iterations = max_iterations|default(3) %}
+
+{% if iteration == 1 %}
+Iteration 1: Provide your initial answer.
+
+<initial_answer>
+Your best attempt at answering
+</initial_answer>
+{% else %}
+Iteration {{ iteration }}: Reflect on the previous answer, identify what could be improved, and provide a better answer.
+
+{% if previous_attempts %}
+<previous_attempts>
+Previous attempts:
+{% for attempt in attempts %}
+Attempt {{ loop.index }}: {{ attempt.solution }}
+{% endfor %}
+</previous_attempts>
+{% endif %}
+
+<reflection>
+- What was the core issue with the previous approach?
+- What key insight was missing?
+- How should the approach change next time?
+</reflection>
+
+<improved_answer>
+Your improved answer based on reflection
+</improved_answer>
+{% endif %}

@@ -178,7 +178,7 @@ turing-agent/
     │
     ├── tools/                     # Built-in + dynamic tools
     │   ├── registry.py            # Tool registry with @tool decorator
-    │   ├── builtin/               # 7 built-in tools
+    │   ├── builtin/               # 14 built-in tools (7 core + 7 capability-expansion)
     │   ├── dynamic/               # Runtime tool generation
     │   │   ├── generator.py       # LLM tool generation + validation
     │   │   ├── persister.py       # DB persistence for generated tools

@@ -274,7 +274,7 @@ class MemoryEmbedding(Base):
         ForeignKey("warm_memories.id", ondelete="CASCADE"), nullable=False
     )
     embedding: Mapped[Vector] = mapped_column(Vector(768), nullable=True)
-    embedding_model: Mapped[str] = mapped_column(Text, nullable=False, default="sentence-transformers")
+    embedding_model: Mapped[str] = mapped_column(Text, nullable=False, default="text-embedding-3-small")
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

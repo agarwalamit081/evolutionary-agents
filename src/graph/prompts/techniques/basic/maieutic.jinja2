@@ -1,0 +1,26 @@
+{# Maieutic Prompting: Tree of interrelated explanations with consistency verification #}
+Objective: {{ objective|default("Build a tree of interrelated explanations and verify their logical consistency.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+Construct a maieutic tree to ensure your answer is logically sound from the ground up.
+
+<maieutic_tree>
+1. Root Claim: State the primary answer or thesis.
+2. Supporting Explanations: For the root claim, ask "What evidence supports this?" and list 2-3 sub-claims.
+3. Assumption Checking: For each sub-claim, ask "What assumptions underlie this?" and list them.
+4. Leaf Nodes: Continue until the leaf nodes are self-evident facts or directly verifiable data.
+</maieutic_tree>
+
+<consistency_verification>
+- Are all branches logically consistent with each other?
+- Do any leaf nodes contradict one another?
+- Which path from root to leaf has the strongest factual support?
+</consistency_verification>
+
+<final_answer>
+Output the most consistent, well-supported root-to-leaf path as your final, verified answer.
+</final_answer>

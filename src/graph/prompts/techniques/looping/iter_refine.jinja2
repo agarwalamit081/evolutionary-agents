@@ -1,0 +1,45 @@
+{# Iter-Refine: Simulated feedback optimization #}
+You are an expert AI assistant. Answer the following query through simulated feedback optimization.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+{% set iteration = iteration|default(1) %}
+{% set max_iterations = max_iterations|default(5) %}
+
+<iteration_info>
+Iteration {{ iteration }}/{{ max_iterations }}
+</iteration_info>
+
+{% if iteration == 1 %}
+<phase>
+Iteration 1: Provide your initial answer.
+</phase>
+
+<draft>
+Your initial answer
+</draft>
+{% else %}
+<phase>
+Iteration {{ iteration }}: Simulate feedback and refine your answer.
+</phase>
+
+<simulated_feedback>
+Simulated feedback:
+- Check for completeness
+- Verify accuracy
+- Enhance clarity
+</simulated_feedback>
+
+{% if previous_answer %}
+<previous_answer>
+Previous answer (iteration {{ iteration - 1 }}):
+{{ previous_answer }}
+</previous_answer>
+{% endif %}
+
+<refined_answer>
+Your refined answer for iteration {{ iteration }}
+</refined_answer>
+{% endif %}

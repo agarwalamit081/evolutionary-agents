@@ -1,0 +1,16 @@
+{# Meta Prompting: Give model clear behavioral rules #}
+{% if behavioral_rules %}
+Follow these behavioral rules:
+{{ behavioral_rules }}
+{% else %}
+RULE 1: Verify reasoning before answering
+RULE 2: State ambiguity explicitly
+RULE 3: Distinguish facts/inferences/opinions
+RULE 4: Show formulas before results
+RULE 5: Admit uncertainty
+RULE 6: Structured format
+{% endif %}
+
+Follow ALL rules strictly.
+
+Query: {{ user_input }}

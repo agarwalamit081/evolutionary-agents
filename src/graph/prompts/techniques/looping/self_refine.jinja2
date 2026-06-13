@@ -1,0 +1,55 @@
+{# Self-Refine: Autonomous improvement loop #}
+You are an expert AI assistant. Answer the following query through an autonomous improvement loop.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+{% set iteration = iteration|default(1) %}
+{% set max_iterations = max_iterations|default(4) %}
+
+<iteration_info>
+Iteration {{ iteration }}/{{ max_iterations }}
+</iteration_info>
+
+{% if rubric %}
+<evaluation_rubric>
+Evaluation rubric:
+{% for criterion in rubric %}
+- {{ criterion.name }} (weight: {{ criterion.weight }}): {{ criterion.description }}
+{% endfor %}
+</evaluation_rubric>
+{% endif %}
+
+{% if iteration == 1 %}
+<phase>
+Iteration 1: Provide your initial answer.
+</phase>
+
+<initial_answer>
+Your best attempt
+</initial_answer>
+{% else %}
+<phase>
+Iteration {{ iteration }}: Self-evaluate and refine your answer.
+</phase>
+
+{% if previous_draft %}
+<previous_draft>
+Previous draft (iteration {{ iteration - 1 }}):
+{{ previous_draft }}
+</previous_draft>
+{% endif %}
+
+<instructions>
+Review and improve this previous draft. Critique it, then provide an improved version focusing on the lowest-scoring criterion.
+</instructions>
+
+<refined_answer>
+Your refined answer for iteration {{ iteration }}
+</refined_answer>
+
+<improvements_made>
+What you're improving in this iteration
+</improvements_made>
+{% endif %}

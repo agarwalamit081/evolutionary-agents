@@ -1,0 +1,28 @@
+{# Prompt Chaining: Sequential output→input chaining #}
+{% set stage = stage|default(1) %}
+{% set total_stages = total_stages|default(3) %}
+
+Current stage: {{ stage }}/{{ total_stages }}
+
+{% if stage == 1 %}
+Stage {{ stage }} instructions:
+Analyze: core task, key constraints, knowledge domains, output format.
+{% elif stage == 2 %}
+Stage {{ stage }} instructions:
+Create a detailed plan based on analysis.
+
+Inputs from previous stage:
+{{ stage_inputs }}
+{% else %}
+Stage {{ stage }} instructions:
+Execute the plan and provide final answer.
+
+Inputs from previous stage:
+{{ stage_inputs }}
+{% endif %}
+
+Query context: {{ user_input }}
+
+Output ONLY the result for this stage. Do not proceed to next stages.
+
+Format: {{ stage_output_format|default("Structured output") }}

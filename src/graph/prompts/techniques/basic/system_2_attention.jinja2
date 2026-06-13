@@ -1,0 +1,20 @@
+{# System 2 Attention: Filter bias and focus on core facts #}
+Objective: {{ objective|default("Apply deliberate, slow, analytical reasoning to filter bias.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+<system_1_initial>
+What is the immediate, intuitive response to this query?
+</system_1_initial>
+
+<system_2_analysis>
+1. Identify emotional, biased, or distracting language in the query.
+2. Filter out noise and extract ONLY core factual components.
+3. Verify each claim independently against constraints: {{ constraints|default("None") }}
+</system_2_analysis>
+
+<final_answer>
+Provide the refined, validated response based strictly on System 2 analysis.
+</final_answer>

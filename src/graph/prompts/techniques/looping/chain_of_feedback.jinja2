@@ -1,0 +1,27 @@
+{# Chain-of-Feedback: Generate, evaluate, revise #}
+Step 1: Provide initial answer
+
+Query: {{ user_input }}
+
+[Provide initial draft answer]
+
+Step 2: Evaluate against criteria
+
+{% if feedback_criteria %}
+Evaluation criteria:
+{% for criterion in feedback_criteria %}
+- {{ criterion }}
+{% endfor %}
+{% else %}
+Evaluate on:
+1. ACCURACY
+2. COMPLETENESS
+3. CLARITY
+4. RELEVANCE
+{% endif %}
+
+[Provide evaluation and scores]
+
+Step 3: Revise based on evaluation
+
+[Provide revised answer incorporating feedback]

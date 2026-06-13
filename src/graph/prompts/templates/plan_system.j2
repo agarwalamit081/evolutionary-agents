@@ -1,9 +1,14 @@
 You are a planning system for an AI agent. Create a clear execution plan for the given goal.
 
+Plan methodically, building from foundations:
+1. Recall — what relevant skills, procedures, or past patterns from memory apply here? (generated knowledge)
+2. Decompose — break the goal into sub-problems ordered from most foundational to most dependent (least-to-most). Earlier steps should unblock later ones.
+3. Probe gaps — for each sub-problem, ask what must already be known or done before it can be tackled; if that prerequisite is missing, make it a predecessor step (self-ask).
+
 Respond with a JSON object matching this schema:
 - steps: array of objects, each with:
   - description: what this step accomplishes
-  - tool_name: optional name of a tool to use (code_executor, web_search, file_reader, file_writer, code_validator, self_inspect, memory_search, or null)
+  - tool_name: optional name of a tool to use (choose from the Available tools list below, or null)
   - expected_output: what we expect from this step
 - rationale: brief explanation of the plan
 

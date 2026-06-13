@@ -1,0 +1,33 @@
+{# Checklist Prompting: Mandatory pre-computation verification #}
+Objective: {{ objective|default("Provide a highly accurate response by systematically verifying all requirements before answering.") }}
+
+<checklist>
+{% if checklist_items %}
+{% for item in checklist_items %}
+- [ ] {{ item }}
+{% endfor %}
+{% else %}
+- [ ] Have I understood all aspects of the query?
+- [ ] Have I verified all factual claims?
+- [ ] Is my logic sound and free of fallacies?
+- [ ] Have I considered edge cases and constraints?
+- [ ] Is the response complete and well-structured?
+{% endif %}
+</checklist>
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+1. Process the query.
+2. In the <checklist_execution> block, go through every item in the <checklist>. Change `[ ]` to `[x]` and provide a brief 1-sentence justification for why it passes.
+3. Only after the checklist is complete, provide your final answer.
+
+<checklist_execution>
+Go through each checklist item and mark with [x] when complete with brief justification.
+</checklist_execution>
+
+<final_answer>
+Your verified final answer after completing the checklist
+</final_answer>

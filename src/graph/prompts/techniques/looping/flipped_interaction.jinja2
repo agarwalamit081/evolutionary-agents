@@ -1,0 +1,18 @@
+{# Flipped Interaction: AI asks questions first #}
+Step 1: Generate clarifying questions
+
+Query: {{ user_input }}
+
+{% if num_questions %}
+Generate {{ num_questions }} clarifying questions to gather missing information.
+{% else %}
+List 2-3 clarifying questions you'd ask to better understand this query.
+{% endif %}
+
+[Provide clarifying questions]
+
+Step 2: Self-Answer and Synthesize
+
+Answer your own clarifying questions yourself, then provide a comprehensive final answer to the original query.
+
+[Provide final synthesized answer]

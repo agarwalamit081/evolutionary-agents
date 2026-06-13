@@ -1,0 +1,40 @@
+{# OPRO: Optimization by PROmpting #}
+Step 1: Design initial prompt
+
+Query: {{ user_input }}
+
+Design an initial prompt to answer this type of question effectively. Focus on clear instructions and structure.
+
+[Provide initial prompt design]
+
+Step 2: Evaluate and suggest improvements
+
+{% if current_instruction %}
+Current instruction: "{{ current_instruction }}"
+Performance score: {{ score|default("N/A") }}
+
+{% if optimization_history %}
+Historical trajectory:
+{% for entry in optimization_history %}
+- Instruction: "{{ entry.instruction }}" → Score: {{ entry.score }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
+Evaluate this prompt and suggest specific improvements.
+
+Rate: Clarity, Effectiveness, Completeness. Provide improved version.
+
+[Provide evaluation and improvement suggestions]
+
+Step 3: Generate optimized prompt
+
+Create an optimized prompt based on the evaluation.
+
+[Provide optimized prompt]
+
+Step 4: Apply optimized prompt
+
+Using this optimized prompt strategy, answer the original query.
+
+[Provide final answer]

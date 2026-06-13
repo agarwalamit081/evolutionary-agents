@@ -1,0 +1,15 @@
+{# Chain-of-Continuous-Thought: Uninterrupted reasoning stream #}
+{% if turn == 0 %}
+Begin deep reasoning. Start with initial analysis.
+{% else %}
+Continue reasoning. Previous:
+{{ previous_reasoning[-500:] if previous_reasoning else "" }}
+Build upon this.
+{% endif %}
+
+Think continuously without section breaks. Let each thought naturally trigger the next.
+Do not label steps. Do not summarize mid-process.
+
+Query: {{ user_input }}
+
+[Begin continuous reasoning now →]

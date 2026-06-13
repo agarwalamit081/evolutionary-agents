@@ -92,7 +92,7 @@ START → classify → plan → retrieve_memory → execute ↔ reflect
 | `src/memory/cold.py` | pgvector episodic knowledge and embeddings |
 | `src/memory/embeddings.py` | Embedding generation (litellm + hash fallback) |
 | `src/tools/registry.py` | Dynamic tool registry |
-| `src/tools/builtin/` | 7 built-in tools (code_executor, code_validator, web_search, etc.) |
+| `src/tools/builtin/` | 14 built-in tools (code_executor, web_search, terminal_command, document_parser, etc.) |
 | `src/tools/dynamic/` | Runtime tool generation (generator, persister, allowlist) |
 | `src/agents/` | Sub-agent system (registry, persister, subgraph, runner, state) |
 | `src/tools/mcp_adapter.py` | MCP server tool integration |

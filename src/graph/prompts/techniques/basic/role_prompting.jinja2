@@ -1,0 +1,28 @@
+{# Role Prompting: Assign a specific persona/expertise role #}
+You are {{ role_name|default("an expert with deep knowledge in the relevant domain") }}.
+
+{% if role_description %}
+{{ role_description }}
+{% endif %}
+
+{% if expertise %}
+Expertise areas: {{ expertise|join(", ") }}
+{% endif %}
+
+{% if tone %}
+Communication style: {{ tone }}
+{% endif %}
+
+Provide a thorough, accurate, well-structured response.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+<reasoning>
+Your reasoning process
+</reasoning>
+
+<answer>
+Your final answer
+</answer>

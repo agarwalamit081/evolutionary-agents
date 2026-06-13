@@ -1,80 +1,89 @@
-"""Web search tool — searches the web via DuckDuckGo HTML."""
+"""Web search tool — searches the web via the ``ddgs`` (DuckDuckGo) package.
+
+Replaces the previous hand-rolled DuckDuckGo HTML regex scraper with the
+maintained ``ddgs`` client, adding backend fallback and structured exception
+handling. Output shape (``N. title / snippet / URL``) is unchanged so callers
+and tests are unaffected.
+"""
 
 from __future__ import annotations
 
-import httpx
+import asyncio
+
+from ddgs import DDGS
+from ddgs.exceptions import DDGSException, RatelimitException, TimeoutException
 from loguru import logger
 
 
-_DDG_URL = "https://html.duckduckgo.com/html/"
-_USER_AGENT = "Mozilla/5.0 (compatible; TuringAgent/1.0)"
+# Best-practice query tuning (per tmp-code/ddgs-search.md): a specific region
+# yields cleaner results than the worldwide 'wt-wt' default, and moderate
+# safe-search filters low-quality domains.
+_REGION = "us-en"
+_SAFESEARCH = "moderate"
+
+# Backend fallback chain — if one backend is rate-limited or blocked, pivot to
+# the next ('auto' first, then the lighter 'lite'/'html' backends).
+_BACKENDS = ("auto", "lite", "html")
+
+
+def _ddgs_text(query: str, max_results: int) -> list[dict[str, str]]:
+    """Run a synchronous ddgs text search with backend fallback.
+
+    Returns a list of result dicts (keys: ``title``, ``href``, ``body``).
+    Raises a ``DDGSException`` only when every backend has failed.
+    """
+    last_exc: Exception | None = None
+    for backend in _BACKENDS:
+        try:
+            with DDGS() as ddgs:
+                return list(
+                    ddgs.text(
+                        query,
+                        region=_REGION,
+                        safesearch=_SAFESEARCH,
+                        backend=backend,
+                        max_results=max_results,
+                    )
+                )
+        except (RatelimitException, TimeoutException, DDGSException) as exc:
+            last_exc = exc
+            logger.warning(f"ddgs backend '{backend}' failed for '{query[:50]}': {exc}")
+            continue
+    raise DDGSException(f"All ddgs backends failed: {last_exc}")
 
 
 async def web_search(query: str, max_results: int = 5) -> str:
-    """Search the web using DuckDuckGo HTML endpoint.
+    """Search the web using DuckDuckGo (via the ``ddgs`` package).
 
     Args:
         query: Search query string.
         max_results: Maximum number of results to return.
 
     Returns:
-        Formatted search results as text.
+        Formatted search results (title / snippet / URL), one per line.
     """
     logger.info(f"Web search: {query[:60]}...")
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                _DDG_URL,
-                data={"q": query, "b": ""},
-                headers={"User-Agent": _USER_AGENT},
-            )
-            response.raise_for_status()
-
-        # Parse HTML results (basic extraction)
-        results = _parse_ddg_results(response.text, max_results)
-
-        if not results:
-            return f"No results found for: {query}"
-
-        formatted = "\n".join(
-            f"{i+1}. {r['title']}\n   {r['snippet']}\n   URL: {r['url']}"
-            for i, r in enumerate(results)
-        )
-        return formatted
-
-    except httpx.TimeoutException:
-        return f"ERROR: Search timed out for query: {query}"
-    except httpx.HTTPStatusError as exc:
-        return f"ERROR: Search failed with status {exc.response.status_code}"
+        # ddgs 9.x is synchronous — run it off the event loop so we never block.
+        results = await asyncio.to_thread(_ddgs_text, query, max_results)
+    except DDGSException as exc:
+        return f"ERROR: Search failed: {exc}"
     except Exception as exc:
         return f"ERROR: Search failed: {exc}"
 
+    if not results:
+        return f"No results found for: {query}"
 
-def _parse_ddg_results(html: str, max_results: int) -> list[dict[str, str]]:
-    """Parse DuckDuckGo HTML response into structured results."""
-    results: list[dict[str, str]] = []
-
-    # Basic HTML parsing — extract result blocks
-    import re
-
-    # Find result containers
-    pattern = re.compile(
-        r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
-        r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
-        re.DOTALL,
+    # ddgs result keys are title/href/body; map to the legacy output shape
+    # (title / snippet / URL) for backward compatibility.
+    formatted = "\n".join(
+        f"{i + 1}. {r.get('title', '')}\n"
+        f"   {r.get('body', '')}\n"
+        f"   URL: {r.get('href', '')}"
+        for i, r in enumerate(results)
     )
-
-    for match in pattern.finditer(html):
-        url = match.group(1)
-        title = re.sub(r"<[^>]+>", "", match.group(2)).strip()
-        snippet = re.sub(r"<[^>]+>", "", match.group(3)).strip()
-
-        results.append({"url": url, "title": title, "snippet": snippet})
-        if len(results) >= max_results:
-            break
-
-    return results
+    return formatted
 
 
 TOOL_DEFINITION = {

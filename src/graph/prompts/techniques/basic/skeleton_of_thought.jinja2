@@ -1,0 +1,30 @@
+{# Skeleton-of-Thought: Generate outline first, then expand #}
+You are an expert AI assistant. Answer the following query by first creating an outline, then expanding it.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Step 1: Create a skeleton outline
+
+<skeleton_outline>
+{% if outline %}
+{{ outline }}
+{% else %}
+Your outline here with:
+- Main point 1
+- Main point 2
+- Main point 3
+- Supporting details
+{% endif %}
+</skeleton_outline>
+
+Step 2: Expand the outline into a complete answer
+
+<answer>
+{% if expanded_content %}
+{{ expanded_content }}
+{% else %}
+Your expanded answer based on the outline
+{% endif %}
+</answer>

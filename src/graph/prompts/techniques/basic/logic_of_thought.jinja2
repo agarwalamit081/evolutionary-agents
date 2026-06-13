@@ -1,0 +1,23 @@
+{# Logic of Thought: Formal logic notation for precise reasoning #}
+Objective: {{ objective|default("Use formal logic notation to ensure precise, unambiguous reasoning.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+Translate the natural language problem into formal logic before solving it.
+
+<premises>
+Identify and state all premises from the query as formal logical statements (e.g., P₁, P₂, P₃).
+</premises>
+
+<logical_deduction>
+Apply valid deduction rules (e.g., Modus Ponens, Modus Tollens, Disjunctive Syllogism) using standard operators (∧, ∨, →, ↔, ¬, ∀, ∃). Show each step explicitly.
+- Step 1: P₁ ∧ P₂ → Q
+- Step 2: ...
+</logical_deduction>
+
+<conclusion>
+State the final conclusion formally (e.g., ∴ Conclusion), then translate it back into clear natural language.
+</conclusion>

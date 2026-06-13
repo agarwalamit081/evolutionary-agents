@@ -1,0 +1,24 @@
+{# Least-to-Most: Decompose into subproblems, ordered easiest to hardest #}
+Objective: {{ objective|default("Break the problem into simpler sub-problems, solve them in order of increasing difficulty.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+Complex problems are best solved by building up from simple foundations.
+
+<decomposition>
+Break the query into 2-4 simpler sub-problems. Order them strictly from easiest/most fundamental to hardest/most complex.
+</decomposition>
+
+<sequential_solving>
+Solve each sub-problem in order. Use the answer from the previous (simpler) sub-problem as context/foundation for the next (harder) one.
+- Sub-problem 1: [Answer]
+- Sub-problem 2: [Answer, using Sub-problem 1]
+- Sub-problem 3: [Answer, using Sub-problem 2]
+</sequential_solving>
+
+<final_synthesis>
+Combine the sequential solutions into a single, coherent final answer to the original query.
+</final_synthesis>

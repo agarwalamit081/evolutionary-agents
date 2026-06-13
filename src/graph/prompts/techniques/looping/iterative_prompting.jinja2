@@ -1,0 +1,35 @@
+{# Iterative Prompting: Refine through iterations #}
+You are an expert AI assistant. Answer the following query by refining your response through iterations.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+{% set iteration = iteration|default(1) %}
+{% set max_iterations = max_iterations|default(3) %}
+
+<iteration_info>
+Iteration {{ iteration }}/{{ max_iterations }}
+</iteration_info>
+
+{% if iteration > 1 and previous_output %}
+<previous_output>
+Previous output (iteration {{ iteration - 1 }}):
+{{ previous_output }}
+</previous_output>
+
+<improvement_instructions>
+Improve your answer. Focus on:
+- Enhance clarity and accuracy
+- Address any gaps or errors
+- Keep changes minimal but impactful
+</improvement_instructions>
+{% else %}
+<instructions>
+Provide your initial answer.
+</instructions>
+{% endif %}
+
+<answer>
+Your answer for iteration {{ iteration }}
+</answer>

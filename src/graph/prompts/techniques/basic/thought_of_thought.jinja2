@@ -1,0 +1,29 @@
+{# Thought-of-Thought: Multi-perspective analysis and integration #}
+Objective: {{ objective|default("Analyze the query from multiple distinct perspectives before synthesizing a final answer.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+Do not settle for a single viewpoint. Analyze the problem through the following distinct lenses:
+
+<perspective_analytical>
+Break down the problem logically, step-by-step, focusing on data, facts, and linear causality.
+</perspective_analytical>
+
+<perspective_creative>
+Consider unconventional angles, edge cases, lateral thinking, and alternative possibilities.
+</perspective_creative>
+
+<perspective_critical>
+Challenge the premises, identify potential flaws, biases, or risks in the analytical and creative approaches.
+</perspective_critical>
+
+<integration>
+Synthesize these three perspectives. Where do they agree? Where do they conflict? Resolve the conflicts to form a unified viewpoint.
+</integration>
+
+<final_answer>
+Provide the comprehensive, well-reasoned final answer based on the integrated synthesis.
+</final_answer>

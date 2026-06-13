@@ -1,0 +1,21 @@
+{# Progressive Hint Prompting: Escalate hints only when progress stalls #}
+{% set hint_level = hint_level|default(0) %}
+{% set max_hint_levels = max_hint_levels|default(5) %}
+
+Hint level: {{ hint_level }}/{{ max_hint_levels }}
+
+{% if hint_level > 0 and hints %}
+Progressive hints revealed:
+{% for hint in hints[:hint_level] %}
+Hint {{ loop.index }}: {{ hint }}
+{% endfor %}
+{% else %}
+Attempt without hints first. If solution path is blocked, identify exact conceptual gap.
+{% endif %}
+
+Instructions:
+- Use only revealed hints
+- If solution path is blocked, identify exact conceptual gap
+- Output answer or trigger next hint escalation
+
+Query: {{ user_input }}

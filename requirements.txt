@@ -12,7 +12,16 @@ langchain-mcp-adapters==0.2.2
 
 # ─── LLM Gateway ────────────────────────────────────────────────
 litellm==1.83.14                    # PRIMARY — all chat completions go through here
-openai==2.16.0                      # ONLY for structured outputs, batch API, fine-tuning
+# Docker installs litellm with --no-deps (its metadata over-pins fastapi/uvicorn/
+# orjson/rich/prometheus/opentelemetry/aiohttp/click/pypdf to old exact versions;
+# the working env deliberately runs newer ones — see Dockerfile). litellm base deps
+# that no OTHER requirement pulls in are pinned here so they survive the --no-deps
+# install: fastuuid (litellm/_uuid.py imports it eagerly) and tokenizers
+# (litellm/utils.py: `from tokenizers import Tokenizer` — was previously pulled by
+# transformers, now removed to slim the image).
+fastuuid==0.14.0
+tokenizers==0.22.2
+openai==2.24.0                      # ONLY for structured outputs, batch API, fine-tuning
 
 # ─── Database & Persistence ─────────────────────────────────────
 sqlalchemy==2.0.49
@@ -26,7 +35,7 @@ sqlite-vec==0.1.9                   # Local vector search without Postgres
 # ─── Configuration ──────────────────────────────────────────────
 pydantic==2.12.5
 pydantic-settings==2.14.1
-python-dotenv==1.2.1
+python-dotenv==1.2.2
 
 # ─── Resilience & Rate Limiting ─────────────────────────────────
 tenacity==8.5.0
@@ -59,10 +68,6 @@ rich==14.3.1
 fastapi==0.136.1
 uvicorn==0.47.0
 
-# ─── Embeddings & Vector Search ─────────────────────────────────
-sentence-transformers==5.5.0       # Local embeddings (fallback)
-chromadb==1.5.9                     # Local dev only — production uses pgvector
-
 # ─── MCP Integration ────────────────────────────────────────────
 mcp==1.26.0
 fastmcp==3.2.4
@@ -77,6 +82,20 @@ jinja2==3.1.6
 json-repair==0.59.10
 pyyaml==6.0.3
 numpy==1.26.4
+# Scientific-computing baseline for generated code. Pinned explicitly because
+# they were previously pulled transitively by sentence-transformers/torch, which
+# are now removed to slim the image — pinning keeps them without the ML weight.
+scipy==1.17.1
+sympy==1.14.0
+networkx==3.6.1
+pandas==2.2.3
+
+# ─── Web & Document Tools (builtin tooling) ─────────────────────
+ddgs==9.14.2                         # DuckDuckGo search (web_search tool)
+trafilatura==2.0.0                   # URL → clean markdown (web_scraper tool)
+pypdf==6.9.1                         # PDF text extraction (document_parser)
+python-docx==1.2.0                   # Word .docx extraction (document_parser)
+openpyxl==3.1.5                      # Excel .xlsx extraction (document_parser)
 
 # ─── Development & Testing ──────────────────────────────────────
 pytest==8.4.2

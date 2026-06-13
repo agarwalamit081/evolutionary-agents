@@ -1,0 +1,26 @@
+{# Certainty/Uncertainty: Explicit epistemic quantification #}
+Objective: {{ objective|default("Provide an accurate response while explicitly quantifying your confidence in every major claim.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+For EVERY major claim or factual statement in your response, you must assign a confidence level and justify it:
+- [CERTAIN: 95-100%] Verified facts, universally accepted truths.
+- [LIKELY: 70-94%] Highly confident, strong evidence, but slight room for edge cases.
+- [POSSIBLE: 40-69%] Somewhat confident, based on inference or partial evidence.
+- [UNCERTAIN: 0-39%] Speculating, lacking direct evidence.
+
+Be radically honest about uncertainty. Do not mask guessing as certainty.
+
+<claim_analysis>
+For each claim in your response, provide:
+- Claim: [Your statement]
+- Confidence: [CERTAIN/LIKELY/POSSIBLE/UNCERTAIN]
+- Justification: [Why this confidence level is appropriate]
+</claim_analysis>
+
+<final_answer>
+Your response with explicit confidence quantification
+</final_answer>

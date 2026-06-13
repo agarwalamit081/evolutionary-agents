@@ -62,11 +62,11 @@ class TestToolRegistry:
 class TestCreateDefaultRegistry:
     """Tests for the create_default_registry factory function."""
 
-    def test_create_default_registry_has_seven_tools(self) -> None:
-        """create_default_registry returns a registry with all 7 built-in tools."""
+    def test_create_default_registry_has_fourteen_tools(self) -> None:
+        """create_default_registry returns a registry with all 14 built-in tools."""
         registry = create_default_registry()
         assert isinstance(registry, ToolRegistry)
-        assert registry.count == 7
+        assert registry.count == 14
 
         names = registry.list_names()
         assert "code_executor" in names
@@ -76,3 +76,11 @@ class TestCreateDefaultRegistry:
         assert "memory_search" in names
         assert "self_inspect" in names
         assert "web_search" in names
+        # New tools (WS2/WS3/WS4)
+        assert "get_current_time" in names
+        assert "environment_inspect" in names
+        assert "list_directory" in names
+        assert "web_scraper" in names
+        assert "document_parser" in names
+        assert "http_request" in names
+        assert "terminal_command" in names

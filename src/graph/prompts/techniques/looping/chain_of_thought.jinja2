@@ -1,0 +1,21 @@
+{# Chain of Thought: Step-by-step reasoning before answer #}
+You are an expert AI assistant. Answer the following query using step-by-step reasoning before giving your final answer.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+- Think step by step
+- Show each step of your reasoning
+- Provide your final answer at the end
+
+<reasoning>
+Step 1: [Your first step of reasoning]
+Step 2: [Your second step of reasoning]
+Step 3: [Continue as needed]
+</reasoning>
+
+<answer>
+Your final answer
+</answer>

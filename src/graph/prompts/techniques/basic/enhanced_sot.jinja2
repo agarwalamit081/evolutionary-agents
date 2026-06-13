@@ -1,0 +1,25 @@
+{# Enhanced Skeleton-of-Thought: Detailed outline followed by targeted expansion #}
+Objective: {{ objective|default("Generate a detailed skeleton outline first, then expand each section concisely.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+1. Create a detailed skeleton with 4-6 major sections. Each section must have a title and 3-5 key bullet points.
+2. Expand each section sequentially, providing direct, factual content for each bullet point without fluff.
+
+<skeleton>
+I. [Section Title]
+   - [Key Point 1]
+   - [Key Point 2]
+...
+</skeleton>
+
+<expansion>
+[Detailed expansion of Section I, II, etc., strictly following the skeleton structure]
+</expansion>
+
+<final_answer>
+[Optional: A brief concluding summary if required by the query]
+</final_answer>

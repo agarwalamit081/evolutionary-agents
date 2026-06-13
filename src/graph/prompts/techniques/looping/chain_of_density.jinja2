@@ -1,0 +1,25 @@
+{# Chain-of-Density: Iterative summarization with density #}
+{% set iteration = iteration|default(1) %}
+{% set max_iterations = max_iterations|default(3) %}
+{% set compression_ratio = compression_ratio|default(20) %}
+
+{% if iteration == 1 %}
+Summarize concisely. Iteration 1/{{ max_iterations }}.
+
+{% elif iteration == 2 %}
+More dense. Remove filler, add specifics.
+Previous: {{ previous_summary }}
+Iteration 2/{{ max_iterations }}.
+
+{% else %}
+Maximum density. Every word carries facts.
+Previous: {{ previous_summary }}
+Iteration {{ iteration }}/{{ max_iterations }} (final).
+{% endif %}
+
+Query: {{ user_input }}
+
+Each version must:
+1. Retain ALL key facts from the prior version
+2. Reduce token count by ~{{ compression_ratio }}%
+3. Maintain clarity and answer completeness

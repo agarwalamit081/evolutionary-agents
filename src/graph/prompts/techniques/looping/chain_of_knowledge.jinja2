@@ -1,0 +1,34 @@
+{# Chain-of-Knowledge: External knowledge integration #}
+Step 1: Identify what knowledge is needed
+
+Query: {{ user_input }}
+
+What knowledge is needed to answer this query? List 3-4 key facts or concepts required.
+
+[Identify required knowledge]
+
+Step 2: Generate verified knowledge facts
+
+{% if knowledge_sources %}
+Available knowledge sources:
+{% for source in knowledge_sources %}
+- {{ source.name }}: {{ source.summary }}
+{% endfor %}
+{% endif %}
+
+Generate 2-3 verified knowledge facts relevant to this query.
+
+Format each as: FACT: [statement] SOURCE: [how verified]
+
+[Generate knowledge facts with sources]
+
+Step 3: Answer using accumulated knowledge
+
+{% if accumulated_knowledge %}
+Knowledge accumulated:
+{{ accumulated_knowledge }}
+{% endif %}
+
+Using this accumulated knowledge, provide a comprehensive answer.
+
+[Provide answer grounded in knowledge]

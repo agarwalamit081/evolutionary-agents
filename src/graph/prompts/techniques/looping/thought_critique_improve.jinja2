@@ -1,0 +1,29 @@
+{# Thought-Critique-Improve: Three-phase thought cycle #}
+{% set cycle = cycle|default(1) %}
+{% set max_cycles = max_cycles|default(3) %}
+
+Cycle: {{ cycle }}/{{ max_cycles }}
+
+[THOUGHT]
+{{ current_thought|default("Provide your initial detailed analysis and thinking") }}
+
+Query: {{ user_input }}
+
+[CRITIQUE]
+Evaluate against:
+{% if critique_criteria %}
+{% for criterion in critique_criteria %}
+- {{ criterion }}
+{% endfor %}
+{% else %}
+- Logical flaws or gaps
+- Unwarranted assumptions
+- Missing considerations
+{% endif %}
+
+[Provide constructive critique]
+
+[IMPROVE]
+Revise thought addressing ALL identified flaws. Preserve valid elements.
+
+Output ONLY the improved version.

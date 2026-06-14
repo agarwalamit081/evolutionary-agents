@@ -140,6 +140,10 @@ async def delegate_node(
 
             models = gateway._model_router.route_diverse(
                 n=len(runners_with_params),
+                # Intentionally SIMPLE: this selects *diverse* models across
+                # sibling sub-agents (round-robin over the tier), not the
+                # complexity of any one sub-agent's actual task. Each runner
+                # independently routes its own work by complexity. (§5 C.1)
                 complexity=TaskComplexity.SIMPLE,
             )
             for i, (runner, *_) in enumerate(runners_with_params):

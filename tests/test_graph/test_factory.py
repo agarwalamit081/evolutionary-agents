@@ -88,6 +88,18 @@ class TestInitialState:
         )
         assert state["max_iterations"] == 50
 
+    def test_initial_state_none_iterations_seeds_from_settings(self) -> None:
+        """initial_state(max_iterations=None) resolves the cap from settings —
+        the single source of truth, not a hardcoded literal."""
+        from src.config import get_settings
+
+        state = initial_state(
+            goal_text="Test goal",
+            thread_id="thread-seed",
+            max_iterations=None,
+        )
+        assert state["max_iterations"] == get_settings().agent.max_iterations
+
     def test_initial_state_thread_id(self) -> None:
         """initial_state stores the provided thread_id."""
         state = initial_state(

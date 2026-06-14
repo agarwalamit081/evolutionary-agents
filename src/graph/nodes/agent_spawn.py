@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from src.agents.registry import MAX_SUB_AGENTS_PER_RUN
+from src.config import get_settings
 from src.graph.enums import Phase, TaskComplexity
 from src.graph.models import SubAgentSpec
 
@@ -72,11 +72,12 @@ async def agent_spawn_node(
     attempted: list[str] = []
     created_count = len(state.get("sub_agents_spawned", []))
 
+    max_sub_agents = get_settings().agent.max_sub_agents_per_run
     for gap_description in pending_gaps:
         # Rate limit check
-        if created_count >= MAX_SUB_AGENTS_PER_RUN:
+        if created_count >= max_sub_agents:
             logger.warning(
-                f"Max sub-agents per run ({MAX_SUB_AGENTS_PER_RUN}) reached, "
+                f"Max sub-agents per run ({max_sub_agents}) reached, "
                 f"converting remaining agent gaps to tool gaps"
             )
             # Convert remaining unhandled agent gaps into tool creation opportunities

@@ -13,6 +13,12 @@ Turing Agent — a self-evolving AI agent built with LangGraph that continuously
 ```bash
 # Start infrastructure (PostgreSQL + Redis)
 docker compose up -d
+# NOTE: never `docker compose down -v` — the `-v` flag deletes the pgdata/
+# redisdata volumes (warm memories, cost_ledger, evolution history). Use plain
+# `docker compose down` to stop while preserving data. A host-local Postgres on
+# 5432 can shadow the container; every run logs the resolved DB on connect
+# ("Database engine created → host:port/database") — confirm it names the
+# turing-postgres container / turing_agent database, not a throwaway host DB.
 
 # Run database migrations
 alembic upgrade head

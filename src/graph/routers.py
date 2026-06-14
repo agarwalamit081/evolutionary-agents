@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from loguru import logger
 
+from src.config import get_settings
 from src.graph.enums import Confidence
 from src.graph.state import AgentState
 
@@ -22,7 +23,7 @@ def route_after_execute(state: AgentState) -> str:
     errors = state.get("errors", [])
     tool_results = state.get("tool_results", [])
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations", 25)
+    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
     plan_steps = state.get("plan_steps", [])
     step_index = state.get("current_step_index", 0)
 
@@ -95,7 +96,7 @@ def route_after_reflect(state: AgentState) -> str:
     # recursion limit crashes the run (GraphRecursionError). Route to verify,
     # which accepts the partial result and terminates. See F12 (T2 crash).
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations", 25)
+    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
     if iteration_count >= max_iterations:
         logger.info(
             f"Max iterations ({max_iterations}) reached on reflect; "
@@ -190,9 +191,17 @@ def route_after_structure_analysis(state: AgentState) -> str:
 def route_after_verify(state: AgentState) -> str:
     """Route after the verify node.
 
+    ``no_evolution`` (the CLI ``--no-evolution`` flag / API request field)
+    is read from STATE, not from ``RunnableConfig``. LangGraph passes
+    ``config=None`` to conditional-edge routers in this graph
+    (AsyncPostgresSaver checkpointer + interrupt_before + subgraphs), so a
+    config-based flag is silently dropped — Phase 4's live review (F4)
+    proved the prior config path was a no-op. State is the single source
+    of truth.
+
     Returns:
-        "evolve" — verification passed + should_evolve flag
-        "store_memory" — verification passed, or budget exhausted (accept partial)
+        "evolve" — verification passed + should_evolve flag (and not --no-evolution)
+        "store_memory" — verification passed, budget exhausted, or evolution skipped
         "plan" — verification partial with no remaining steps (re-plan to address gaps)
         "execute" — verification partial with steps remaining (retry)
     """
@@ -200,16 +209,21 @@ def route_after_verify(state: AgentState) -> str:
     confidence = state.get("confidence", Confidence.MEDIUM)
     reflection = state.get("reflection")
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations", 25)
+    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
     plan_steps = state.get("plan_steps", [])
     step_index = state.get("current_step_index", 0)
 
     if is_complete:
+        no_evolution = bool(state.get("no_evolution", False))
+
         should_evolve = False
         if reflection and hasattr(reflection, "should_evolve"):
             should_evolve = reflection.should_evolve
 
         if should_evolve:
+            if no_evolution:
+                logger.info("Evolution skipped (--no-evolution in state), routing to store_memory")
+                return "store_memory"
             logger.info("Verification passed, triggering evolution")
             return "evolve"
         return "store_memory"
@@ -269,7 +283,7 @@ def route_after_store(state: AgentState) -> str:
     """
     is_complete = state.get("is_complete", False)
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations", 25)
+    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
 
     if is_complete:
         # Normal completion. HITL can be enabled via config.
@@ -312,7 +326,7 @@ def route_after_error(state: AgentState) -> str:
     """
     errors = state.get("errors", [])
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations", 25)
+    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
 
     if not errors:
         return "complete"

@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.graph.enums import Confidence, Phase
+from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.factory import initial_state
-from src.graph.models import PlanStep, ReflectionResult
+from src.graph.models import Goal, GoalStatus, PlanStep, ReflectionResult
 from src.graph.nodes.verify import verify_node
 from src.llm.models import LLMResponse
 
@@ -328,6 +328,67 @@ class TestVerifyNodeLLM:
         result2 = await verify_node(state2, gateway=None)
         assert result2["phase"] == Phase.EXECUTE
         assert result2["is_complete"] is False
+
+    @pytest.mark.asyncio
+    async def test_critical_complexity_threaded_to_gateway(self) -> None:
+        """A CRITICAL goal routes verification to a stronger model (§5 C.1)."""
+        state = self._build_complete_state()
+        state["current_goal"] = Goal(
+            text="test goal for LLM verify",
+            status=GoalStatus.ACTIVE,
+            complexity=TaskComplexity.CRITICAL,
+        )
+
+        llm_json = (
+            '{"is_complete": true, "completion_percentage": 100.0, '
+            '"gaps": [], "quality_assessment": "Excellent", "should_evolve": false}'
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(return_value=LLMResponse(
+            content=llm_json,
+            model="gpt-4o-mini-2024-07-18",
+            provider="openai",
+            input_tokens=10,
+            output_tokens=50,
+            total_tokens=60,
+            cost_usd=0.0001,
+        ))
+
+        await verify_node(state, gateway=gateway)
+
+        assert (
+            gateway.acompletion.call_args.kwargs["complexity"]
+            == TaskComplexity.CRITICAL
+        )
+
+    @pytest.mark.asyncio
+    async def test_unclassified_goal_defaults_to_simple(self) -> None:
+        """A goal without a classified complexity falls back to SIMPLE."""
+        state = self._build_complete_state()
+        # initial_state builds a Goal with default complexity=SIMPLE.
+        assert state["current_goal"].complexity == TaskComplexity.SIMPLE
+
+        llm_json = (
+            '{"is_complete": true, "completion_percentage": 100.0, '
+            '"gaps": [], "quality_assessment": "Excellent", "should_evolve": false}'
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(return_value=LLMResponse(
+            content=llm_json,
+            model="gpt-4o-mini-2024-07-18",
+            provider="openai",
+            input_tokens=10,
+            output_tokens=50,
+            total_tokens=60,
+            cost_usd=0.0001,
+        ))
+
+        await verify_node(state, gateway=gateway)
+
+        assert (
+            gateway.acompletion.call_args.kwargs["complexity"]
+            == TaskComplexity.SIMPLE
+        )
 
 
 def _patch_deliverable_roots(

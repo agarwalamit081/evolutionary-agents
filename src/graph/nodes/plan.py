@@ -59,7 +59,7 @@ async def plan_node(
     # so large multi-unit goals decompose within max_iterations instead of
     # stretching the run to exhaustion. Applies to both LLM and heuristic plans.
     from src.config import get_settings
-    max_iter = state.get("max_iterations", 20)
+    max_iter = state.get("max_iterations") or get_settings().agent.max_iterations
     remaining = max(0, max_iter - iteration_count)
     max_steps = min(get_settings().agent.planning_max_steps, max(1, remaining))
     if len(plan_steps) > max_steps:
@@ -88,7 +88,13 @@ async def _llm_plan(
 ) -> list[PlanStep] | None:
     """Attempt LLM-based plan generation. Returns None on failure."""
     try:
-        from src.graph.prompts import PLAN_SYSTEM, PLAN_USER
+        from src.graph.prompts import (
+            NODE_PLAN,
+            PLAN_SYSTEM,
+            PLAN_USER,
+            TechniqueSelector,
+            build_messages,
+        )
         from src.graph.schemas import GeneratedPlan
         from src.llm.structured_output import StructuredOutputManager
 
@@ -122,13 +128,22 @@ async def _llm_plan(
             ]
         system_prompt = PLAN_SYSTEM.format(available_tools=", ".join(tool_names))
 
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        # §5: select prompting techniques for this call and splice their bodies
+        # into the system prompt above the JSON-schema footer.
+        plan_complexity = goal.complexity or TaskComplexity.SIMPLE
+        goal_pattern = TechniqueSelector.infer_goal_pattern(goal.text)
+        techniques = TechniqueSelector().select(
+            complexity=plan_complexity,
+            node=NODE_PLAN,
+            goal_pattern=goal_pattern,
+        )
+        messages = build_messages(system_prompt, user_prompt, techniques)
+
         response = await gateway.acompletion(
             messages=messages,
-            complexity=TaskComplexity.SIMPLE,
+            # Thread the *classified* complexity so a CRITICAL goal routes to a
+            # stronger planning model instead of always SIMPLE (§5 C.1).
+            complexity=plan_complexity,
         )
 
         extractor = StructuredOutputManager()

@@ -247,6 +247,17 @@ docker compose up -d
 alembic upgrade head
 ```
 
+> **⚠️ Never `docker compose down -v`** — the `-v` flag deletes the `pgdata` and
+> `redisdata` named volumes, destroying all warm memories, cost ledger rows, and
+> evolution history. Use `docker compose down` (no flags) to stop the containers
+> while preserving data; `docker compose up -d` resumes on the same volumes.
+>
+> The host runs against the docker-published ports (`5432` Postgres, `6379`
+> Redis). If a host-local Postgres/Redis is also listening on those ports it
+> will silently shadow the container — every run logs the resolved database on
+> connect (e.g. `Database engine created → localhost:5432/turing_agent`); verify
+> the host/database match the container (`turing-postgres` / `turing_agent`).
+
 ### 2. Configure
 
 ```bash

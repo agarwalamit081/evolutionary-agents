@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import ColdMemory as ColdMemoryModel
+
+if TYPE_CHECKING:
+    from src.memory.embeddings import EmbeddingGenerator
 
 
 class ColdMemory:
@@ -18,9 +21,15 @@ class ColdMemory:
     semantic similarity search for context retrieval.
     """
 
-    def __init__(self, session: AsyncSession, embedding_dim: int = 768) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        embedding_dim: int = 768,
+        generator: EmbeddingGenerator | None = None,
+    ) -> None:
         self._session = session
         self._embedding_dim = embedding_dim
+        self._generator = generator
 
     async def store(
         self,
@@ -31,6 +40,10 @@ class ColdMemory:
         embedding: list[float] | None = None,
     ) -> str:
         """Store an episodic memory with optional embedding.
+
+        When no ``embedding`` is passed but a generator was injected, one is
+        generated from ``content`` so the ``ColdMemory.embedding`` column is
+        populated and semantic recall (``search_by_embedding``) works (§10.2).
 
         Args:
             episode_type: Type of episode (execution, reflection, learning, error).
@@ -43,6 +56,13 @@ class ColdMemory:
             UUID of the stored memory.
         """
         import uuid
+
+        if embedding is None and self._generator is not None:
+            try:
+                embedding = await self._generator.generate(content)
+            except Exception as e:  # embedding is non-critical; cold store must not fail
+                logger.debug(f"Cold memory embedding generation failed: {e}")
+                embedding = None
 
         memory_id = str(uuid.uuid4())
         entry = ColdMemoryModel(

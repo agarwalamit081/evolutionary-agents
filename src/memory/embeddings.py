@@ -23,8 +23,32 @@ class EmbeddingGenerator:
 
     def __init__(self, settings: Any = None) -> None:
         self._settings = settings
-        self._dimension = 768  # Match pgvector column dimension
-        self._model = "text-embedding-3-small"
+        # Defaults match the pgvector Vector(768) columns; overridable via the
+        # ``embedding_model`` / ``embedding_dim`` fields on LLMProviderSettings
+        # (env EMBEDDING_MODEL / EMBEDDING_DIM). isinstance guards keep this
+        # robust to test mocks whose nested attrs are MagicMocks.
+        model = "text-embedding-3-small"
+        dim = 768
+        llm = getattr(settings, "llm", None)
+        if llm is not None:
+            raw_model = getattr(llm, "embedding_model", None)
+            if isinstance(raw_model, str):
+                model = raw_model
+            raw_dim = getattr(llm, "embedding_dim", None)
+            if isinstance(raw_dim, int):
+                dim = raw_dim
+        self._model = model
+        self._dimension = dim
+
+    @property
+    def model(self) -> str:
+        """The configured embedding model id (used when persisting rows)."""
+        return self._model
+
+    @property
+    def dimension(self) -> int:
+        """The output vector dimensionality (matches the pgvector columns)."""
+        return self._dimension
 
     async def generate(self, text: str) -> list[float]:
         """Generate an embedding vector for the given text.
@@ -48,12 +72,21 @@ class EmbeddingGenerator:
         try:
             import litellm
 
-            response = await litellm.aembedding(
-                model=self._model,
-                input=text[:8000],  # Truncate to token limit
-            )
+            kwargs: dict[str, Any] = {
+                "model": self._model,
+                "input": text[:8000],  # Truncate to token limit
+            }
+            # text-embedding-3-* (and other shortening-capable models) accept a
+            # ``dimensions`` param; passing it keeps real embeddings the same
+            # arity as the hash fallback and the Vector(768) columns. Providers
+            # that reject it raise → caught here → hash fallback.
+            if self._dimension:
+                kwargs["dimensions"] = self._dimension
+            response = await litellm.aembedding(**kwargs)
             if response.data and len(response.data) > 0:
-                return response.data[0]["embedding"]
+                vec = response.data[0]["embedding"]
+                if isinstance(vec, list):
+                    return vec
         except Exception as e:
             logger.debug(f"API embedding failed, using hash fallback: {e}")
         return None

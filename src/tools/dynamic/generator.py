@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING, Any, Callable
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from src.config import get_settings
 from src.graph.enums import TaskComplexity
 from src.tools.dynamic.allowlist import (
     ALLOWED_MODULES,
-    MAX_TOOLS_PER_RUN,
     get_materializer_namespace,
 )
 
@@ -46,7 +46,7 @@ class ToolGenerator:
         4. _materialize_handler() uses constrained namespace
         5. ToolRegistry.register() makes it available
 
-    Rate-limited to MAX_TOOLS_PER_RUN per instance.
+    Rate-limited to ``AgentSettings.max_tools_per_run`` per instance.
     """
 
     def __init__(
@@ -74,9 +74,10 @@ class ToolGenerator:
         Returns:
             GeneratedTool if LLM produces valid output, None on failure.
         """
-        if self._tools_created >= MAX_TOOLS_PER_RUN:
+        max_tools = get_settings().agent.max_tools_per_run
+        if self._tools_created >= max_tools:
             logger.warning(
-                f"Max tools per run ({MAX_TOOLS_PER_RUN}) reached, skipping generation"
+                f"Max tools per run ({max_tools}) reached, skipping generation"
             )
             return None
 

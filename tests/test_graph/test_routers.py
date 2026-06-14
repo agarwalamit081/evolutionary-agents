@@ -36,6 +36,35 @@ class TestRouteAfterExecute:
         result = route_after_execute(sample_state)
         assert result == "reflect"
 
+    def test_route_after_execute_falls_back_to_settings_max_iterations(self) -> None:
+        """When state omits max_iterations, routing uses settings.agent.max_iterations
+        (single source of truth) — not a hardcoded literal.
+
+        Same state, two settings caps: iteration_count=5 reflects when the cap
+        is 5 but continues executing when the cap is 100.
+        """
+        import types
+        from unittest.mock import patch
+
+        def _state() -> dict[str, Any]:
+            # No max_iterations key — exercises the settings fallback.
+            return {
+                "iteration_count": 5,
+                "errors": [],
+                "tool_results": [],
+                "plan_steps": [],
+                "current_step_index": 0,
+                "messages": [],
+            }
+
+        cap_5 = types.SimpleNamespace(agent=types.SimpleNamespace(max_iterations=5))
+        cap_100 = types.SimpleNamespace(agent=types.SimpleNamespace(max_iterations=100))
+
+        with patch("src.graph.routers.get_settings", return_value=cap_5):
+            assert route_after_execute(_state()) == "reflect"  # 5 >= 5
+        with patch("src.graph.routers.get_settings", return_value=cap_100):
+            assert route_after_execute(_state()) == "execute"  # 5 < 100
+
     def test_route_after_execute_to_error(self, sample_state: dict[str, Any]) -> None:
         """When authentication errors are present, route to error_handler."""
         sample_state["errors"] = ["authentication failed for provider"]
@@ -110,6 +139,51 @@ class TestRouteAfterVerify:
     def test_route_after_verify_to_evolve(self, sample_state: dict[str, Any]) -> None:
         """When is_complete and should_evolve is True, route to evolve."""
         sample_state["is_complete"] = True
+        sample_state["reflection"] = ReflectionResult(
+            summary="Task complete",
+            should_evolve=True,
+        )
+        result = route_after_verify(sample_state)
+        assert result == "evolve"
+
+    def test_route_after_verify_no_evolution_skips_evolve(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """--no-evolution in state short-circuits evolve even when reflection requests it.
+
+        Invoked single-arg (no config) — exactly how LangGraph calls the
+        router. The original Phase-4 bug shipped because tests passed a config
+        dict that the production graph never forwards (config is None at
+        conditional-edge routers). State is now the source of truth.
+        """
+        sample_state["is_complete"] = True
+        sample_state["no_evolution"] = True
+        sample_state["reflection"] = ReflectionResult(
+            summary="Task complete",
+            should_evolve=True,
+        )
+        result = route_after_verify(sample_state)
+        assert result == "store_memory"
+
+    def test_route_after_verify_evolution_enabled_routes_to_evolve(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """no_evolution absent (False default) allows evolve (the positive path)."""
+        sample_state["is_complete"] = True
+        sample_state["no_evolution"] = False
+        sample_state["reflection"] = ReflectionResult(
+            summary="Task complete",
+            should_evolve=True,
+        )
+        result = route_after_verify(sample_state)
+        assert result == "evolve"
+
+    def test_route_after_verify_no_evolution_key_routes_to_evolve(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """With no no_evolution key in state, evolve still fires (False default)."""
+        sample_state["is_complete"] = True
+        sample_state.pop("no_evolution", None)
         sample_state["reflection"] = ReflectionResult(
             summary="Task complete",
             should_evolve=True,

@@ -2,6 +2,13 @@
 
 Defines which modules generated tool code may import and provides a
 pre-imported namespace for handler materialization (double-barrier security).
+
+Scope note: the dynamic-tool executor is Python-only, so this allowlist covers
+Python import names only. Node/npm packages are N/A — there is no JS runtime to
+install them into. Browser-automation packages (playwright/selenium) are a
+deliberately DEFERRED opt-in: they require a managed browser binary and
+network-egress policy that the sandbox does not yet provide, so they stay off
+the allowlist until that work lands.
 """
 
 from __future__ import annotations
@@ -11,6 +18,9 @@ from typing import Any
 
 # Modules that generated tool handlers are allowed to import.
 # The safety pipeline will allowlist these when validating generated tool code.
+# Import names — the dist (pip) name may differ (e.g. ``bs4`` ← beautifulsoup4,
+# ``pydantic_settings`` ← pydantic-settings, ``json_repair`` ← json-repair,
+# ``markdown_it`` ← markdown-it-py); see SAFE_PIP_PACKAGES for the dist names.
 ALLOWED_MODULES: frozenset[str] = frozenset({
     # ── Core stdlib ────────────────────────────────────────────────
     "httpx",
@@ -46,6 +56,23 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     "xmltodict",
     "jinja2",
     "PIL",
+    # ── Scientific / symbolic math ─────────────────────────────────
+    "sympy",
+    # ── Validation & serialization ────────────────────────────────
+    "pydantic",
+    "pydantic_settings",
+    "orjson",
+    "json_repair",
+    # ── Document parsing ───────────────────────────────────────────
+    "unstructured",
+    "markdown_it",
+    # ── Infrastructure (network egress) ────────────────────────────
+    # ``redis`` lets a generated tool reach a cache/queue server. It is
+    # network-egress-capable, so it is allowed deliberately — only when a tool
+    # genuinely needs it — and the sandbox must confine the target host to the
+    # allowlisted infra endpoints. ``httpx``/``aiohttp`` above carry the same
+    # egress capability and the same responsibility.
+    "redis",
 })
 
 # Maximum number of tools that can be created per agent run.
@@ -53,6 +80,7 @@ MAX_TOOLS_PER_RUN: int = 3
 
 # Packages that can be pip-installed in the sandbox.
 # Only packages in this set may be requested for installation.
+# Dist (pip) names — the matching import name may differ (see ALLOWED_MODULES).
 SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     "aiohttp",
     "beautifulsoup4",
@@ -65,6 +93,18 @@ SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     "jinja2",
     "Pillow",
     "httpx",
+    # ── Scientific / symbolic math ─────────────────────────────────
+    "sympy",
+    # ── Validation & serialization ─────────────────────────────────
+    "pydantic",
+    "pydantic-settings",
+    "orjson",
+    "json-repair",
+    # ── Document parsing ───────────────────────────────────────────
+    "unstructured",
+    "markdown-it-py",
+    # ── Infrastructure (network egress — see ALLOWED_MODULES note) ─
+    "redis",
 })
 
 
@@ -129,8 +169,12 @@ def get_materializer_namespace() -> dict[str, Any]:
     namespace["pathlib"] = pathlib
 
     # Optional packages — only include if installed
-    for mod_name in ("httpx", "loguru", "aiohttp", "bs4", "pandas", "numpy",
-                     "yaml", "lxml", "feedparser", "xmltodict", "jinja2", "PIL"):
+    for mod_name in (
+        "httpx", "loguru", "aiohttp", "bs4", "pandas", "numpy",
+        "yaml", "lxml", "feedparser", "xmltodict", "jinja2", "PIL",
+        "sympy", "pydantic", "pydantic_settings", "orjson", "json_repair",
+        "unstructured", "markdown_it", "redis",
+    ):
         try:
             mod = __import__(mod_name)
             namespace[mod_name] = mod

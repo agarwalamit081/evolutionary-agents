@@ -40,6 +40,13 @@ class LLMProviderSettings(BaseSettings):
     mistral_org_id: Optional[str] = None
     moonshot_api_key: Optional[str] = None
     dashscope_api_key: Optional[str] = None
+    # Explicit Alibaba (Qwen / DashScope service) OpenAI-compatible endpoint.
+    # Qwen models are registered with an ``openai/`` model_id prefix, so without
+    # an api_base pin litellm routes them to OpenAI's endpoint using the
+    # DASHSCOPE_API_KEY and the call fails. Defaults to the DashScope
+    # compatible-mode endpoint in the gateway. The provider is "alibaba"; only
+    # the API key field keeps the dashscope name (env DASHSCOPE_API_KEY).
+    alibaba_api_base: Optional[str] = None
     alibaba_workspace_id: Optional[str] = None
     openrouter_api_key: Optional[str] = None
     groq_api_key: Optional[str] = None
@@ -57,6 +64,14 @@ class LLMProviderSettings(BaseSettings):
     # Heavy model for reasoning, planning, complex analysis
     reasoning_llm_provider: str = "deepseek"
     reasoning_llm_model: str = "deepseek-v4-pro"
+
+    # Embedding generation (§10.2) — litellm embedding model + output dimension.
+    # ``embedding_dim`` MUST match the pgvector ``Vector(N)`` columns:
+    # ``cold_memories.embedding`` and ``memory_embeddings.embedding`` are both
+    # ``Vector(768)`` in src/db/models.py. text-embedding-3-small supports a
+    # ``dimensions`` param so its output is reduced to 768 to fit the columns.
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dim: int = 768
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -81,7 +96,7 @@ class LLMProviderSettings(BaseSettings):
             "minimax",
             "mistral",
             "moonshot",
-            "dashscope",
+            "alibaba",
             "groq",
             "google",
             "openrouter",
@@ -107,7 +122,7 @@ class LLMProviderSettings(BaseSettings):
             "minimax": self.minimax_api_key,
             "mistral": self.mistral_api_key,
             "moonshot": self.moonshot_api_key,
-            "dashscope": self.dashscope_api_key,
+            "alibaba": self.dashscope_api_key,
             "groq": self.groq_api_key,
             "google": self.google_api_key,
             "openrouter": self.openrouter_api_key,
@@ -285,8 +300,16 @@ class EvolutionSettings(BaseSettings):
 class AgentSettings(BaseSettings):
     """Core agent execution limits and safety controls."""
 
-    max_iterations: int = 20
-    max_sub_agents: int = 3
+    max_iterations: int = 25
+    # Run caps — single source of truth for tool/sub-agent creation limits.
+    # Enforcement sites (tool generator, agent_spawn, structure_analysis) read
+    # these; the module-level MAX_TOOLS_PER_RUN / MAX_SUB_AGENTS_PER_RUN
+    # constants remain only as the matching default, not the enforced value.
+    # (max_sub_agents previously lived here but was never read — the live cap
+    # was the MAX_SUB_AGENTS_PER_RUN constant — so it is folded into this
+    # overridable field. Env: MAX_TOOLS_PER_RUN, MAX_SUB_AGENTS_PER_RUN.)
+    max_tools_per_run: int = 3
+    max_sub_agents_per_run: int = 3
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"
@@ -324,7 +347,12 @@ class AgentSettings(BaseSettings):
         case_sensitive=True,
     )
 
-    @field_validator("max_iterations", "max_sub_agents", "planning_max_steps")
+    @field_validator(
+        "max_iterations",
+        "max_tools_per_run",
+        "max_sub_agents_per_run",
+        "planning_max_steps",
+    )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
         """Ensure positive integers."""

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.settings import Settings
 from src.memory.cold import ColdMemory as ColdMemoryStore
+from src.memory.embeddings import EmbeddingGenerator
 from src.memory.hot import HotMemory as HotMemoryStore
 from src.memory.warm import WarmMemoryStore
 
@@ -28,14 +29,18 @@ class MemoryManager:
         db_session: AsyncSession,
         settings: Settings,
     ) -> None:
+        # Shared embedding generator (§10.2) — real vectors when a provider key
+        # is configured, deterministic hash vectors otherwise.
+        embedding_gen = EmbeddingGenerator(settings)
         self.hot = HotMemoryStore(
             redis_client=redis_client,
             ttl_seconds=settings.redis.cache_ttl_seconds,
         )
-        self.warm = WarmMemoryStore(session=db_session)
+        self.warm = WarmMemoryStore(session=db_session, generator=embedding_gen)
         self.cold = ColdMemoryStore(
             session=db_session,
-            embedding_dim=768,
+            embedding_dim=settings.llm.embedding_dim,
+            generator=embedding_gen,
         )
         self._settings = settings
         logger.info("MemoryManager initialized with hot/warm/cold tiers")

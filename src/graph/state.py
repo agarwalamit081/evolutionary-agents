@@ -61,6 +61,13 @@ class AgentState(TypedDict, total=False):
     confidence: Confidence
 
     # ─── Evolution ──────────────────────────────────────────────────────
+    # CLI/API ``--no-evolution`` flag. Read by ``route_after_verify`` to
+    # short-circuit the ``evolve`` node. Threaded through STATE (not
+    # RunnableConfig) because LangGraph passes ``config=None`` to
+    # conditional-edge routers in this graph (AsyncPostgresSaver checkpointer
+    # + interrupt_before + subgraphs), so a config-based flag is silently
+    # dropped — see Phase 4 live review (F4).
+    no_evolution: bool
     evolution_history: Annotated[list[dict[str, Any]], operator.add]
     skills_learned: Annotated[list[SkillDef], operator.add]
 

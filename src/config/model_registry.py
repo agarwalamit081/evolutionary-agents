@@ -271,7 +271,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     # ── Qwen (Alibaba DashScope) ─────────────────────────────────
     "qwen3.5-flash": ModelSpec(
         model_id="openai/qwen3.5-flash",
-        provider="dashscope",
+        provider="alibaba",
         tier=ModelTier.VERY_CHEAP,
         max_context=1_000_000,
         max_output=66_000,
@@ -284,7 +284,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     "qwen3.7-plus": ModelSpec(
         model_id="openai/qwen3.7-plus",
-        provider="dashscope",
+        provider="alibaba",
         tier=ModelTier.CHEAP,
         max_context=1_000_000,
         max_output=65_500,

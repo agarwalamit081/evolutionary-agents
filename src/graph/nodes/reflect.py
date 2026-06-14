@@ -197,7 +197,13 @@ async def _llm_reflect(
 ) -> dict[str, Any] | None:
     """Attempt LLM-based reflection. Returns None on failure."""
     try:
-        from src.graph.prompts import REFLECT_SYSTEM, REFLECT_USER
+        from src.graph.prompts import (
+            NODE_REFLECT,
+            REFLECT_SYSTEM,
+            REFLECT_USER,
+            TechniqueSelector,
+            build_messages,
+        )
         from src.graph.schemas import ReflectionAnalysis
         from src.llm.structured_output import StructuredOutputManager
 
@@ -234,14 +240,22 @@ async def _llm_reflect(
             tool_errors=tool_errors_str,
         )
 
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": str(REFLECT_SYSTEM)},
-            {"role": "user", "content": user_prompt},
-        ]
+        reflect_complexity = (
+            goal.complexity if goal and goal.complexity else TaskComplexity.COMPLEX
+        )
+        goal_pattern = TechniqueSelector.infer_goal_pattern(goal.text if goal else None)
+        techniques = TechniqueSelector().select(
+            complexity=reflect_complexity,
+            node=NODE_REFLECT,
+            goal_pattern=goal_pattern,
+        )
+        messages = build_messages(str(REFLECT_SYSTEM), user_prompt, techniques)
 
         response = await gateway.acompletion(
             messages=messages,
-            complexity=TaskComplexity.COMPLEX,
+            # Thread the *classified* complexity (§5 C.1). Falls back to COMPLEX
+            # when unclassified — reflection is inherently analytical.
+            complexity=reflect_complexity,
         )
 
         extractor = StructuredOutputManager()

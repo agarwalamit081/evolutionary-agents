@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.graph.enums import Confidence, Phase
+from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.factory import initial_state
-from src.graph.models import PlanStep, ReflectionResult, ToolResult
+from src.graph.models import Goal, GoalStatus, PlanStep, ReflectionResult, ToolResult
 from src.graph.nodes.reflect import _check_and_fold, _derive_verified_actions, reflect_node
 
 
@@ -107,6 +107,49 @@ class TestReflectNode:
         # Falls back to heuristics since mock returns classify JSON, not reflection JSON
         assert result["phase"] == Phase.VERIFY
         assert isinstance(result["confidence"], Confidence)
+
+    @pytest.mark.asyncio
+    async def test_reflect_critical_complexity_threaded_to_gateway(
+        self, state_after_execution: dict, mock_gateway: object
+    ) -> None:
+        """A CRITICAL goal routes reflection to a stronger model (§5 C.1)."""
+        original = state_after_execution["current_goal"]
+        state_after_execution["current_goal"] = Goal(
+            text=original.text if original else "test goal",
+            status=GoalStatus.ACTIVE,
+            complexity=TaskComplexity.CRITICAL,
+        )
+
+        await reflect_node(state_after_execution, gateway=mock_gateway)
+
+        assert (
+            mock_gateway.acompletion.call_args.kwargs["complexity"]
+            == TaskComplexity.CRITICAL
+        )
+
+    @pytest.mark.asyncio
+    async def test_reflect_simple_goal_routes_simple_not_complex(
+        self, state_after_execution: dict, mock_gateway: object
+    ) -> None:
+        """A SIMPLE-classified goal routes reflect to SIMPLE (goal-driven, §5 C.1).
+
+        The COMPLEX fallback only fires for an explicit-None complexity
+        (defensive); a normally-constructed Goal defaults to SIMPLE, so the
+        classified value wins.
+        """
+        original = state_after_execution["current_goal"]
+        state_after_execution["current_goal"] = Goal(
+            text=original.text if original else "test goal",
+            status=GoalStatus.ACTIVE,
+            complexity=TaskComplexity.SIMPLE,
+        )
+
+        await reflect_node(state_after_execution, gateway=mock_gateway)
+
+        assert (
+            mock_gateway.acompletion.call_args.kwargs["complexity"]
+            == TaskComplexity.SIMPLE
+        )
 
     @pytest.mark.asyncio
     async def test_reflect_memory_observations_on_errors(self, state_with_errors: dict) -> None:

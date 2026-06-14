@@ -14,7 +14,7 @@ PROVIDER_LIMITS: dict[str, tuple[int, int]] = {
     "anthropic": (50, 40_000),
     "openai": (60, 150_000),
     "deepseek": (60, 200_000),
-    "qwen": (60, 100_000),
+    "alibaba": (60, 100_000),
     "google": (60, 120_000),
     "mistral": (60, 80_000),
     "groq": (60, 30_000),

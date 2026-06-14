@@ -39,7 +39,12 @@ async def run_agent(request: RunRequest) -> RunResponse:
     settings = get_settings()
 
     thread_id = f"api-{os.getpid()}-{hash(request.goal) % 10000}"
-    state = initial_state(request.goal, thread_id, request.max_iterations)
+    state = initial_state(
+        request.goal,
+        thread_id,
+        request.max_iterations,
+        no_evolution=request.no_evolution,
+    )
 
     # Instantiate dependencies
     gateway: object = None

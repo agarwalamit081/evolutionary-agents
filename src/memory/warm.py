@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import WarmMemory
+from src.db.models import MemoryEmbedding, WarmMemory
+
+if TYPE_CHECKING:
+    from src.memory.embeddings import EmbeddingGenerator
 
 
 class WarmMemoryStore:
@@ -18,8 +21,13 @@ class WarmMemoryStore:
     and crystallized from execution patterns. Survives restarts.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        generator: EmbeddingGenerator | None = None,
+    ) -> None:
         self._session = session
+        self._generator = generator
 
     async def store(
         self,
@@ -30,6 +38,11 @@ class WarmMemoryStore:
         fitness_score: float = 0.5,
     ) -> str:
         """Store a skill or procedure in warm memory.
+
+        When a generator is injected, a real embedding is also written to the
+        ``memory_embeddings`` table (its FK-correct home —
+        ``memory_embeddings.memory_id`` → ``warm_memories.id``), so the table
+        the §10.2 review found empty is populated on store.
 
         Args:
             memory_type: Type of memory (skill, procedure, workflow).
@@ -54,6 +67,22 @@ class WarmMemoryStore:
             access_count=0,
         )
         self._session.add(entry)
+
+        # Persist an embedding row alongside the warm memory (§10.2). Both rows
+        # are committed together; SQLAlchemy inserts the FK parent first.
+        if self._generator is not None:
+            try:
+                embedding = await self._generator.generate(content)
+                self._session.add(
+                    MemoryEmbedding(
+                        memory_id=entry.id,
+                        embedding=embedding,
+                        embedding_model=self._generator.model,
+                    )
+                )
+            except Exception as e:  # embedding is non-critical; warm store must not fail
+                logger.debug(f"Warm memory embedding skipped: {e}")
+
         await self._session.commit()
 
         logger.info(f"Warm memory stored: {memory_type}/{name} (id={memory_id[:8]})")

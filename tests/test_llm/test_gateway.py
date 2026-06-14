@@ -164,6 +164,11 @@ class TestExtractProvider:
     def test_unknown_model_returns_unknown(self) -> None:
         assert LLMGateway._extract_provider("totally-unknown-model") == "unknown"
 
+    def test_alibaba_qwen_prefix(self) -> None:
+        """Qwen is an Alibaba model series served via the DashScope API."""
+        assert LLMGateway._extract_provider("qwen3.5-flash") == "alibaba"
+        assert LLMGateway._extract_provider("qwen3.7-plus") == "alibaba"
+
 
 # ─── Test _estimate_tokens ──────────────────────────────────────────
 
@@ -231,6 +236,36 @@ class TestBuildKwargs:
     def test_no_metadata_key_when_none(self, gateway: LLMGateway) -> None:
         kwargs = gateway._build_kwargs("gpt-4o-mini-2024-07-18", 0.5, 100, None)
         assert "metadata" not in kwargs
+
+    def test_alibaba_qwen_pins_dashscope_api_base(self) -> None:
+        """Qwen (alibaba provider) calls pin api_base to the DashScope endpoint.
+
+        Qwen models are registered with an ``openai/`` model_id prefix; without
+        the api_base pin litellm would route them to OpenAI's endpoint using the
+        DASHSCOPE_API_KEY and the call would fail. The key must also reach the
+        call via the alibaba provider lookup.
+        """
+        settings = _make_settings()
+        settings.llm.dashscope_api_key = "sk-dashscope-test"
+        gw = _make_gateway(settings)
+        kwargs = gw._build_kwargs("qwen3.5-flash", 0.5, 100, None)
+        assert kwargs["model"] == "openai/qwen3.5-flash"
+        assert kwargs["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert kwargs["api_key"] == "sk-dashscope-test"
+
+    def test_alibaba_api_base_override(self) -> None:
+        """ALIBABA_API_BASE override is honored over the default endpoint."""
+        settings = _make_settings()
+        settings.llm.dashscope_api_key = "sk-dashscope-test"
+        settings.llm.alibaba_api_base = "https://custom-dashscope.example.com/v1"
+        gw = _make_gateway(settings)
+        kwargs = gw._build_kwargs("qwen3.7-plus", 0.5, 100, None)
+        assert kwargs["api_base"] == "https://custom-dashscope.example.com/v1"
+
+    def test_non_alibaba_provider_has_no_api_base(self, gateway: LLMGateway) -> None:
+        """Only nvidia/anthropic/alibaba providers receive an api_base pin."""
+        kwargs = gateway._build_kwargs("gpt-4o-mini-2024-07-18", 0.5, 100, None)
+        assert "api_base" not in kwargs
 
 
 # ─── Test _get_cheaper_fallback ──────────────────────────────────────

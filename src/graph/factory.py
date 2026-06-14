@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
+from src.config import get_settings
 from src.graph.enums import (
     Confidence,
     GoalStatus,
@@ -18,22 +19,31 @@ from src.graph.state import AgentState, EvolutionState
 def initial_state(
     goal_text: str,
     thread_id: str,
-    max_iterations: int = 25,
+    max_iterations: int | None = None,
+    no_evolution: bool = False,
 ) -> AgentState:
     """Create a fresh AgentState with sensible defaults.
 
     Args:
         goal_text: The user-provided goal description.
         thread_id: LangGraph thread ID for checkpointing.
-        max_iterations: Maximum graph iterations before forced stop.
+        max_iterations: Maximum graph iterations before forced stop. ``None``
+            resolves to ``AgentSettings.max_iterations`` (the single source of
+            truth), so callers need not hardcode the default.
+        no_evolution: Skip the ``evolve`` node. Propagated via STATE (read by
+            ``route_after_verify``) rather than RunnableConfig, because LangGraph
+            passes ``config=None`` to conditional-edge routers in this graph.
 
     Returns:
         AgentState: Initialized state dictionary.
     """
+    if max_iterations is None:
+        max_iterations = get_settings().agent.max_iterations
     return AgentState(
         phase=Phase.CLASSIFY,
         iteration_count=0,
         max_iterations=max_iterations,
+        no_evolution=no_evolution,
         current_goal=Goal(text=goal_text, status=GoalStatus.ACTIVE),
         strategy=Strategy.DIRECT,
         plan_steps=[],

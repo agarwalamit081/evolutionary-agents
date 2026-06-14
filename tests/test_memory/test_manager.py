@@ -33,6 +33,8 @@ def mock_settings() -> MagicMock:
     settings = MagicMock()
     settings.redis.cache_ttl_seconds = 3600
     settings.budget.max_cost_usd = 10.0
+    # Embedding config read by MemoryManager (§10.2).
+    settings.llm.embedding_dim = 768
     return settings
 
 
@@ -135,14 +137,17 @@ class TestMemoryManagerInit:
         mock_db_session: MagicMock,
         mock_settings: MagicMock,
     ) -> None:
-        """Warm tier should be initialized with db_session."""
+        """Warm tier is initialized with db_session and an embedding generator."""
         with patch("src.memory.manager.WarmMemoryStore") as warm_cls:
             MemoryManager(
                 redis_client=mock_redis,
                 db_session=mock_db_session,
                 settings=mock_settings,
             )
-            warm_cls.assert_called_once_with(session=mock_db_session)
+            warm_cls.assert_called_once()
+            kwargs = warm_cls.call_args.kwargs
+            assert kwargs["session"] is mock_db_session
+            assert "generator" in kwargs  # EmbeddingGenerator wired (§10.2)
 
     def test_initializes_cold_tier(
         self,
@@ -150,17 +155,18 @@ class TestMemoryManagerInit:
         mock_db_session: MagicMock,
         mock_settings: MagicMock,
     ) -> None:
-        """Cold tier should be initialized with db_session and embedding_dim=768."""
+        """Cold tier is initialized with db_session, settings embedding_dim, and a generator."""
         with patch("src.memory.manager.ColdMemoryStore") as cold_cls:
             MemoryManager(
                 redis_client=mock_redis,
                 db_session=mock_db_session,
                 settings=mock_settings,
             )
-            cold_cls.assert_called_once_with(
-                session=mock_db_session,
-                embedding_dim=768,
-            )
+            cold_cls.assert_called_once()
+            kwargs = cold_cls.call_args.kwargs
+            assert kwargs["session"] is mock_db_session
+            assert kwargs["embedding_dim"] == 768  # from settings.llm.embedding_dim
+            assert "generator" in kwargs  # EmbeddingGenerator wired (§10.2)
 
     def test_stores_settings_reference(
         self,

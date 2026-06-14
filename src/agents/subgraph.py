@@ -241,12 +241,21 @@ def _build_fixed_subgraph(
 
     graph.add_conditional_edges("reflect", _route_after_reflect_sub, reflect_targets)  # type: ignore[arg-type]
 
+    # Guard: sub-agents never self-evolve — the fixed subgraph terminates at
+    # reflect → END with no evolve node (F13 §4). Evolving a sub-agent would
+    # mutate the parent's evolution repo from a delegated context, which is
+    # explicitly out of scope (max 3 sub-agents, no sub-agent self-evolution).
+    assert "evolve" not in graph.nodes, "sub-agent subgraph must not contain evolve"
     return graph
 
 
 # ── Custom Template Builder ─────────────────────────────────────────────
 
-# Available node names for custom templates (lazy-loaded to avoid circular imports)
+# Available node names for custom templates (lazy-loaded to avoid circular imports).
+# NOTE: "evolve" is deliberately absent — sub-agents never self-evolve (F13 §4).
+# A custom node_config requesting "evolve" is rejected at _get_node_function /
+# the unknown-node skip in _build_custom_subgraph, and both builders assert the
+# invariant after construction.
 _AVAILABLE_NODE_NAMES: list[str] = [
     "classify", "plan", "execute", "reflect", "tool_create",
 ]
@@ -357,6 +366,10 @@ def _build_custom_subgraph(
     if not node_names:
         return _build_fixed_subgraph(spec, gateway, tools)
 
+    # Guard: sub-agents never self-evolve (F13 §4). _AVAILABLE_NODE_NAMES
+    # excludes "evolve", so a well-formed custom config can't add it — this
+    # assert makes the invariant explicit and fails loudly if that ever changes.
+    assert "evolve" not in graph.nodes, "sub-agent subgraph must not contain evolve"
     return graph
 
 

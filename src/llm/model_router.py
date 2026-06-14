@@ -200,7 +200,7 @@ class ModelRouter:
         if model.startswith("mistral-") or model.startswith("ministral-") or model.startswith("open-mistral-"):
             return "mistral"
         if model.startswith("qwen"):
-            return "qwen"
+            return "alibaba"
         if model.startswith("glm-"):
             return "zai"
         if model.startswith("kimi-") or model.startswith("moonshot-"):

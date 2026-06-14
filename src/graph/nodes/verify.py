@@ -181,7 +181,13 @@ async def _llm_verify(
 ) -> dict[str, Any] | None:
     """Attempt LLM-based verification. Returns None on failure."""
     try:
-        from src.graph.prompts import VERIFY_SYSTEM, VERIFY_USER
+        from src.graph.prompts import (
+            NODE_VERIFY,
+            VERIFY_SYSTEM,
+            VERIFY_USER,
+            TechniqueSelector,
+            build_messages,
+        )
         from src.graph.schemas import VerificationResult
         from src.llm.structured_output import StructuredOutputManager
 
@@ -220,14 +226,22 @@ async def _llm_verify(
             evidence=evidence_text,
         )
 
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": str(VERIFY_SYSTEM)},
-            {"role": "user", "content": user_prompt},
-        ]
+        verify_complexity = (
+            goal.complexity if goal and goal.complexity else TaskComplexity.SIMPLE
+        )
+        goal_pattern = TechniqueSelector.infer_goal_pattern(goal.text if goal else None)
+        techniques = TechniqueSelector().select(
+            complexity=verify_complexity,
+            node=NODE_VERIFY,
+            goal_pattern=goal_pattern,
+        )
+        messages = build_messages(str(VERIFY_SYSTEM), user_prompt, techniques)
 
         response = await gateway.acompletion(
             messages=messages,
-            complexity=TaskComplexity.SIMPLE,
+            # Thread the *classified* complexity so verification of a CRITICAL
+            # goal uses a stronger model rather than always SIMPLE (§5 C.1).
+            complexity=verify_complexity,
         )
 
         extractor = StructuredOutputManager()

@@ -27,9 +27,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from src.agents.registry import MAX_SUB_AGENTS_PER_RUN
+from src.config import get_settings
 from src.graph.enums import Phase
-from src.tools.dynamic.allowlist import MAX_TOOLS_PER_RUN
 
 if TYPE_CHECKING:
     from src.tools.registry import ToolRegistry
@@ -148,7 +147,7 @@ def _detect_tool_gaps(
             continue
         seen.add(key)
         gaps.append(f"custom tool '{name}' described in the goal")
-        if len(gaps) >= MAX_TOOLS_PER_RUN:
+        if len(gaps) >= get_settings().agent.max_tools_per_run:
             break
 
     if gaps:
@@ -214,7 +213,7 @@ def _format_agent_gaps(units: list[str], attempted: set[str]) -> list[str]:
         if gap in attempted:
             continue
         gaps.append(gap)
-        if len(gaps) >= MAX_SUB_AGENTS_PER_RUN:
+        if len(gaps) >= get_settings().agent.max_sub_agents_per_run:
             break
     return gaps
 

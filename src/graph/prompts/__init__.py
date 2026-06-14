@@ -7,7 +7,18 @@ importing from ``src.graph.prompts`` work unchanged.
 
 from __future__ import annotations
 
+from src.graph.prompts.builder import build_messages, splice_techniques
 from src.graph.prompts.loader import PromptManager, PromptTemplate
+from src.graph.prompts.technique_selector import (
+    JSON_SCHEMA_MARKER,
+    NODE_EXECUTE,
+    NODE_PLAN,
+    NODE_REFLECT,
+    NODE_VERIFY,
+    TECHNIQUE_REGISTRY,
+    Technique,
+    TechniqueSelector,
+)
 
 # ── Singleton manager ──────────────────────────────────────────────────
 prompt_manager = PromptManager()
@@ -51,6 +62,17 @@ __all__ = [
     "PromptManager",
     "PromptTemplate",
     "prompt_manager",
+    # ── §5 prompting-technique layer ────────────────────────────────────
+    "build_messages",
+    "splice_techniques",
+    "Technique",
+    "TechniqueSelector",
+    "TECHNIQUE_REGISTRY",
+    "JSON_SCHEMA_MARKER",
+    "NODE_PLAN",
+    "NODE_EXECUTE",
+    "NODE_REFLECT",
+    "NODE_VERIFY",
     "CLASSIFY_SYSTEM",
     "CLASSIFY_USER",
     "PLAN_SYSTEM",

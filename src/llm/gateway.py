@@ -502,6 +502,18 @@ class LLMGateway:
         if provider == "anthropic":
             kwargs["api_base"] = self._settings.llm.anthropic_api_base or "https://api.anthropic.com"
 
+        # Pin the Alibaba (Qwen / DashScope service) endpoint. Qwen models are
+        # registered with an ``openai/`` model_id prefix; without an api_base
+        # pin litellm would route them to OpenAI's endpoint using the
+        # DASHSCOPE_API_KEY (same defect class as the resolved Anthropic
+        # misroute). The DashScope key is only valid against the OpenAI-
+        # compatible-mode endpoint below.
+        if provider == "alibaba":
+            kwargs["api_base"] = (
+                self._settings.llm.alibaba_api_base
+                or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+
         # DeepSeek thinking mode — pass through thinking/reasoning_effort
         # LiteLLM standardizes these for DeepSeek models.
         if thinking is not None:

@@ -26,7 +26,7 @@ from src.observability.logging import reset_logging, setup_logging
 @click.option("--provider", "-p", default=None, help="LLM provider (e.g., openai, anthropic, deepseek)")
 @click.option("--model", "-m", default=None, help="Specific model to use")
 @click.option("--no-evolution", is_flag=True, help="Disable evolution phase")
-@click.option("--max-iterations", default=25, type=int, help="Maximum graph iterations")
+@click.option("--max-iterations", default=None, type=int, help="Maximum graph iterations (default: from settings)")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 @click.option("--run-id", default=None, help="Unique run identifier for per-query logging")
 def main(
@@ -58,6 +58,10 @@ def main(
     click.echo(f"   Provider: {provider or 'default'} | Model: {model or 'auto'}")
     click.echo(f"   Max iterations: {max_iterations} | Evolution: {'disabled' if no_evolution else 'enabled'}")
 
+    # Resolve the iteration cap from settings when the CLI didn't override it.
+    if max_iterations is None:
+        max_iterations = settings.agent.max_iterations
+
     # Run the agent
     result = asyncio.run(_run_agent(goal_text, max_iterations, no_evolution, run_id))
 
@@ -70,8 +74,8 @@ def main(
 
 async def _run_agent(
     goal_text: str,
-    max_iterations: int = 25,
-    no_evolution: bool = False,  # noqa: ARG001 — used in future evolution integration
+    max_iterations: int | None = None,
+    no_evolution: bool = False,
     run_id: str | None = None,
 ) -> dict:
     """Run the agent graph to completion.
@@ -92,6 +96,8 @@ async def _run_agent(
     from src.graph.task_graph import compile_task_graph
 
     settings = get_settings()
+    if max_iterations is None:
+        max_iterations = settings.agent.max_iterations
 
     # Configure LangSmith tracing from settings
     if settings.langsmith.is_configured:
@@ -116,7 +122,7 @@ async def _run_agent(
 
     # Create initial state
     thread_id = f"cli-{os.getpid()}-{id(goal_text)}"
-    state = initial_state(goal_text, thread_id, max_iterations)
+    state = initial_state(goal_text, thread_id, max_iterations, no_evolution=no_evolution)
 
     # Instantiate dependencies
     gateway = _create_gateway(settings)
@@ -160,28 +166,59 @@ async def _run_agent(
         sub_agent_registry=sub_agent_registry,
     )
 
+    # Run-scoped DB session for durable cost tracking. Opened before the graph
+    # runs and closed in ``finally`` so cost_ledger rows land even on error
+    # paths. Separate from the memory manager's session (which escapes its own
+    # async-with at _async_create_memory_manager and is not safely closeable
+    # here). Best-effort: if the DB is unavailable the gateway runs without a
+    # tracker — the gateway already tolerates _cost_tracker=None.
+    cost_session_cm = None
+    if gateway is not None:
+        try:
+            from src.db.session import get_session
+            from src.llm.cost_tracker import CostTracker
+
+            cost_session_cm = get_session()
+            cost_session = await cost_session_cm.__aenter__()
+            gateway.set_cost_tracker(CostTracker(cost_session, settings))
+            logger.info("Cost tracker wired (budget gate active)")
+        except Exception as e:
+            logger.debug(f"Cost tracker not available: {e}")
+            cost_session_cm = None
+
     logger.info(f"Starting agent with goal: {goal_text[:80]}")
     recursion_limit = max(max_iterations * 8, 100)
-    result = await compiled.ainvoke(state, config={"recursion_limit": recursion_limit})
-    result_dict = dict(result)
+    try:
+        result = await compiled.ainvoke(
+            state,
+            config={"recursion_limit": recursion_limit},
+        )
+        result_dict = dict(result)
 
-    # Cost/token fallback: if the graph terminated without flushing
-    # cost_records via store_memory (e.g. error_termination), recover from the
-    # gateway's in-memory accumulator so run-history reflects real spend.
-    if gateway is not None:
-        if not result_dict.get("cost_records"):
-            gateway_records = gateway.get_cost_records()
-            if gateway_records:
-                result_dict["cost_records"] = gateway_records
-        if not result_dict.get("total_tokens_used"):
-            records = result_dict.get("cost_records") or []
-            if records:
-                result_dict["total_tokens_used"] = sum(
-                    getattr(r, "input_tokens", 0) + getattr(r, "output_tokens", 0)
-                    for r in records
-                )
+        # Cost/token fallback: if the graph terminated without flushing
+        # cost_records via store_memory (e.g. error_termination), recover from the
+        # gateway's in-memory accumulator so run-history reflects real spend.
+        if gateway is not None:
+            if not result_dict.get("cost_records"):
+                gateway_records = gateway.get_cost_records()
+                if gateway_records:
+                    result_dict["cost_records"] = gateway_records
+            if not result_dict.get("total_tokens_used"):
+                records = result_dict.get("cost_records") or []
+                if records:
+                    result_dict["total_tokens_used"] = sum(
+                        getattr(r, "input_tokens", 0) + getattr(r, "output_tokens", 0)
+                        for r in records
+                    )
 
-    logger.info("Agent execution complete")
+        logger.info("Agent execution complete")
+    finally:
+        # Close the run-scoped cost-tracker session; never raise out of finally.
+        if cost_session_cm is not None:
+            try:
+                await cost_session_cm.__aexit__(None, None, None)
+            except Exception as e:
+                logger.debug(f"Cost session close skipped: {e}")
 
     # Save results file to results/ directory
     try:

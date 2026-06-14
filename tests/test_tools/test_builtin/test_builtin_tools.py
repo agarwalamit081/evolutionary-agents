@@ -281,6 +281,121 @@ class TestWebSearch:
             result = await web_search("fail query")
         assert "ERROR" in result
 
+    @pytest.mark.asyncio
+    async def test_strict_safesearch_and_param_passthrough(self) -> None:
+        """region/timelimit/max_results flow through; safesearch is forced strict."""
+        from unittest.mock import MagicMock
+
+        mock = MagicMock(
+            return_value=[{"title": "T", "href": "http://example.com/a", "body": "B"}]
+        )
+        with patch("src.tools.builtin.web_search._ddgs_text", mock):
+            await web_search("q", max_results=7, region="wt-wt", timelimit="w")
+
+        assert mock.call_args is not None
+        # Called positionally: (query, max_results, region, safesearch, timelimit)
+        args = mock.call_args.args
+        assert args[1] == 7          # max_results
+        assert args[2] == "wt-wt"    # region
+        assert args[3] == "strict"   # safesearch forced strict (§6)
+        assert args[4] == "w"        # timelimit
+
+    @pytest.mark.asyncio
+    async def test_filters_spam_domains(self) -> None:
+        """Blocked spam domains are removed from results."""
+        fake = [
+            {"title": "Spam", "href": "https://www.pinterest.com/pin/123", "body": "x"},
+            {"title": "Good", "href": "https://example.com/article", "body": "y"},
+        ]
+        with patch("src.tools.builtin.web_search._ddgs_text", return_value=fake):
+            result = await web_search("query")
+        assert "Good" in result
+        assert "pinterest.com" not in result
+
+    @pytest.mark.asyncio
+    async def test_dedups_by_canonical_url(self) -> None:
+        """Same URL with differing tracking params collapses to one result."""
+        fake = [
+            {"title": "A", "href": "https://example.com/a?utm_source=x", "body": "b"},
+            {"title": "A2", "href": "https://example.com/a", "body": "b"},
+        ]
+        with patch("src.tools.builtin.web_search._ddgs_text", return_value=fake):
+            result = await web_search("query")
+        assert result.count("URL:") == 1  # deduped to a single result
+        assert "utm_source" not in result  # tracking param stripped from output
+
+    @pytest.mark.asyncio
+    async def test_unwraps_ddg_redirect(self) -> None:
+        """DDG redirect wrapper is unwrapped to the real URL in output."""
+        redirect = (
+            "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Freal&rut=abc"
+        )
+        fake = [{"title": "Real", "href": redirect, "body": "content"}]
+        with patch("src.tools.builtin.web_search._ddgs_text", return_value=fake):
+            result = await web_search("query")
+        assert "https://example.com/real" in result
+        assert "duckduckgo.com/l/" not in result
+
+    @pytest.mark.asyncio
+    async def test_empty_query_returns_error(self) -> None:
+        """A whitespace-only query is rejected before any network call."""
+        from unittest.mock import MagicMock
+
+        mock = MagicMock(return_value=[])
+        with patch("src.tools.builtin.web_search._ddgs_text", mock):
+            result = await web_search("   ")
+        assert "ERROR" in result
+        assert mock.call_count == 0  # never reached the fetcher
+
+
+class TestWebSearchCleaning:
+    """Unit tests for web_search result-cleaning helpers (§6)."""
+
+    def test_build_query_normalizes_whitespace(self) -> None:
+        from src.tools.builtin.web_search import _build_query
+
+        assert _build_query("  multi   word  query ") == "multi word query"
+
+    def test_unwrap_redirect_extracts_inner_url(self) -> None:
+        from src.tools.builtin.web_search import _unwrap_redirect
+
+        redirect = "https://duckduckgo.com/l/?uddg=https%3A%2F%2Freal.com%2Fpage&rut=z"
+        assert _unwrap_redirect(redirect) == "https://real.com/page"
+        # Non-redirect URLs pass through unchanged.
+        assert _unwrap_redirect("https://example.com/x") == "https://example.com/x"
+
+    def test_canonicalize_url_strips_tracking_and_fragment(self) -> None:
+        from src.tools.builtin.web_search import _canonicalize_url
+
+        url = "HTTPS://Example.COM/A/?utm_source=x&fbclid=y#frag"
+        assert _canonicalize_url(url) == "https://example.com/A"
+
+    def test_is_spam_url_matches_domains_and_subdomains(self) -> None:
+        from src.tools.builtin.web_search import _is_spam_url
+
+        assert _is_spam_url("https://pinterest.com/x") is True
+        assert _is_spam_url("https://www.pinterest.com/x") is True
+        assert _is_spam_url("https://m.facebook.com/x") is True
+        assert _is_spam_url("https://example.com/x") is False
+        # Not fooled by substring lookalikes.
+        assert _is_spam_url("https://not-pinterest.com/x") is False
+
+    def test_clean_results_filters_spam_and_dedups(self) -> None:
+        from src.tools.builtin.web_search import _clean_results
+
+        results = [
+            {"title": "Spam", "href": "https://pinterest.com/a", "body": "b1"},
+            {"title": "Dup1", "href": "https://example.com/a?utm_source=x", "body": "b2"},
+            {"title": "Dup2", "href": "https://example.com/a", "body": "b3"},
+            {"title": "Keep", "href": "https://example.com/b", "body": "b4"},
+        ]
+        cleaned = _clean_results(results)
+        hrefs = [r["href"] for r in cleaned]
+        assert len(cleaned) == 2  # spam dropped, utm-duplicate collapsed
+        assert "https://example.com/a" in hrefs
+        assert "https://example.com/b" in hrefs
+        assert all("pinterest.com" not in h for h in hrefs)
+
 
 class TestGetCurrentTime:
     """Tests for the get_current_time tool."""

@@ -67,13 +67,19 @@ class LLMGateway:
         )
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, pinned_model: str | None = None) -> None:
         self._settings = settings
         self._rate_limiter = RateLimiterRegistry(settings)
         self._model_router = ModelRouter(settings)
         self._structured_output = StructuredOutputManager()
         self._cost_tracker: CostTracker | None = None
         self._cache: PromptCache | None = None
+        # When set (e.g. via the CLI ``--model`` flag), overrides complexity
+        # routing for every call so a single run can be pinned to one model.
+        # Provider/key/endpoint resolution still flows through ``_build_kwargs``
+        # exactly as for a routed model, so a pinned model with no provider key
+        # still falls back through its chain on failure.
+        self._pinned_model = pinned_model
         # In-memory accumulation of every real LLM call's cost/tokens for this
         # gateway instance. Flushed into graph state (cost_records /
         # total_tokens_used) by the store_memory node. A fresh gateway is built
@@ -140,10 +146,13 @@ class LLMGateway:
             LLMResponse with content, usage stats, and cost.
         """
         # Determine model
-        if model is None and complexity is not None:
-            model = self._model_router.route(complexity)
-        elif model is None:
-            model = self._model_router.route(TaskComplexity.SIMPLE)
+        if model is None:
+            if self._pinned_model is not None:
+                model = self._pinned_model
+            elif complexity is not None:
+                model = self._model_router.route(complexity)
+            else:
+                model = self._model_router.route(TaskComplexity.SIMPLE)
 
         assert model is not None  # guaranteed by routing logic
 
@@ -245,10 +254,13 @@ class LLMGateway:
         Yields:
             Token strings as they arrive.
         """
-        if model is None and complexity is not None:
-            model = self._model_router.route(complexity)
-        elif model is None:
-            model = self._model_router.route(TaskComplexity.SIMPLE)
+        if model is None:
+            if self._pinned_model is not None:
+                model = self._pinned_model
+            elif complexity is not None:
+                model = self._model_router.route(complexity)
+            else:
+                model = self._model_router.route(TaskComplexity.SIMPLE)
 
         assert model is not None  # guaranteed by routing logic
 
@@ -507,11 +519,14 @@ class LLMGateway:
         # pin litellm would route them to OpenAI's endpoint using the
         # DASHSCOPE_API_KEY (same defect class as the resolved Anthropic
         # misroute). The DashScope key is only valid against the OpenAI-
-        # compatible-mode endpoint below.
+        # compatible-mode endpoint below. Default to the INTERNATIONAL (Bailian)
+        # endpoint — DashScope keys are region-bound and the China endpoint
+        # (dashscope.aliyuncs.com) rejects an international key. Override via
+        # ALIBABA_API_BASE to use the China endpoint instead.
         if provider == "alibaba":
             kwargs["api_base"] = (
                 self._settings.llm.alibaba_api_base
-                or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
             )
 
         # DeepSeek thinking mode — pass through thinking/reasoning_effort

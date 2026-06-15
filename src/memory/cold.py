@@ -130,6 +130,44 @@ class ColdMemory:
             for row in rows
         ]
 
+    async def search_by_query(
+        self,
+        query: str,
+        limit: int = 5,
+        min_importance: float = 0.0,
+        episode_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Semantic search: embed a text query and rank memories by similarity.
+
+        Thin wrapper over :meth:`search_by_embedding` that owns query embedding,
+        so callers (e.g. ``MemoryManager.retrieve_context``) need no separate
+        generator reference. Semantic recall is best-effort: returns ``[]`` when
+        no generator is wired, the query is empty, or embedding fails — it must
+        never block context retrieval.
+
+        Args:
+            query: Natural-language query text.
+            limit: Maximum results to return.
+            min_importance: Minimum importance threshold.
+            episode_type: Optional type filter.
+
+        Returns:
+            List of similar memories with similarity scores.
+        """
+        if not query or self._generator is None:
+            return []
+        try:
+            query_embedding = await self._generator.generate(query)
+        except Exception as e:  # embedding failure must not break retrieval
+            logger.debug(f"Cold memory query embedding failed: {e}")
+            return []
+        return await self.search_by_embedding(
+            query_embedding=query_embedding,
+            limit=limit,
+            min_importance=min_importance,
+            episode_type=episode_type,
+        )
+
     async def search_by_tags(
         self,
         tags: list[str],

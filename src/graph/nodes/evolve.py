@@ -73,6 +73,7 @@ async def _run_evolution_engine(
         from src.config import get_settings
         from src.evolution.engine import SelfEvolutionEngine
         from src.evolution.git_tracker import GitTracker
+        from src.evolution.persister import EvolutionPersister
         from src.safety.pipeline import SafetyPipeline
         from src.sandbox.executor import SandboxExecutor
 
@@ -81,7 +82,16 @@ async def _run_evolution_engine(
 
         settings = get_settings()
         safety = SafetyPipeline()
-        engine = SelfEvolutionEngine(gateway=gateway, safety_pipeline=safety)
+        # Construct the persister unconditionally (no I/O until a method is
+        # called); the engine swallows every persister exception, so a DB outage
+        # can never abort an evolution cycle.
+        persister = EvolutionPersister()
+        engine = SelfEvolutionEngine(
+            gateway=gateway,
+            safety_pipeline=safety,
+            persister=persister,
+            max_retries=getattr(settings.evolution, "max_evolution_retries", 2),
+        )
 
         # Create sandbox executor
         sandbox: SandboxExecutor | None = None

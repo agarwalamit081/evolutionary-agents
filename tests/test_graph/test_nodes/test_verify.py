@@ -514,6 +514,115 @@ class TestVerifyDeliverableEvidence:
         assert any("final_report.md" in e for e in result.get("errors", []))
 
     @pytest.mark.asyncio
+    async def test_pessimistic_llm_overridden_by_present_deliverable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Filesystem evidence wins over a PESSIMISTIC LLM verdict too (Q9).
+
+        Symmetric to test_llm_rubberstamp_overridden_by_missing_deliverable: a
+        declared deliverable that EXISTS + all steps done + no errors forces
+        is_complete=True even when the verify LLM self-reports 0%. Without this,
+        a deliverable-producing goal loops verify→plan until the iteration cap
+        (Q9 wrote results/q9_onboarding.md but verify returned complete=False).
+        """
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        Path(results_root, "final_report.md").write_text(
+            "the full deliverable content", encoding="utf-8"
+        )
+        state = self._state_with_file_writer(
+            "Generate a report and save it to results/final_report.md",
+            "results/final_report.md",
+        )
+        llm_json = (
+            '{"is_complete": false, "completion_percentage": 0.0, '
+            '"gaps": ["uncertain"], "quality_assessment": "Cannot confirm", '
+            '"should_evolve": false}'
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(
+            return_value=LLMResponse(
+                content=llm_json,
+                model="claude-haiku-4-5-20251001",
+                provider="anthropic",
+                input_tokens=10,
+                output_tokens=20,
+                total_tokens=30,
+                cost_usd=0.0001,
+            )
+        )
+        result = await verify_node(state, gateway=gateway)
+        assert result["is_complete"] is True
+        assert result["phase"] == Phase.COMPLETE
+        assert "Objective deliverable evidence" in result["final_output"]
+
+    @pytest.mark.asyncio
+    async def test_present_deliverable_not_forced_complete_with_errors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Errors block the optimistic override — evidence of success is not
+        enough when the run also has unresolved errors."""
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        Path(results_root, "final_report.md").write_text("content", encoding="utf-8")
+        state = self._state_with_file_writer(
+            "Save the answer to results/final_report.md",
+            "results/final_report.md",
+        )
+        state["errors"] = ["something went wrong mid-run"]
+        llm_json = (
+            '{"is_complete": false, "completion_percentage": 50.0, '
+            '"gaps": [], "quality_assessment": "partial", "should_evolve": false}'
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(
+            return_value=LLMResponse(
+                content=llm_json,
+                model="claude-haiku-4-5-20251001",
+                provider="anthropic",
+                input_tokens=10,
+                output_tokens=20,
+                total_tokens=30,
+                cost_usd=0.0001,
+            )
+        )
+        result = await verify_node(state, gateway=gateway)
+        assert result["is_complete"] is False
+
+    @pytest.mark.asyncio
+    async def test_present_deliverable_not_forced_complete_with_steps_remaining(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unfinished plan blocks the override — don't complete mid-plan."""
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        Path(results_root, "final_report.md").write_text("content", encoding="utf-8")
+        state = self._state_with_file_writer(
+            "Save the answer to results/final_report.md",
+            "results/final_report.md",
+        )
+        # Two steps, only the first done.
+        state["plan_steps"] = list(state["plan_steps"]) + [
+            PlanStep(id="s2", description="Review the report", status="pending")
+        ]
+        state["current_step_index"] = 1
+        llm_json = (
+            '{"is_complete": false, "completion_percentage": 50.0, '
+            '"gaps": [], "quality_assessment": "partial", "should_evolve": false}'
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(
+            return_value=LLMResponse(
+                content=llm_json,
+                model="claude-haiku-4-5-20251001",
+                provider="anthropic",
+                input_tokens=10,
+                output_tokens=20,
+                total_tokens=30,
+                cost_usd=0.0001,
+            )
+        )
+        result = await verify_node(state, gateway=gateway)
+        assert result["is_complete"] is False
+
+    @pytest.mark.asyncio
     async def test_input_file_not_treated_as_deliverable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

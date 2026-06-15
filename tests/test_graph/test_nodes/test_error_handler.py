@@ -61,14 +61,16 @@ class TestErrorHandlerNode:
         assert result["phase"] == Phase.EXECUTE
 
     @pytest.mark.asyncio
-    async def test_error_handler_no_errors_routes_to_complete(self) -> None:
-        """No errors → phase=COMPLETE."""
+    async def test_error_handler_no_errors_routes_to_verify(self) -> None:
+        """No errors is a routing anomaly, not a success — route to verify so the
+        actual state is judged honestly. Previously this declared is_complete=True
+        for a run that may have produced nothing (F14)."""
         state = initial_state("test goal", "thread-noerr")
         state["errors"] = []
         result = await error_handler_node(state)
 
-        assert result["phase"] == Phase.COMPLETE
-        assert result["is_complete"] is True
+        assert result["phase"] == Phase.VERIFY
+        assert result.get("is_complete") is not True
 
     @pytest.mark.asyncio
     async def test_error_handler_403_routes_to_classify(self) -> None:

@@ -6,11 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.agents.registry import MAX_SUB_AGENTS_PER_RUN
+from src.config import get_settings
 from src.graph.enums import Phase
 from src.graph.factory import initial_state
 from src.graph.nodes.structure_analysis import structure_analysis_node
-from src.tools.dynamic.allowlist import MAX_TOOLS_PER_RUN
 
 
 class TestStructureAnalysisToolDetection:
@@ -32,13 +31,12 @@ class TestStructureAnalysisToolDetection:
 
     @pytest.mark.asyncio
     async def test_tool_gaps_capped_at_max(self) -> None:
-        """More than MAX_TOOLS_PER_RUN named tools are capped."""
-        state = initial_state(
-            "Create tools 'alpha_tool', 'beta_tool', 'gamma_tool', 'delta_tool'",
-            "thread-tool-cap",
-        )
+        """More than the configured max_tools_per_run named tools are capped."""
+        cap = get_settings().agent.max_tools_per_run
+        names = ", ".join(f"'tool_{i}'" for i in range(cap + 5))
+        state = initial_state(f"Create tools {names}", "thread-tool-cap")
         result = await structure_analysis_node(state)
-        assert len(result["pending_tool_gaps"]) == MAX_TOOLS_PER_RUN
+        assert len(result["pending_tool_gaps"]) == cap
 
     @pytest.mark.asyncio
     async def test_existing_tool_skipped(self) -> None:
@@ -94,7 +92,7 @@ class TestStructureAnalysisAgentDetection:
 
         gaps = result["pending_agent_gaps"]
         assert len(gaps) >= 2
-        assert len(gaps) <= MAX_SUB_AGENTS_PER_RUN
+        assert len(gaps) <= get_settings().agent.max_sub_agents_per_run
 
     @pytest.mark.asyncio
     async def test_skip_when_agents_already_spawned(self) -> None:
@@ -203,7 +201,7 @@ class TestStructureAnalysisE2EGoals:
 
         gaps = result["pending_agent_gaps"]
         assert len(gaps) >= 2
-        assert len(gaps) <= MAX_SUB_AGENTS_PER_RUN
+        assert len(gaps) <= get_settings().agent.max_sub_agents_per_run
 
     @pytest.mark.asyncio
     async def test_q5_seeds_named_sub_agent_roles(self) -> None:

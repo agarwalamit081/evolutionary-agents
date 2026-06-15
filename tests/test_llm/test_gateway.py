@@ -243,14 +243,16 @@ class TestBuildKwargs:
         Qwen models are registered with an ``openai/`` model_id prefix; without
         the api_base pin litellm would route them to OpenAI's endpoint using the
         DASHSCOPE_API_KEY and the call would fail. The key must also reach the
-        call via the alibaba provider lookup.
+        call via the alibaba provider lookup. The default endpoint is the
+        INTERNATIONAL (Bailian) one — DashScope keys are region-bound and the
+        China endpoint rejects an intl key.
         """
         settings = _make_settings()
         settings.llm.dashscope_api_key = "sk-dashscope-test"
         gw = _make_gateway(settings)
         kwargs = gw._build_kwargs("qwen3.5-flash", 0.5, 100, None)
         assert kwargs["model"] == "openai/qwen3.5-flash"
-        assert kwargs["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert kwargs["api_base"] == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
         assert kwargs["api_key"] == "sk-dashscope-test"
 
     def test_alibaba_api_base_override(self) -> None:

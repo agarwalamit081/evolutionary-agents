@@ -66,6 +66,7 @@ def mock_cold() -> MagicMock:
     cold = MagicMock()
     cold.store = AsyncMock(return_value="cold-uuid-5678")
     cold.search_by_tags = AsyncMock(return_value=[])
+    cold.search_by_query = AsyncMock(return_value=[])
     cold.consolidate = AsyncMock(return_value=0)
     return cold
 
@@ -355,14 +356,57 @@ class TestRetrieveContext:
         assert len(results) <= 3
 
     @pytest.mark.asyncio
-    async def test_no_tags_skips_cold_tier(self, manager: _MockedManager) -> None:
-        """When tags is None, cold tier should not be queried."""
+    async def test_no_tags_runs_semantic_but_skips_tag_search(
+        self, manager: _MockedManager
+    ) -> None:
+        """With no tags, tag-based cold search is skipped but semantic search runs.
+
+        The query now drives semantic cold recall even without tags; only the
+        explicit tag filter remains tag-gated.
+        """
         manager._mock_hot.search = AsyncMock(return_value=[])
         manager._mock_warm.retrieve = AsyncMock(return_value=[])
 
-        await manager.retrieve_context(query="test", tags=None, limit=5)
+        await manager.retrieve_context(query="semantic query", tags=None, limit=5)
 
         manager._mock_cold.search_by_tags.assert_not_called()
+        manager._mock_cold.search_by_query.assert_called_once_with(
+            query="semantic query", limit=3
+        )
+
+    @pytest.mark.asyncio
+    async def test_semantic_cold_results_flow_through(
+        self, manager: _MockedManager
+    ) -> None:
+        """Semantic cold recall results appear as cold-tier items with similarity."""
+        manager._mock_hot.search = AsyncMock(return_value=[])
+        manager._mock_warm.retrieve = AsyncMock(return_value=[])
+        manager._mock_cold.search_by_query = AsyncMock(return_value=[
+            {"id": "c1", "content": "semantically relevant", "similarity": 0.9},
+        ])
+
+        results = await manager.retrieve_context(query="q", tags=None, limit=5)
+
+        cold = [r for r in results if r["tier"] == "cold"]
+        assert len(cold) == 1
+        assert cold[0]["id"] == "c1"
+        assert cold[0]["similarity"] == 0.9
+
+    @pytest.mark.asyncio
+    async def test_semantic_and_tag_cold_results_deduped(
+        self, manager: _MockedManager
+    ) -> None:
+        """A memory returned by both semantic and tag search appears once."""
+        manager._mock_hot.search = AsyncMock(return_value=[])
+        manager._mock_warm.retrieve = AsyncMock(return_value=[])
+        shared = {"id": "c1", "content": "both paths match"}
+        manager._mock_cold.search_by_query = AsyncMock(return_value=[shared])
+        manager._mock_cold.search_by_tags = AsyncMock(return_value=[shared])
+
+        results = await manager.retrieve_context(query="q", tags=["t"], limit=10)
+
+        cold_ids = [r["id"] for r in results if r["tier"] == "cold"]
+        assert cold_ids == ["c1"]  # deduped, not duplicated
 
     @pytest.mark.asyncio
     async def test_hot_search_uses_obs_pattern(

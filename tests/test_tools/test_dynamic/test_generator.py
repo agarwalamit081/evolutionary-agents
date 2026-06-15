@@ -255,13 +255,14 @@ class TestToolGeneratorGenerate:
 
     @pytest.mark.asyncio
     async def test_generate_respects_rate_limit(self) -> None:
-        from src.tools.dynamic.allowlist import MAX_TOOLS_PER_RUN
+        from src.config import get_settings
 
+        cap = get_settings().agent.max_tools_per_run
         gateway = _make_gateway(_safe_tool_json())
         gen = ToolGenerator(gateway=gateway, safety_pipeline=SafetyPipeline())
 
-        # First few should work
-        for _ in range(MAX_TOOLS_PER_RUN):
+        # Up to the configured cap should work
+        for _ in range(cap):
             tool = await gen.generate(
                 "parse JSON",
                 {"goal_text": "test", "failed_tools": "none", "existing_tools": []},
@@ -269,7 +270,7 @@ class TestToolGeneratorGenerate:
             # Simulate counting as if registered
             gen._tools_created += 1
 
-        # Next should be rate-limited
+        # One past the cap is rate-limited
         tool = await gen.generate(
             "parse JSON",
             {"goal_text": "test", "failed_tools": "none", "existing_tools": []},

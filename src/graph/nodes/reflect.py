@@ -17,6 +17,38 @@ if TYPE_CHECKING:
     from src.tools.registry import ToolRegistry
 
 
+def _ground_should_evolve(
+    proposed: bool,
+    goal_text: str,
+    completed_steps: list[Any],
+    errors: list[str],
+    confidence: Confidence,
+) -> bool:
+    """Force ``should_evolve=True`` on objective success.
+
+    A cautious model returns ``should_evolve=False`` even on HIGH-confidence
+    deliverable successes — the battery's Q7/Q8 hit ``confidence=high`` yet the
+    LLM said ``should_evolve=False``, and every other successful query likewise
+    — so evolution never fired (0 mutations across all 10 queries). Grounding it
+    in objective evidence (no errors, ≥3 steps completed, and — for deliverable
+    goals — the artifact actually on disk) makes evolution fire on genuine
+    successes while preserving a model's own ``should_evolve=True`` via OR. The
+    on-disk check reuses execute's deliverable helpers so reflect, verify, and
+    the write-nudge all agree on what "produced" means.
+    """
+    if proposed:
+        return True
+    if errors or len(completed_steps or []) < 3:
+        return False
+    from src.graph.nodes.execute import _deliverable_on_disk, _extract_goal_deliverable
+
+    goal_deliverable = _extract_goal_deliverable(goal_text)
+    if goal_deliverable is not None:
+        return _deliverable_on_disk(goal_deliverable)
+    # Non-deliverable goal: require high confidence (mirrors the heuristic bar).
+    return confidence in {Confidence.HIGH, Confidence.VERY_HIGH}
+
+
 async def reflect_node(
     state: AgentState,
     *,
@@ -61,7 +93,7 @@ async def reflect_node(
 
     # Try LLM reflection first, fall back to heuristics
     if gateway is not None:
-        result = await _llm_reflect(gateway, state)
+        result = await _llm_reflect(gateway, state, tools)
         if result is not None:
             # Always run heuristic gap detection — the LLM may miss
             # sub-agent gaps even when task completes successfully
@@ -147,6 +179,11 @@ def _heuristic_reflect(
         and confidence in {Confidence.HIGH, Confidence.VERY_HIGH}
         and len(completed_steps) >= 3
     )
+    # Ground in objective deliverable evidence so a genuine success triggers
+    # evolution even when the heuristic's confidence bar isn't quite met.
+    should_evolve = _ground_should_evolve(
+        should_evolve, goal_text, completed_steps, errors, confidence
+    )
 
     reflection = ReflectionResult(
         summary=f"Executed {completed_count}/{total_steps} steps for: {goal_text[:80]}",
@@ -191,9 +228,90 @@ def _heuristic_reflect(
     return result
 
 
+def _format_available_tools(tools: ToolRegistry | None) -> str:
+    """Render the registered tools as a compact ``- name: description`` list.
+
+    Feeds the reflect LLM the real inventory so it does not re-flag a
+    capability (read/find/...) already provided by a builtin or by a tool
+    created earlier in the run. Best-effort: any registry access failure
+    degrades to ``"none registered"``.
+    """
+    if tools is None:
+        return "none registered"
+    try:
+        defs = tools.list_tools()
+    except Exception:  # noqa: BLE001 — mock registries / unavailable list_tools
+        return "none registered"
+
+    lines: list[str] = []
+    for d in defs:
+        fn = d.get("function", {}) if isinstance(d, dict) else {}
+        name = fn.get("name", "") if isinstance(fn, dict) else ""
+        if not name:
+            continue
+        desc = (fn.get("description", "") or "").strip()
+        # First line only, capped — keep the inventory compact.
+        desc = desc.split("\n", 1)[0][:90].strip()
+        lines.append(f"- {name}: {desc}" if desc else f"- {name}")
+
+    if not lines:
+        return "none registered"
+    return "\n".join(sorted(lines))
+
+
+def _format_step_results(completed_steps: list[Any] | None) -> str:
+    """Render completed steps as ``- description → result snippet`` lines.
+
+    The reflect LLM was previously fed only step *descriptions* — it could see
+    that a step was marked done but never *what it produced*. With no evidence
+    of success, a cautious model conservatively returns low confidence +
+    should_replan=True even when every step completed and the deliverable was
+    written (Q9: 3/3 steps done, file written, yet reflect kept replanning).
+    Surfacing the result text grounds the confidence judgment in real output.
+    """
+    if not completed_steps:
+        return "None yet"
+    lines: list[str] = []
+    for step in completed_steps[-5:]:
+        desc = (getattr(step, "description", "") or "").strip()
+        result = (getattr(step, "result", "") or "").strip()
+        # Collapse whitespace + cap so the evidence stays compact.
+        result = " ".join(result.split())[:160]
+        if result:
+            lines.append(f"- {desc} → {result}" if desc else f"- {result}")
+        elif desc:
+            lines.append(f"- {desc}")
+    return "\n".join(lines) if lines else "None yet"
+
+
+def _format_successful_tools(tool_results: list[Any] | None) -> str:
+    """Render successful tool calls as ``- name: output snippet`` lines.
+
+    Complements ``tool_errors`` (failures only): the reflect LLM must see what
+    *succeeded* — especially ``file_writer`` paths — to recognize that a
+    required deliverable was produced. Without this, a deliverable-producing
+    goal has no success evidence to raise confidence above LOW, so it never
+    stops replanning.
+    """
+    if not tool_results:
+        return "None"
+    lines: list[str] = []
+    for tr in tool_results:
+        if not getattr(tr, "success", False):
+            continue
+        output = (getattr(tr, "output", "") or "").strip()
+        if not output:
+            continue
+        name = getattr(tr, "tool_name", "tool")
+        output = " ".join(output.split())[:160]
+        lines.append(f"- {name}: {output}")
+    return "\n".join(lines[-8:]) if lines else "None"
+
+
 async def _llm_reflect(
     gateway: LLMGateway,
     state: AgentState,
+    tools: ToolRegistry | None = None,
 ) -> dict[str, Any] | None:
     """Attempt LLM-based reflection. Returns None on failure."""
     try:
@@ -230,14 +348,33 @@ async def _llm_reflect(
                 tool_errors.append(f"- {tr.tool_name}: {tr.error[:100]}")
         tool_errors_str = "\n".join(tool_errors[-3:]) if tool_errors else "None"
 
+        # Available-tool inventory: ground the LLM's missing_tools judgement in
+        # what is ACTUALLY registered. Without this the reflect LLM re-flags
+        # read/find/etc. capabilities already satisfied by builtins or by tools
+        # created earlier in the run — each new phrasing bypasses the
+        # attempted_tool_gaps string-dedup and drives an endless
+        # tool_create -> replan loop (Q9 never reached a deliverable).
+        available_tools = _format_available_tools(tools)
+
+        # Execution evidence: step results + successful tool calls. Without
+        # these the reflect LLM sees only step descriptions and tool ERRORS —
+        # never what a step actually produced or that file_writer succeeded —
+        # so it cannot confirm the deliverable exists and conservatively
+        # returns low confidence + should_replan=True forever (Q9 loop).
+        step_results = _format_step_results(completed_steps)
+        successful_tools = _format_successful_tools(tool_results)
+
         user_prompt = REFLECT_USER.format(
             goal_text=goal_text,
             completed_count=completed_count,
             total_steps=total_steps,
             completed_summary=completed_summary,
+            step_results=step_results,
+            successful_tools=successful_tools,
             error_count=len(errors),
             errors_summary=errors_summary,
             tool_errors=tool_errors_str,
+            available_tools=available_tools,
         )
 
         reflect_complexity = (
@@ -268,11 +405,19 @@ async def _llm_reflect(
             Confidence.MEDIUM if analysis.confidence >= 0.4 else Confidence.LOW
         )
 
+        # Ground should_evolve in objective success (deliverable on disk, no
+        # errors, ≥3 steps). The model conservatively returns False even on
+        # HIGH-confidence deliverable successes (Q7/Q8), so evolution never
+        # fired across the battery without this override.
+        should_evolve = _ground_should_evolve(
+            bool(analysis.should_evolve), goal_text, completed_steps, errors, conf
+        )
+
         reflection = ReflectionResult(
             summary=analysis.progress_assessment[:200],
             lessons_learned=analysis.lessons_learned,
             confidence=conf,
-            should_evolve=analysis.should_evolve,
+            should_evolve=should_evolve,
             should_replan=analysis.should_replan,
             memory_observations=analysis.memory_observations,
             cost_efficiency=1.0,
@@ -280,7 +425,7 @@ async def _llm_reflect(
 
         logger.info(
             f"LLM Reflection: confidence={conf.value}, "
-            f"should_evolve={analysis.should_evolve}, "
+            f"should_evolve={should_evolve} (model={analysis.should_evolve}), "
             f"should_replan={analysis.should_replan}"
         )
 

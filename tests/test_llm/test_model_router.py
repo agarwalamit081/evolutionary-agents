@@ -69,6 +69,29 @@ class TestModelRouterRoute:
         result = router.route(TaskComplexity.CRITICAL)
         assert isinstance(result, str)
 
+    def test_route_returns_primary_when_key_present(self) -> None:
+        """F15: route() returns the complexity's primary (chain_key) model when
+        its provider key is set — not the first fallback. Previously the primary
+        was bypassed: _route_from_chain walked FALLBACK_CHAINS[chain_key], which
+        excludes the primary, so COMPLEX→claude-haiku silently resolved to
+        deepseek-v4-flash (its first fallback with a key)."""
+        settings = Settings()
+        settings.llm.anthropic_api_key = "test-anthropic-key"
+        router = ModelRouter(settings)
+        assert router.route(TaskComplexity.COMPLEX) == "claude-haiku-4-5-20251001"
+        assert router.route(TaskComplexity.SIMPLE) == "claude-haiku-4-5-20251001"
+        assert router.route(TaskComplexity.CRITICAL) == "claude-sonnet-4-6"
+
+    def test_route_falls_to_chain_when_primary_provider_lacks_key(self) -> None:
+        """When the primary's provider has no key, route falls back to the
+        chain's first model whose provider does have a key."""
+        settings = Settings()
+        settings.llm.anthropic_api_key = None
+        settings.llm.deepseek_api_key = "test-deepseek-key"
+        router = ModelRouter(settings)
+        # claude-haiku (anthropic) skipped → first in its chain with a key.
+        assert router.route(TaskComplexity.COMPLEX) == "deepseek-v4-flash"
+
     def test_complexity_tier_map_chain_keys_are_valid(self) -> None:
         """COMPLEXITY_TIER_MAP chain keys exist in FALLBACK_CHAINS."""
         from src.config.model_registry import FALLBACK_CHAINS

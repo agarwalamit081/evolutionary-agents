@@ -9,4 +9,10 @@ Current content (if available):
 Performance context:
 {{ performance_context }}
 
+{% if feedback %}
+
+---
+PREVIOUS ATTEMPT FAILED VALIDATION. Regenerate complete, syntactically-valid output.
+Error: {{ feedback }}
+{% endif %}
 Generate a specific, testable mutation that addresses this opportunity.

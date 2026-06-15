@@ -13,6 +13,7 @@ from src.graph.enums import MutationType
 from src.safety.pipeline import SafetyPipeline
 
 if TYPE_CHECKING:
+    from src.evolution.persister import EvolutionPersister
     from src.llm.gateway import LLMGateway
 
 
@@ -28,9 +29,15 @@ class SelfEvolutionEngine:
         self,
         safety_pipeline: SafetyPipeline | None = None,
         gateway: LLMGateway | None = None,
+        persister: EvolutionPersister | None = None,
+        max_retries: int = 0,
     ) -> None:
         self._safety = safety_pipeline or SafetyPipeline()
         self._gateway = gateway
+        self._persister = persister
+        # Max regeneration attempts after a validation failure. 0 = single attempt
+        # (no retry); the loop runs max(1, max_retries + 1) times total.
+        self._max_retries = max_retries
         self._generation = 0
 
     async def analyze(
@@ -114,6 +121,7 @@ class SelfEvolutionEngine:
         self,
         opportunity: dict[str, Any],
         current_content: str | None = None,
+        feedback: str = "",
     ) -> dict[str, Any]:
         """Phase 2: Generate a mutation proposal.
 
@@ -122,6 +130,9 @@ class SelfEvolutionEngine:
         Args:
             opportunity: The improvement opportunity from analysis.
             current_content: Current code/prompt to mutate.
+            feedback: Validation error from a previous attempt; fed back to the
+                LLM so it regenerates syntactically-valid output. Ignored by the
+                heuristic fallback.
 
         Returns:
             Mutation proposal with original and mutated content.
@@ -133,7 +144,7 @@ class SelfEvolutionEngine:
 
         # Try LLM-based generation first
         if self._gateway is not None:
-            result = await self._llm_generate(opportunity, current_content)
+            result = await self._llm_generate(opportunity, current_content, feedback=feedback)
             if result is not None:
                 return result
 
@@ -144,6 +155,7 @@ class SelfEvolutionEngine:
         self,
         opportunity: dict[str, Any],
         current_content: str | None = None,
+        feedback: str = "",
     ) -> dict[str, Any] | None:
         """Generate mutation via LLM. Returns None on failure."""
         try:
@@ -168,6 +180,7 @@ class SelfEvolutionEngine:
                 priority=priority,
                 current_content=current_content or "(no current content available)",
                 performance_context=perf_ctx or "(no specific performance data)",
+                feedback=feedback,
             )
             messages: list[dict[str, str]] = [
                 {"role": "system", "content": str(EVOLUTION_GENERATE_SYSTEM)},
@@ -567,14 +580,65 @@ class SelfEvolutionEngine:
                 "mutations_deployed": 0,
             }
 
-        # Phase 2: Generate (take highest priority opportunity)
+        # Phase 2: Generate with retry-with-feedback (highest priority opportunity)
         best_opportunity = opportunities[0]
-        proposal = await self.generate(best_opportunity)
 
-        # Phase 3: Validate (safety pipeline layers 1-5)
-        validation = await self.validate(proposal)
+        # Persist the chain once per cycle. The engine's in-memory result remains
+        # the source of truth — if persistence fails, chain_id is None and every
+        # downstream persister call is a safe no-op (it guards on None).
+        chain_id = None
+        if self._persister is not None:
+            chain_id = await self._persister.create_chain(
+                trigger_reason=str(best_opportunity.get("description", "evolution_cycle")),
+                extra_data={"priority": best_opportunity.get("priority")},
+            )
+
+        # Retry loop: regenerate with the validation error fed back to the LLM on
+        # each attempt (rules/llm-integration.md: "send the error back to the
+        # model"). max_retries=0 → a single attempt; the loop runs
+        # max(1, max_retries + 1) times total. The heuristic fallback ignores the
+        # feedback but is still bounded by the same budget.
+        feedback = ""
+        proposal: dict[str, Any] = {}
+        validation: dict[str, Any] = {"passed": False}
+        attempts = 0
+        max_attempts = max(1, self._max_retries + 1)
+        for attempt in range(1, max_attempts + 1):
+            attempts = attempt
+            proposal = await self.generate(best_opportunity, feedback=feedback)
+            if self._persister is not None:
+                await self._persister.record_event(
+                    chain_id,
+                    "generation_attempt",
+                    {
+                        "attempt": attempt,
+                        "source": "llm" if proposal.get("model_used") else "heuristic",
+                        "model_used": proposal.get("model_used"),
+                        "tokens_used": proposal.get("tokens_used", 0),
+                    },
+                )
+            validation = await self.validate(proposal)
+            if validation["passed"]:
+                break
+            feedback = str(validation.get("reason", "validation failed"))
+
+        if self._persister is not None:
+            await self._persister.record_event(
+                chain_id,
+                "validation_result",
+                {
+                    "passed": validation["passed"],
+                    "reason": validation.get("reason"),
+                    "attempts": attempts,
+                },
+            )
+
+        # Phase 3: Validate (safety pipeline layers 1-5) — never passed after retries
         if not validation["passed"]:
             rejection = self.reject(proposal, validation)
+            if self._persister is not None:
+                await self._persister.record_mutation(chain_id, proposal, status="rejected")
+                await self._persister.complete_chain(chain_id, "validation_failed")
             return {
                 "status": "validation_failed",
                 "deployed": False,
@@ -584,12 +648,16 @@ class SelfEvolutionEngine:
                 "proposal": proposal,
                 "validation": validation,
                 "rejection": rejection,
+                "chain_id": chain_id,
             }
 
         # Phase 4: Sandbox test (safety pipeline layer 6)
         sandbox_result = await self.sandbox_test(proposal, sandbox)
         if not sandbox_result.get("passed", True):
             rejection = self.reject(proposal, sandbox_result)
+            if self._persister is not None:
+                await self._persister.record_mutation(chain_id, proposal, status="rejected")
+                await self._persister.complete_chain(chain_id, "sandbox_failed")
             return {
                 "status": "sandbox_failed",
                 "deployed": False,
@@ -600,6 +668,7 @@ class SelfEvolutionEngine:
                 "validation": validation,
                 "sandbox_result": sandbox_result,
                 "rejection": rejection,
+                "chain_id": chain_id,
             }
 
         # Phase 5: A/B test
@@ -614,6 +683,32 @@ class SelfEvolutionEngine:
             deployment = self.reject(proposal, ab_result)
 
         deployed = deployment.get("deployed", False)
+
+        # Persist the final mutation + terminal outcome (deployed|rejected).
+        if self._persister is not None:
+            mutation_id = await self._persister.record_mutation(
+                chain_id, proposal, status="generated"
+            )
+            if deployed:
+                await self._persister.update_mutation_status(mutation_id, "deployed")
+                await self._persister.record_event(
+                    chain_id,
+                    "deployed",
+                    {
+                        "commit_hash": deployment.get("commit_hash"),
+                        "generation": deployment.get("generation"),
+                    },
+                )
+                await self._persister.complete_chain(chain_id, "deployed")
+            else:
+                await self._persister.update_mutation_status(mutation_id, "rejected")
+                await self._persister.record_event(
+                    chain_id,
+                    "rejected",
+                    {"reason": deployment.get("reason")},
+                )
+                await self._persister.complete_chain(chain_id, "rejected")
+
         return {
             "status": "deployed" if deployed else "rejected",
             "deployed": deployed,
@@ -625,4 +720,5 @@ class SelfEvolutionEngine:
             "deployment": deployment,
             "mutations_proposed": 1,
             "mutations_deployed": 1 if deployed else 0,
+            "chain_id": chain_id,
         }

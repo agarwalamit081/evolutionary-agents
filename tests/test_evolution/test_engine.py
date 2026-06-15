@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -77,6 +78,21 @@ def _make_mock_git_tracker() -> MagicMock:
     mock_tracker.apply_mutation = AsyncMock(return_value=None)
     mock_tracker.snapshot = AsyncMock(return_value="abcdef1234567890")
     return mock_tracker
+
+
+def _make_mock_persister() -> MagicMock:
+    """Create a mock EvolutionPersister with all async methods stubbed.
+
+    Returns realistic values (chain/mutation UUIDs, True for status updates)
+    so the engine's persistence calls flow through their normal branches.
+    """
+    p = MagicMock()
+    p.create_chain = AsyncMock(return_value=uuid.uuid4())
+    p.record_mutation = AsyncMock(return_value=uuid.uuid4())
+    p.update_mutation_status = AsyncMock(return_value=True)
+    p.record_event = AsyncMock(return_value=None)
+    p.complete_chain = AsyncMock(return_value=True)
+    return p
 
 
 # ---------------------------------------------------------------------------
@@ -884,3 +900,147 @@ class TestEvolutionEngine:
         mock_tracker.apply_mutation.assert_awaited_once()
         called_path = mock_tracker.apply_mutation.call_args[0][0]
         assert "evolution/" in called_path
+
+    # ── Retry-with-feedback + persistence tests ──────────────────────
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_retries_and_feeds_back_validation_error(self) -> None:
+        """A validation failure triggers a retry; the error is fed back to the LLM."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(side_effect=[
+            {
+                "passed": False,
+                "layers": {"sec": {"passed": False}},
+                "reason": "syntax error: unclosed paren at line 41",
+            },
+            {"passed": True, "layers": {}},
+        ])
+        mock_gateway = _make_mock_gateway()
+        mock_sandbox = _make_mock_sandbox(success=True, duration_seconds=0.1)
+
+        engine = SelfEvolutionEngine(
+            safety_pipeline=mock_safety, gateway=mock_gateway, max_retries=2,
+        )
+        result = await engine.run_cycle(
+            execution_history=[], failure_patterns=["timeout"],
+            sandbox=mock_sandbox,
+        )
+
+        # Initial attempt + one retry that passed.
+        assert mock_gateway.acompletion.await_count == 2
+        # The retry's user message contains the fed-back validation error block;
+        # the initial attempt's message must NOT contain it.
+        first_messages = mock_gateway.acompletion.await_args_list[0].kwargs["messages"]
+        retry_messages = mock_gateway.acompletion.await_args_list[1].kwargs["messages"]
+        assert "PREVIOUS ATTEMPT FAILED VALIDATION" not in first_messages[1]["content"]
+        assert "PREVIOUS ATTEMPT FAILED VALIDATION" in retry_messages[1]["content"]
+        assert "Failed safety layers" in retry_messages[1]["content"]
+        # Retry succeeded → deployed.
+        assert result["status"] == "deployed"
+        assert result["deployed"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_retries_exhaust_on_persistent_failure(self) -> None:
+        """Always-failing validation → max_retries+1 attempts, status validation_failed."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(return_value={
+            "passed": False, "layers": {"sec": {"passed": False}}, "reason": "always bad",
+        })
+        mock_gateway = _make_mock_gateway()
+
+        engine = SelfEvolutionEngine(
+            safety_pipeline=mock_safety, gateway=mock_gateway, max_retries=2,
+        )
+        result = await engine.run_cycle(
+            execution_history=[], failure_patterns=["timeout"],
+        )
+
+        # 1 initial + 2 retries.
+        assert mock_gateway.acompletion.await_count == 3
+        assert result["status"] == "validation_failed"
+        assert result["deployed"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_max_retries_zero_single_attempt(self) -> None:
+        """max_retries=0 (default) → exactly one generate call, no retry."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(return_value={
+            "passed": False, "layers": {}, "reason": "bad",
+        })
+        mock_gateway = _make_mock_gateway()
+        engine = SelfEvolutionEngine(safety_pipeline=mock_safety, gateway=mock_gateway)
+        result = await engine.run_cycle(
+            execution_history=[], failure_patterns=["timeout"],
+        )
+
+        assert mock_gateway.acompletion.await_count == 1
+        assert result["status"] == "validation_failed"
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_persists_on_validation_failed(self) -> None:
+        """A validation failure records a rejected mutation + closed chain."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(return_value={
+            "passed": False, "layers": {"sec": {"passed": False}}, "reason": "bad",
+        })
+        mock_persister = _make_mock_persister()
+        engine = SelfEvolutionEngine(
+            safety_pipeline=mock_safety, persister=mock_persister, max_retries=0,
+        )
+        result = await engine.run_cycle(
+            execution_history=[], failure_patterns=["timeout"],
+        )
+
+        assert result["status"] == "validation_failed"
+        assert result["chain_id"] is mock_persister.create_chain.return_value
+        mock_persister.create_chain.assert_awaited_once()
+        # Mutation recorded as rejected.
+        mock_persister.record_mutation.assert_awaited_once()
+        assert mock_persister.record_mutation.await_args.kwargs["status"] == "rejected"
+        # Chain closed as validation_failed.
+        mock_persister.complete_chain.assert_awaited_once()
+        assert mock_persister.complete_chain.await_args.args[1] == "validation_failed"
+        # Telemetry events recorded (generation_attempt + validation_result).
+        assert mock_persister.record_event.await_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_persists_on_deployed(self) -> None:
+        """A successful deploy transitions the mutation to deployed + closes chain."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(return_value={"passed": True, "layers": {}})
+        mock_sandbox = _make_mock_sandbox(success=True, duration_seconds=0.1)
+        mock_persister = _make_mock_persister()
+        mock_gateway = _make_mock_gateway()
+        engine = SelfEvolutionEngine(
+            safety_pipeline=mock_safety,
+            gateway=mock_gateway,
+            persister=mock_persister,
+        )
+        result = await engine.run_cycle(
+            execution_history=[], failure_patterns=["timeout"], sandbox=mock_sandbox,
+        )
+
+        assert result["status"] == "deployed"
+        mock_persister.record_mutation.assert_awaited_once()
+        mock_persister.update_mutation_status.assert_awaited_once()
+        assert mock_persister.update_mutation_status.await_args.args[1] == "deployed"
+        mock_persister.complete_chain.assert_awaited_once()
+        assert mock_persister.complete_chain.await_args.args[1] == "deployed"
+        # A 'deployed' telemetry event was recorded.
+        event_types = [c.args[1] for c in mock_persister.record_event.await_args_list]
+        assert "deployed" in event_types
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_no_persister_backward_compat(self) -> None:
+        """Without a persister, run_cycle still works (chain_id is None)."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(return_value={
+            "passed": False, "layers": {"sec": {"passed": False}}, "reason": "bad",
+        })
+        engine = SelfEvolutionEngine(safety_pipeline=mock_safety)
+        result = await engine.run_cycle(
+            execution_history=[], failure_patterns=["timeout"],
+        )
+
+        assert result["status"] == "validation_failed"
+        assert result["chain_id"] is None

@@ -22,8 +22,21 @@ Tool selection guidelines:
 - Use terminal_command for read-only shell needs (jq on JSON, curl GET, git
   history) that code_executor's locked sandbox cannot perform
 - Use code_executor only for: computations, data transformations, quick scripts
-- When a step produces persistent output, save it via file_writer to .turing/workspace/
 - Variables in code_executor do NOT persist between steps
+
+DELIVERABLE RULE (critical):
+- If the goal or step asks you to SAVE, WRITE, CREATE, or PRODUCE a file,
+  document, report, summary, or ANY named artifact, you MUST call the
+  file_writer tool with the FULL content of that artifact. Producing the
+  deliverable as a plain text reply WITHOUT calling file_writer is a FAILURE —
+  the file must actually exist on disk when you are done.
+- file_writer writes under the sandboxed results/ directory. Use a relative
+  path like "results/<filename>.md" (a leading "results/" is fine and is
+  normalized away). Do not use absolute paths or .turing/workspace (that is
+  file_reader's read sandbox, not the write target).
+- Compose the complete artifact content in the content argument in one
+  file_writer call. If the step only produces intermediate reasoning (not a
+  named deliverable), no file write is needed.
 
 Execute this step. If you need to use a tool, call it. If the step is straightforward, provide the answer directly.
 Be concise and focused on completing this specific step.

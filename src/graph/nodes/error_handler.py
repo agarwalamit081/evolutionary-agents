@@ -27,8 +27,14 @@ async def error_handler_node(state: AgentState) -> dict[str, Any]:
     max_iterations = state.get("max_iterations", 25)
 
     if not errors:
-        logger.warning("Error handler called with no errors")
-        return {"phase": Phase.COMPLETE, "is_complete": True}
+        # Reaching the error handler with nothing in ``errors`` is itself a
+        # routing anomaly — genuine errors populate ``errors``, and tool
+        # failures live in ``tool_results`` (recovered by route_after_execute).
+        # Do NOT declare the task complete: that reports a false success for a
+        # run that may have produced nothing. Route to verify so the actual
+        # state is judged honestly. (F14.)
+        logger.warning("Error handler called with no errors; routing to verify")
+        return {"phase": Phase.VERIFY}
 
     last_error = str(errors[-1])
     logger.error(f"Handling error: {last_error[:200]}")

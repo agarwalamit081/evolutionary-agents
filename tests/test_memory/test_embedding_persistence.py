@@ -73,6 +73,60 @@ class TestColdMemoryEmbedding:
         assert session.add.call_args.args[0].embedding is None
 
 
+class TestColdMemorySemanticSearch:
+    """cold.search_by_query embeds the query and delegates to search_by_embedding.
+
+    Semantic recall is the path MemoryManager.retrieve_context now uses for the
+    query (Phase C). It owns query embedding so callers need no generator ref.
+    """
+
+    @pytest.mark.asyncio
+    async def test_embeds_query_and_delegates(self) -> None:
+        """The query is embedded, then search_by_embedding is called with that vector."""
+        vec = [0.3] * 768
+        gen = _mock_generator(vec)
+        cold = ColdMemory(session=_mock_session(), generator=gen)
+        cold.search_by_embedding = AsyncMock(return_value=[
+            {"id": "c1", "content": "match", "similarity": 0.88},
+        ])
+
+        results = await cold.search_by_query(query="find me", limit=3)
+
+        gen.generate.assert_awaited_once_with("find me")
+        cold.search_by_embedding.assert_awaited_once_with(
+            query_embedding=vec, limit=3, min_importance=0.0, episode_type=None
+        )
+        assert results == [{"id": "c1", "content": "match", "similarity": 0.88}]
+
+    @pytest.mark.asyncio
+    async def test_no_generator_returns_empty(self) -> None:
+        """Without a generator, semantic search is unavailable → empty list."""
+        cold = ColdMemory(session=_mock_session())
+        assert await cold.search_by_query(query="q") == []
+
+    @pytest.mark.asyncio
+    async def test_empty_query_returns_empty(self) -> None:
+        """An empty query short-circuits — no embedding, no DB hit."""
+        gen = _mock_generator([0.1] * 768)
+        cold = ColdMemory(session=_mock_session(), generator=gen)
+        cold.search_by_embedding = AsyncMock(return_value=[{"id": "x"}])
+
+        assert await cold.search_by_query(query="") == []
+        gen.generate.assert_not_awaited()
+        cold.search_by_embedding.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_embedding_failure_returns_empty(self) -> None:
+        """An embedding error must not propagate — retrieval degrades to empty."""
+        gen = MagicMock()
+        gen.generate = AsyncMock(side_effect=RuntimeError("embed service down"))
+        cold = ColdMemory(session=_mock_session(), generator=gen)
+        cold.search_by_embedding = AsyncMock(return_value=[{"id": "x"}])
+
+        assert await cold.search_by_query(query="q") == []
+        cold.search_by_embedding.assert_not_awaited()
+
+
 class TestWarmMemoryEmbedding:
     """warm.store() writes a memory_embeddings row (§10.2)."""
 

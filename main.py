@@ -63,7 +63,9 @@ def main(
         max_iterations = settings.agent.max_iterations
 
     # Run the agent
-    result = asyncio.run(_run_agent(goal_text, max_iterations, no_evolution, run_id))
+    result = asyncio.run(
+        _run_agent(goal_text, max_iterations, no_evolution, run_id, model)
+    )
 
     click.echo("\n" + "=" * 60)
     click.echo("📋 Result:")
@@ -77,6 +79,7 @@ async def _run_agent(
     max_iterations: int | None = None,
     no_evolution: bool = False,
     run_id: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """Run the agent graph to completion.
 
@@ -87,6 +90,9 @@ async def _run_agent(
         goal_text: The goal to accomplish.
         max_iterations: Maximum graph iterations.
         no_evolution: Skip evolution phase.
+        model: Optional pinned model (registry key or litellm id) that
+            overrides complexity routing for every LLM call in this run.
+            Threads the CLI ``--model`` flag through to ``LLMGateway``.
 
     Returns:
         Final agent state.
@@ -125,7 +131,7 @@ async def _run_agent(
     state = initial_state(goal_text, thread_id, max_iterations, no_evolution=no_evolution)
 
     # Instantiate dependencies
-    gateway = _create_gateway(settings)
+    gateway = _create_gateway(settings, pinned_model=model)
 
     # Inject Redis prompt cache for LLM response caching
     if gateway is not None:
@@ -264,12 +270,18 @@ async def _run_agent(
     return result_dict
 
 
-def _create_gateway(settings: Settings):
-    """Create LLMGateway if provider key is available."""
+def _create_gateway(settings: Settings, pinned_model: str | None = None):
+    """Create LLMGateway if provider key is available.
+
+    Args:
+        settings: Application settings.
+        pinned_model: Optional model (registry key or litellm id) that
+            overrides complexity routing for every call in this run.
+    """
     try:
         from src.llm.gateway import LLMGateway
 
-        return LLMGateway(settings)
+        return LLMGateway(settings, pinned_model=pinned_model)
     except Exception:
         logger.debug("LLMGateway not available, using heuristic fallback")
         return None

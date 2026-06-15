@@ -334,7 +334,7 @@ class TestCacheInvalidate:
         """When no keys match, delete is not called."""
         async def _empty_async_iter():
             return
-            yield  # noqa: unreachable — makes this an async generator
+            yield  # presence (not reachability) makes this an async generator
 
         mock_redis.scan_iter = MagicMock(return_value=_empty_async_iter())
 

@@ -71,13 +71,31 @@ class TestRouteAfterExecute:
         result = route_after_execute(sample_state)
         assert result == "error_handler"
 
-    def test_route_after_execute_to_error_on_non_retriable_tool_error(self, sample_state: dict[str, Any]) -> None:
-        """When a non-retriable tool error occurs, route to error_handler."""
+    def test_route_after_execute_retries_on_persistent_tool_error(self, sample_state: dict[str, Any]) -> None:
+        """A non-timeout tool failure (unknown tool, permission denied, …) is
+        recoverable: retry execute so the LLM sees the failure in context and
+        picks a valid tool. Previously this routed to error_handler, which
+        falsely completed the run because tool failures live in tool_results,
+        not errors (F14)."""
         sample_state["tool_results"] = [
             ToolResult(tool_name="code_executor", success=False, output="", error="permission denied"),
         ]
         result = route_after_execute(sample_state)
-        assert result == "error_handler"
+        assert result == "execute"
+
+    def test_route_after_execute_at_cap_with_tool_failure_routes_to_reflect(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """A persistently-failing tool retries only until the iteration cap,
+        then reflects — never loops execute→execute into LangGraph's recursion
+        limit. The max-iterations guard must run before the recoverable-tool
+        retry (F14)."""
+        sample_state["tool_results"] = [
+            ToolResult(tool_name="find", success=False, output="", error="Unknown tool: find"),
+        ]
+        sample_state["iteration_count"] = 10
+        sample_state["max_iterations"] = 10
+        assert route_after_execute(sample_state) == "reflect"
 
     def test_route_after_execute_loops_on_retriable_tool_error(self, sample_state: dict[str, Any]) -> None:
         """When a retriable tool error occurs (timeout/rate), loop back to execute."""
@@ -208,6 +226,26 @@ class TestRouteAfterVerify:
         result = route_after_verify(sample_state)
         assert result == "store_memory"
 
+    def test_route_after_verify_evolve_when_reflection_missing_but_succeeded(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """Folding-bypass regression: reflect's folding path early-returns before
+        computing reflection (reflect.py:87-92), so a successful multi-step run can
+        reach verify with reflection=None. route_after_verify must still ground
+        should_evolve from objective evidence (>=3 completed steps, HIGH confidence,
+        no errors) and route to evolve — otherwise evolution never fires on goals
+        that fold mid-run (battery: 0 mutations across all 10 queries)."""
+        sample_state["is_complete"] = True
+        sample_state["reflection"] = None  # simulates the folding bypass
+        sample_state["completed_steps"] = [
+            PlanStep(id=f"s{i}", description=f"step {i}", status="completed", result="ok")
+            for i in range(5)
+        ]
+        sample_state["errors"] = []
+        sample_state["confidence"] = Confidence.HIGH
+        result = route_after_verify(sample_state)
+        assert result == "evolve"
+
     def test_route_after_verify_retries_on_low_confidence(self, sample_state: dict[str, Any]) -> None:
         """When not complete with low confidence and steps remaining, route back to execute."""
         sample_state["is_complete"] = False
@@ -292,11 +330,12 @@ class TestRouteAfterError:
         result = route_after_error(sample_state)
         assert result == "complete"
 
-    def test_route_after_error_to_complete_when_no_errors(self, sample_state: dict[str, Any]) -> None:
-        """When no errors present, route to complete."""
+    def test_route_after_error_to_verify_when_no_errors(self, sample_state: dict[str, Any]) -> None:
+        """No errors to handle is an anomaly, not a success — route to verify so
+        the actual state is judged instead of falsely completing the run (F14)."""
         sample_state["errors"] = []
         result = route_after_error(sample_state)
-        assert result == "complete"
+        assert result == "verify"
 
 
 class TestRouteAfterStore:
@@ -334,11 +373,63 @@ class TestRouteAfterReflect:
         assert result == "verify"
 
     def test_route_after_reflect_to_plan(self, sample_state: dict[str, Any]) -> None:
-        """should_replan=True → route to plan."""
+        """should_replan=True on an in-progress-but-stuck plan (steps remain but
+        none completed) → route to plan for a genuine replan."""
         sample_state["confidence"] = Confidence.HIGH
         sample_state["reflection"] = ReflectionResult(summary="replan", should_replan=True)
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="step 1", status="pending"),
+            PlanStep(id="s2", description="step 2", status="pending"),
+        ]
+        sample_state["current_step_index"] = 0
+        sample_state["completed_steps"] = []  # stuck: nothing completed
+        sample_state["errors"] = []
         result = route_after_reflect(sample_state)
         assert result == "plan"
+
+    def test_route_after_reflect_replan_in_progress_progressing_continues_execute(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """should_replan=True while a plan is in-progress AND progressing must
+        NOT discard completed work — continue executing so the plan finishes and
+        verify can judge it. (Q9: the folding checkpoint interrupted a
+        succeeding plan mid-way every ~6 iterations; each replan regenerated a
+        fresh plan that got interrupted the same way, looping at step 1/3.)"""
+        sample_state["confidence"] = Confidence.HIGH
+        sample_state["reflection"] = ReflectionResult(summary="replan", should_replan=True)
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="step 1", status="completed"),
+            PlanStep(id="s2", description="step 2", status="pending"),
+            PlanStep(id="s3", description="step 3", status="pending"),
+        ]
+        sample_state["current_step_index"] = 1  # 1 step done, 2 remain
+        sample_state["completed_steps"] = [
+            PlanStep(id="s1", description="step 1", status="completed", result="done")
+        ]
+        sample_state["errors"] = []
+        result = route_after_reflect(sample_state)
+        assert result == "execute"
+
+    def test_route_after_reflect_replan_exhausted_routes_verify(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """should_replan=True with the plan exhausted routes to verify (the
+        objective deliverable check) before regenerating — if the deliverable
+        is present verify completes instead of looping plan->execute->plan."""
+        sample_state["confidence"] = Confidence.HIGH
+        sample_state["reflection"] = ReflectionResult(summary="replan", should_replan=True)
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="step 1", status="completed"),
+            PlanStep(id="s2", description="step 2", status="completed"),
+        ]
+        sample_state["current_step_index"] = 2  # all steps done
+        sample_state["completed_steps"] = [
+            PlanStep(id="s1", description="step 1", status="completed", result="done"),
+            PlanStep(id="s2", description="step 2", status="completed", result="done"),
+        ]
+        sample_state["errors"] = []
+        result = route_after_reflect(sample_state)
+        assert result == "verify"
 
     def test_route_after_reflect_low_confidence_to_execute(self, sample_state: dict[str, Any]) -> None:
         """LOW confidence with remaining steps → route back to execute."""

@@ -9,6 +9,7 @@ from loguru import logger
 
 from src.config import get_settings
 from src.graph.enums import Confidence
+from src.graph.nodes.reflect import _ground_should_evolve
 from src.graph.state import AgentState
 
 
@@ -27,29 +28,35 @@ def route_after_execute(state: AgentState) -> str:
     plan_steps = state.get("plan_steps", [])
     step_index = state.get("current_step_index", 0)
 
-    # Check for non-retriable errors
+    # Non-retriable: only auth/authorization errors abort the run.
     if errors:
         last_error = errors[-1] if isinstance(errors, list) else str(errors)
         if "authentication" in last_error.lower() or "authorization" in last_error.lower():
             logger.warning("Non-retriable auth error, routing to error_handler")
             return "error_handler"
 
-    # Check for tool execution failures that are retriable
+    # BOUND (must precede the recoverable-tool-error retry below): once the
+    # iteration budget is exhausted, stop retrying and reflect on what we have.
+    # Without this ordering a persistently-failing tool would loop
+    # execute→execute until LangGraph's recursion limit crashed the run.
+    if iteration_count >= max_iterations:
+        logger.info(f"Max iterations ({max_iterations}) reached, routing to reflect")
+        return "reflect"
+
+    # Recoverable: a failed tool call (timeout, rate limit, unknown tool,
+    # permission error, …) loops back to execute so the LLM sees the failure
+    # in tool_results_ctx / the message thread and retries with a valid tool or
+    # different arguments. This MUST NOT route to error_handler — tool failures
+    # live in ``tool_results``, not ``errors``, so error_handler would see
+    # "nothing to handle" and falsely declare the task complete (F14: a
+    # hallucinated tool name aborted the run with is_complete=True and no
+    # deliverable). Retries are bounded by the max-iterations→reflect guard.
     if tool_results:
         last_result = tool_results[-1]
         if hasattr(last_result, "success") and not last_result.success:
             error_str = getattr(last_result, "error", "") or ""
-            if "timeout" in error_str.lower() or "rate" in error_str.lower():
-                logger.info("Retriable tool error, continuing execute loop")
-                return "execute"
-            # Non-retriable tool error
-            logger.warning(f"Non-retriable tool error: {error_str[:100]}")
-            return "error_handler"
-
-    # Max iterations reached → reflect on what we have
-    if iteration_count >= max_iterations:
-        logger.info(f"Max iterations ({max_iterations}) reached, routing to reflect")
-        return "reflect"
+            logger.info(f"Recoverable tool error, retrying execute: {error_str[:100]}")
+            return "execute"
 
     # Plan exhausted → reflect
     if plan_steps and step_index >= len(plan_steps):
@@ -128,7 +135,42 @@ def route_after_reflect(state: AgentState) -> str:
 
     # Check for replanning trigger
     if hasattr(reflection, "should_replan") and reflection.should_replan:
-        logger.info("Reflection suggests replanning")
+        plan_steps = state.get("plan_steps", [])
+        step_index = state.get("current_step_index", 0)
+        completed_steps = state.get("completed_steps", [])
+        errors = state.get("errors", [])
+        has_remaining_steps = bool(plan_steps) and step_index < len(plan_steps)
+        progressing = bool(completed_steps) and not errors
+
+        # A replan discards the current plan. Guard two pathological loop
+        # paths so a should_replan=True reflection cannot stall the run:
+        # (a) Mid-plan replans: the memory-folding checkpoint fires ~every 6
+        #     iterations DURING a plan and routes here. If steps are succeeding
+        #     and there are no errors, replanning discards completed work and
+        #     regenerates a fresh plan that gets interrupted the same way — the
+        #     plan never finishes (Q9 looped at step 1/3 forever). Continue
+        #     executing so the plan completes and verify can judge it.
+        # (b) Exhausted-plan replans: route to verify for the objective
+        #     deliverable check BEFORE regenerating. If the deliverable is
+        #     present verify completes; if not, route_after_verify replans.
+        #     Without this, a finished deliverable-producing goal replans
+        #     forever because the reflect LLM rarely self-reports done.
+        # (c) In-progress but genuinely stuck (no step completed, or errors) is
+        #     the one case where a direct replan is warranted — keep it.
+        if has_remaining_steps and progressing:
+            logger.info(
+                "Reflect suggests replan but plan is in-progress and "
+                "progressing (steps remaining, steps completed, no errors); "
+                "continuing execution instead of discarding completed work"
+            )
+            return "execute"
+        if not has_remaining_steps:
+            logger.info(
+                "Reflect suggests replan with plan exhausted; routing to "
+                "verify for objective deliverable check before replanning"
+            )
+            return "verify"
+        logger.info("Reflection suggests replanning (plan in-progress but not progressing)")
         return "plan"
 
     # Check confidence level
@@ -216,15 +258,34 @@ def route_after_verify(state: AgentState) -> str:
     if is_complete:
         no_evolution = bool(state.get("no_evolution", False))
 
-        should_evolve = False
-        if reflection and hasattr(reflection, "should_evolve"):
-            should_evolve = reflection.should_evolve
+        # Ground should_evolve at the decision point. reflect computes this, but
+        # its folding path early-returns before reflection runs (reflect.py:87-92),
+        # so a successful multi-step run can reach verify with reflection unset and
+        # should_evolve never computed — evolution then never fires (0 mutations
+        # across the full battery). Re-derive from objective evidence (deliverable
+        # on disk, else HIGH confidence + >=3 steps + no errors) so genuine
+        # successes route to evolve regardless of which reflect path ran.
+        proposed = bool(reflection.should_evolve) if (
+            reflection is not None and hasattr(reflection, "should_evolve")
+        ) else False
+        goal = state.get("current_goal")
+        goal_text = goal.text if goal is not None else ""
+        should_evolve = _ground_should_evolve(
+            proposed,
+            goal_text,
+            state.get("completed_steps", []),
+            state.get("errors", []),
+            confidence,
+        )
 
         if should_evolve:
             if no_evolution:
                 logger.info("Evolution skipped (--no-evolution in state), routing to store_memory")
                 return "store_memory"
-            logger.info("Verification passed, triggering evolution")
+            logger.info(
+                f"Verification passed (should_evolve proposed={proposed}, grounded), "
+                f"triggering evolution"
+            )
             return "evolve"
         return "store_memory"
 
@@ -329,7 +390,12 @@ def route_after_error(state: AgentState) -> str:
     max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
 
     if not errors:
-        return "complete"
+        # No error to handle is an anomaly (genuine errors populate ``errors``;
+        # tool failures live in ``tool_results`` and are recovered in
+        # route_after_execute), not a success. Judge the actual state via verify
+        # instead of falsely completing the run. (F14.)
+        logger.warning("Error handler reached with no errors; routing to verify")
+        return "verify"
 
     last_error = str(errors[-1]).lower()
 

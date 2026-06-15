@@ -72,12 +72,15 @@ class TestInitialState:
         assert goal.status == GoalStatus.ACTIVE
 
     def test_initial_state_default_iterations(self) -> None:
-        """initial_state defaults max_iterations to 25 when not specified."""
+        """initial_state resolves max_iterations from settings when not specified
+        (the configured cap, e.g. .env MAX_ITERATIONS) — not a hardcoded literal."""
+        from src.config import get_settings
+
         state = initial_state(
             goal_text="Test goal",
             thread_id="thread-003",
         )
-        assert state["max_iterations"] == 25
+        assert state["max_iterations"] == get_settings().agent.max_iterations
 
     def test_initial_state_custom_iterations(self) -> None:
         """initial_state accepts a custom max_iterations value."""

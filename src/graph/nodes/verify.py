@@ -94,7 +94,17 @@ async def verify_node(
     if gateway is not None:
         result = await _llm_verify(gateway, state, evidence_text)
         if result is not None:
-            return _enforce_deliverables(result, deliverable_paths, deliverable_problems)
+            # First clamp: a missing/empty declared deliverable forces incomplete
+            # (evidence beats the agent's self-report). Then the symmetric clamp:
+            # a present, non-empty declared deliverable + all steps done + no
+            # errors forces COMPLETE (evidence beats LLM pessimism). Without the
+            # second clamp a deliverable-producing goal loops verify→plan until
+            # the iteration hard-cap because the verify LLM rarely self-reports
+            # 100% (Q9 wrote results/q9_onboarding.md yet verify returned 0%).
+            result = _enforce_deliverables(result, deliverable_paths, deliverable_problems)
+            return _force_complete_on_evidence(
+                result, state, deliverable_paths, deliverable_problems
+            )
 
     return _heuristic_verify(
         state,
@@ -298,6 +308,60 @@ def _enforce_deliverables(
         "phase": Phase.EXECUTE,
         "final_output": final_output,
         "errors": [f"verify: deliverable not present — {p}" for p in deliverable_problems[:5]],
+    }
+
+
+def _force_complete_on_evidence(
+    result: dict[str, Any],
+    state: AgentState,
+    deliverable_paths: list[str],
+    deliverable_problems: list[str],
+) -> dict[str, Any]:
+    """Override a pessimistic LLM verdict when objective evidence shows success.
+
+    Symmetric counterpart to ``_enforce_deliverables``: the latter clamps
+    *down* (missing deliverable → incomplete). This clamps *up*. If the agent
+    declared a concrete deliverable, every declared path is present and
+    non-empty on disk, all plan steps have executed, and no errors remain, the
+    task IS complete — a non-empty file on disk is stronger evidence than the
+    verify LLM's self-reported confidence, which (for cheaper models) rarely
+    crosses 100% even when the artifact is plainly there. Without this clamp a
+    deliverable-producing goal loops ``verify → plan → execute → verify`` until
+    the iteration hard-cap, burning budget without ever terminating.
+    """
+    # Already complete, or no declared deliverable to ground the verdict in →
+    # trust the LLM / fall through. A missing/empty deliverable is handled by
+    # _enforce_deliverables and must NOT be overridden here.
+    if result.get("is_complete"):
+        return result
+    if not deliverable_paths or deliverable_problems:
+        return result
+
+    plan_steps = state.get("plan_steps", []) or []
+    step_index = state.get("current_step_index", 0)
+    errors = state.get("errors", []) or []
+
+    all_steps_done = step_index >= len(plan_steps) if plan_steps else True
+    if not all_steps_done or errors:
+        return result
+
+    logger.info(
+        "Verification forced COMPLETE — all declared deliverables present and "
+        "non-empty on disk, all steps executed, no errors "
+        "(objective evidence overrides pessimistic LLM verdict)"
+    )
+    final_output = (result.get("final_output") or "").strip()
+    note = (
+        "Objective deliverable evidence: all declared outputs are present and "
+        "non-empty on disk."
+    )
+    if "Objective deliverable evidence" not in final_output:
+        final_output = f"{final_output} {note}".strip()
+    return {
+        **result,
+        "is_complete": True,
+        "phase": Phase.COMPLETE,
+        "final_output": final_output,
     }
 
 

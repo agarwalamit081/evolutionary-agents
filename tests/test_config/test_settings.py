@@ -11,6 +11,14 @@ from src.config.settings import (
     get_settings,
 )
 
+# NOTE on testing defaults: importing the test suite pulls in `litellm` (via the
+# conftest → graph → gateway chain), and `import litellm` side-effect-loads the
+# project `.env` into os.environ. So a settings group's CODE DEFAULT can only be
+# asserted when BOTH the os.environ value is removed (monkeypatch.delenv) AND the
+# .env file is skipped (_env_file=None). Tests that assert a default therefore
+# take a `monkeypatch` fixture and delenv the relevant var; env-override tests
+# set the var explicitly. (See also: settings.py reads case-insensitively.)
+
 
 # ─── get_settings Tests ──────────────────────────────────────────────
 
@@ -58,14 +66,16 @@ class TestDatabaseSettings:
 class TestRedisSettings:
     """Tests for RedisSettings defaults."""
 
-    def test_redis_url_default(self) -> None:
+    def test_redis_url_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default redis_url is redis://localhost:6379/0."""
-        redis_settings = RedisSettings()
+        monkeypatch.delenv("REDIS_URL", raising=False)
+        redis_settings = RedisSettings(_env_file=None)
         assert redis_settings.redis_url == "redis://localhost:6379/0"
 
-    def test_cache_ttl_seconds_exists(self) -> None:
+    def test_cache_ttl_seconds_exists(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify cache_ttl_seconds field exists on RedisSettings."""
-        redis_settings = RedisSettings()
+        monkeypatch.delenv("CACHE_TTL_SECONDS", raising=False)
+        redis_settings = RedisSettings(_env_file=None)
         assert hasattr(redis_settings, "cache_ttl_seconds")
         assert isinstance(redis_settings.cache_ttl_seconds, int)
         assert redis_settings.cache_ttl_seconds > 0
@@ -77,9 +87,11 @@ class TestRedisSettings:
 class TestBudgetSettings:
     """Tests for BudgetSettings validation."""
 
-    def test_budget_thresholds_valid(self) -> None:
+    def test_budget_thresholds_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default critical threshold is greater than warn threshold."""
-        budget = BudgetSettings()
+        monkeypatch.delenv("BUDGET_CRITICAL_THRESHOLD", raising=False)
+        monkeypatch.delenv("BUDGET_WARN_THRESHOLD", raising=False)
+        budget = BudgetSettings(_env_file=None)
         assert budget.budget_critical_threshold > budget.budget_warn_threshold
 
     def test_budget_critical_less_than_warn_rejected(self) -> None:
@@ -99,30 +111,33 @@ class TestBudgetSettings:
 class TestAgentSettings:
     """AgentSettings run-cap defaults and env overrides (§7)."""
 
-    def test_max_iterations_default_is_25(self) -> None:
+    def test_max_iterations_default_is_25(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The canonical iteration cap default is 25 (CLI/factory/routers align)."""
         from src.config.settings import AgentSettings
 
+        monkeypatch.delenv("MAX_ITERATIONS", raising=False)
         assert AgentSettings(_env_file=None).max_iterations == 25
 
-    def test_run_caps_have_defaults(self) -> None:
+    def test_run_caps_have_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Tool and sub-agent run caps default to 3 and are overridable fields."""
         from src.config.settings import AgentSettings
 
+        monkeypatch.delenv("MAX_TOOLS_PER_RUN", raising=False)
+        monkeypatch.delenv("MAX_SUB_AGENTS_PER_RUN", raising=False)
         agent = AgentSettings(_env_file=None)
         assert agent.max_tools_per_run == 3
         assert agent.max_sub_agents_per_run == 3
 
     def test_max_iterations_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The iteration cap is env-overridable. AgentSettings uses
-        case_sensitive=True, so the env var matches the field name (lowercase)."""
+        """The iteration cap is env-overridable. Settings read case-insensitively, so a
+        lowercase env var matches the lowercase field name."""
         from src.config.settings import AgentSettings
 
         monkeypatch.setenv("max_iterations", "15")
         assert AgentSettings(_env_file=None).max_iterations == 15
 
     def test_run_caps_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Tool/sub-agent run caps are env-overridable (case-sensitive, lowercase)."""
+        """Tool/sub-agent run caps are env-overridable (case-insensitive matching)."""
         from src.config.settings import AgentSettings
 
         monkeypatch.setenv("max_tools_per_run", "5")
@@ -130,6 +145,26 @@ class TestAgentSettings:
         agent = AgentSettings(_env_file=None)
         assert agent.max_tools_per_run == 5
         assert agent.max_sub_agents_per_run == 7
+
+    def test_uppercase_env_override_is_honored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Regression: UPPERCASE .env keys MUST populate the lowercase fields.
+
+        Previously every settings group used case_sensitive=True, which derives the
+        env lookup key from the lowercase field name — so MAX_ITERATIONS,
+        MAX_TOOLS_PER_RUN, MAX_SUB_AGENTS_PER_RUN (and DATABASE_URL, REDIS_URL, ...)
+        in .env were silently ignored and the code default was used. With
+        case_sensitive=False they now match case-insensitively (the real-world .env
+        convention). This test fails under the old case_sensitive=True setting.
+        """
+        from src.config.settings import AgentSettings
+
+        monkeypatch.setenv("MAX_ITERATIONS", "19")
+        monkeypatch.setenv("MAX_TOOLS_PER_RUN", "2")
+        monkeypatch.setenv("MAX_SUB_AGENTS_PER_RUN", "4")
+        agent = AgentSettings(_env_file=None)
+        assert agent.max_iterations == 19
+        assert agent.max_tools_per_run == 2
+        assert agent.max_sub_agents_per_run == 4
 
     def test_run_caps_reject_non_positive(self) -> None:
         """Zero/negative run caps are rejected by the positive-int validator."""

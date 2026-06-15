@@ -44,6 +44,19 @@ class ModelRouter:
         )
         excluded = (exclude_providers or set()) | self._exclude_providers
 
+        # The complexity's primary model (the chain_key itself) is the intended
+        # default for this tier. Try it FIRST. Previously ``_route_from_chain``
+        # only walked ``FALLBACK_CHAINS[chain_key]``, which deliberately
+        # excludes the primary — so e.g. COMPLEX→"claude-haiku-4-5-20251001"
+        # silently resolved to its first fallback (deepseek-v4-flash) and the
+        # named default was never selected even when its provider key was
+        # present. (F15: this made the "Very Cheap" deepseek model the de-facto
+        # default for nearly every task, starving the battery of tool-calling
+        # reliability.)
+        primary_provider = self._extract_provider(chain_key)
+        if primary_provider not in excluded and self._has_provider_key(primary_provider):
+            return chain_key
+
         model = self._route_from_chain(chain_key, excluded)
         if model:
             return model

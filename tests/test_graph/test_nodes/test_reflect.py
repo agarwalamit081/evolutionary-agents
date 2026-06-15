@@ -11,7 +11,15 @@ import pytest
 from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.factory import initial_state
 from src.graph.models import Goal, GoalStatus, PlanStep, ReflectionResult, ToolResult
-from src.graph.nodes.reflect import _check_and_fold, _derive_verified_actions, reflect_node
+from src.graph.nodes.reflect import (
+    _check_and_fold,
+    _derive_verified_actions,
+    _format_available_tools,
+    _format_step_results,
+    _format_successful_tools,
+    _ground_should_evolve,
+    reflect_node,
+)
 
 
 class TestReflectNode:
@@ -322,3 +330,219 @@ class TestCheckAndFoldPersistence:
         payload = json.loads(skill_calls[0].kwargs["content"])
         assert payload["verified_actions"] == {}  # honest: nothing verified
         assert skill_calls[0].kwargs["tags"] == ["folded_memory", "tool", "unverified"]
+
+
+class TestFormatAvailableTools:
+    """Tests for _format_available_tools — the inventory that grounds the
+    reflect LLM's missing_tools judgement (prevents re-flagging capabilities
+    already satisfied by builtins/dynamic tools → endless tool_create loop)."""
+
+    def test_lists_name_and_description(self) -> None:
+        """Registered tools render as '- name: description' lines."""
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[
+            {"type": "function", "function": {
+                "name": "file_writer",
+                "description": "Write content to a file in the sandbox.",
+            }},
+            {"type": "function", "function": {
+                "name": "code_executor",
+                "description": "Run Python code in a sandbox.",
+            }},
+        ])
+        out = _format_available_tools(tools)
+        assert "file_writer" in out
+        assert "Write content to a file" in out
+        assert "code_executor" in out
+
+    def test_none_registry_returns_placeholder(self) -> None:
+        """No ToolRegistry injected → placeholder string (prompt stays valid)."""
+        assert _format_available_tools(None) == "none registered"
+
+    def test_empty_registry_returns_placeholder(self) -> None:
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[])
+        assert _format_available_tools(tools) == "none registered"
+
+    def test_list_tools_failure_degrades_gracefully(self) -> None:
+        """A registry access error never breaks reflection."""
+        tools = MagicMock()
+        tools.list_tools = MagicMock(side_effect=RuntimeError("registry unavailable"))
+        assert _format_available_tools(tools) == "none registered"
+
+    def test_description_first_line_only_and_capped(self) -> None:
+        """Multi-line descriptions collapse to the first line, capped."""
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[
+            {"type": "function", "function": {
+                "name": "web_search",
+                "description": "Search the web.\nReturns links and snippets.\nMore detail.",
+            }},
+        ])
+        out = _format_available_tools(tools)
+        assert "web_search" in out
+        assert "Search the web." in out
+        assert "snippets" not in out  # second line dropped
+
+
+class TestFormatStepResults:
+    """Tests for _format_step_results — the evidence that lets the reflect LLM
+    judge confidence from what each step PRODUCED, not just that it was marked
+    done. Without this, a cautious model returns low confidence + should_replan
+    even when every step completed (the Q9 reflect→replan loop)."""
+
+    def test_renders_description_and_result(self) -> None:
+        """A step with a result renders as 'description → result'."""
+        steps = [
+            PlanStep(
+                id="s1",
+                description="Write summary to results/q9.md",
+                status=GoalStatus.COMPLETED,
+                result="Wrote results/q9.md (4673 bytes)",
+            ),
+        ]
+        out = _format_step_results(steps)
+        assert "Write summary to results/q9.md" in out
+        assert "→" in out
+        assert "Wrote results/q9.md (4673 bytes)" in out
+
+    def test_step_without_result_shows_description_only(self) -> None:
+        """A step with no result still lists its description (no arrow)."""
+        steps = [
+            PlanStep(id="s1", description="Read the doc", status=GoalStatus.COMPLETED),
+        ]
+        out = _format_step_results(steps)
+        assert "Read the doc" in out
+        assert "→" not in out
+
+    def test_empty_returns_placeholder(self) -> None:
+        """No completed steps → placeholder (prompt stays valid)."""
+        assert _format_step_results([]) == "None yet"
+        assert _format_step_results(None) == "None yet"
+
+    def test_result_whitespace_collapsed_and_capped(self) -> None:
+        """Newlines in a result collapse to spaces; output is capped."""
+        long = "line one\nline two\n" + "x" * 300
+        steps = [
+            PlanStep(
+                id="s1",
+                description="d",
+                status=GoalStatus.COMPLETED,
+                result=long,
+            ),
+        ]
+        out = _format_step_results(steps)
+        assert "line one line two" in out  # newlines → spaces
+        assert "\nline two" not in out
+
+
+class TestFormatSuccessfulTools:
+    """Tests for _format_successful_tools — complements tool_errors by showing
+    what SUCCEEDED (esp. file_writer paths), so reflect can confirm a
+    deliverable was produced instead of replanning forever."""
+
+    def test_lists_successful_tool_with_output(self) -> None:
+        results = [
+            ToolResult(
+                tool_name="file_writer",
+                success=True,
+                output="Wrote results/q9_onboarding.md (4673 bytes)",
+            ),
+        ]
+        out = _format_successful_tools(results)
+        assert "file_writer" in out
+        assert "results/q9_onboarding.md" in out
+
+    def test_excludes_failed_tools(self) -> None:
+        """Only successful tool calls are evidence; failures stay in tool_errors."""
+        results = [
+            ToolResult(tool_name="broken", success=False, output="", error="boom"),
+            ToolResult(tool_name="file_writer", success=True, output="ok"),
+        ]
+        out = _format_successful_tools(results)
+        assert "file_writer" in out
+        assert "broken" not in out
+
+    def test_excludes_successful_tools_with_empty_output(self) -> None:
+        """A success with no output carries no evidence — skip it."""
+        results = [
+            ToolResult(tool_name="noop", success=True, output=""),
+        ]
+        assert _format_successful_tools(results) == "None"
+
+    def test_empty_returns_placeholder(self) -> None:
+        assert _format_successful_tools([]) == "None"
+        assert _format_successful_tools(None) == "None"
+
+    def test_output_whitespace_collapsed_and_capped(self) -> None:
+        results = [
+            ToolResult(
+                tool_name="t",
+                success=True,
+                output="a\nb\n" + "y" * 300,
+            ),
+        ]
+        out = _format_successful_tools(results)
+        assert "a b" in out
+        assert "\nb" not in out
+
+
+class TestGroundShouldEvolve:
+    """``_ground_should_evolve`` forces evolution on objective success. Without
+    it the LLM path returned should_evolve=False even on HIGH-confidence
+    deliverable successes (Q7/Q8), so evolution never fired across the battery
+    (0 mutations). The helper preserves a model's own should_evolve=True via OR
+    and otherwise requires no errors + ≥3 steps + the deliverable on disk."""
+
+    def _steps(self, n: int = 3) -> list[PlanStep]:
+        return [PlanStep(id=f"s{i}", description=f"Step {i}") for i in range(n)]
+
+    def test_preserves_model_true(self) -> None:
+        """If the model already said should_evolve=True, keep it."""
+        assert _ground_should_evolve(
+            True, "merge into results/x.md", self._steps(), [], Confidence.LOW
+        ) is True
+
+    def test_forces_true_on_deliverable_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Model=False but deliverable on disk + no errors + 3 steps → True."""
+        monkeypatch.setattr("src.graph.nodes.execute._deliverable_on_disk", lambda _p: True)
+        assert _ground_should_evolve(
+            False, "merge the results into results/q3_overview.md", self._steps(), [], Confidence.LOW
+        ) is True
+
+    def test_false_when_deliverable_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deliverable goal but file not on disk (a failed run) → False."""
+        monkeypatch.setattr("src.graph.nodes.execute._deliverable_on_disk", lambda _p: False)
+        assert _ground_should_evolve(
+            False, "merge into results/q3_overview.md", self._steps(), [], Confidence.HIGH
+        ) is False
+
+    def test_false_with_errors(self) -> None:
+        assert _ground_should_evolve(
+            False, "merge into results/x.md", self._steps(), ["boom"], Confidence.HIGH
+        ) is False
+
+    def test_false_with_fewer_than_three_steps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("src.graph.nodes.execute._deliverable_on_disk", lambda _p: True)
+        assert _ground_should_evolve(
+            False, "merge into results/x.md", self._steps(2), [], Confidence.HIGH
+        ) is False
+
+    def test_true_for_nondeliverable_high_conf(self) -> None:
+        """Non-deliverable goal: HIGH confidence + 3 steps + no errors → True."""
+        assert _ground_should_evolve(
+            False, "Explain the system architecture.", self._steps(), [], Confidence.HIGH
+        ) is True
+
+    def test_false_for_nondeliverable_low_conf(self) -> None:
+        assert _ground_should_evolve(
+            False, "Explain the system architecture.", self._steps(), [], Confidence.LOW
+        ) is False
+
+

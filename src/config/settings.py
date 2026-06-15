@@ -43,9 +43,11 @@ class LLMProviderSettings(BaseSettings):
     # Explicit Alibaba (Qwen / DashScope service) OpenAI-compatible endpoint.
     # Qwen models are registered with an ``openai/`` model_id prefix, so without
     # an api_base pin litellm routes them to OpenAI's endpoint using the
-    # DASHSCOPE_API_KEY and the call fails. Defaults to the DashScope
-    # compatible-mode endpoint in the gateway. The provider is "alibaba"; only
-    # the API key field keeps the dashscope name (env DASHSCOPE_API_KEY).
+    # DASHSCOPE_API_KEY and the call fails. The gateway defaults to the
+    # INTERNATIONAL (Bailian) endpoint (dashscope-intl.aliyuncs.com); set this
+    # to the China endpoint (dashscope.aliyuncs.com) only for a China-region
+    # key. The provider is "alibaba"; only the API key field keeps the dashscope
+    # name (env DASHSCOPE_API_KEY).
     alibaba_api_base: Optional[str] = None
     alibaba_workspace_id: Optional[str] = None
     openrouter_api_key: Optional[str] = None
@@ -153,7 +155,13 @@ class DatabaseSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        # .env keys are UPPERCASE (DATABASE_URL, DATABASE_POOL_SIZE, ...). pydantic
+        # derives the lookup key from the lowercase field name, so case_sensitive=True
+        # silently ignores every override and falls to the code default — the app would
+        # connect to localhost:5432 (default) instead of the configured 5433. ALL
+        # settings groups here read case-insensitively; see LangSmithSettings for the
+        # same documented rationale.
+        case_sensitive=False,
     )
 
     @field_validator("database_url")
@@ -184,7 +192,7 @@ class RedisSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        case_sensitive=False,
     )
 
     @field_validator("redis_url")
@@ -214,7 +222,7 @@ class ToolCacheSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        case_sensitive=False,
     )
 
 
@@ -234,7 +242,7 @@ class BudgetSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        case_sensitive=False,
     )
 
     @field_validator("budget_warn_threshold", "budget_critical_threshold")
@@ -272,12 +280,15 @@ class EvolutionSettings(BaseSettings):
     evolution_sandbox_mode: Literal["docker", "subprocess"] = "docker"
     evolution_shadow_repo_path: str = ".turing/evolution-repo"
     evolution_source_dir: str = "src"
+    # Max regeneration attempts after a validation failure (0 = single attempt,
+    # no retry). NOT routed through validate_positive_int so 0 stays legal.
+    max_evolution_retries: int = 3
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        case_sensitive=False,
     )
 
     @field_validator(
@@ -344,7 +355,7 @@ class AgentSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        case_sensitive=False,
     )
 
     @field_validator(
@@ -385,7 +396,7 @@ class LoggingSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        case_sensitive=False,
     )
 
 
@@ -407,7 +418,7 @@ class ObservabilitySettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        case_sensitive=False,
     )
 
     @field_validator("otel_sampling_rate")
@@ -474,7 +485,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        case_sensitive=True,
+        case_sensitive=False,
     )
 
 

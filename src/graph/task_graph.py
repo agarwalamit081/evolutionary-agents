@@ -222,6 +222,7 @@ def build_task_graph(
         "execute": "execute",
         "classify": "classify",
         "hitl_gate": "hitl_gate",
+        "verify": "verify",
         "complete": END,
     })
 

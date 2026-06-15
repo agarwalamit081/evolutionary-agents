@@ -11,14 +11,23 @@ Turing Agent — a self-evolving AI agent built with LangGraph that continuously
 ## Commands
 
 ```bash
-# Start infrastructure (PostgreSQL + Redis)
+# Start the full stack (PostgreSQL 18 + pgvector + Redis 7 + the agent)
 docker compose up -d
+# Portable stack — no host-installed Postgres/Redis required. Images/ports:
+#   postgres: pgvector/pgvector:pg18  →  host port 5433  (container 5432)
+#   redis:    redis:7-alpine          →  host port 6380  (container 6379)
+# The non-default host ports (5433/6380) avoid clashing with a host-local
+# Postgres/Redis that other apps may own on 5432/6379. `docker compose up`
+# runs the whole stack: the `agent` service wires the internal `postgres:`/
+# `redis:` hostnames, so the compose path needs no `.env` DB URLs.
+# Host-run alternative: `python main.py` with `.env` pointing at
+# localhost:5433 (DATABASE_URL) and localhost:6380 (REDIS_URL).
 # NOTE: never `docker compose down -v` — the `-v` flag deletes the pgdata/
 # redisdata volumes (warm memories, cost_ledger, evolution history). Use plain
-# `docker compose down` to stop while preserving data. A host-local Postgres on
-# 5432 can shadow the container; every run logs the resolved DB on connect
-# ("Database engine created → host:port/database") — confirm it names the
-# turing-postgres container / turing_agent database, not a throwaway host DB.
+# `docker compose down` to stop while preserving data. Every run logs the
+# resolved DB on connect ("Database engine created → host:port/database") —
+# confirm it names the turing-postgres container / turing_agent database at
+# localhost:5433, not a throwaway host DB.
 
 # Run database migrations
 alembic upgrade head

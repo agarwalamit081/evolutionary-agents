@@ -139,11 +139,21 @@ class MemoryManager:
         for item in warm_results:
             results.append({"tier": "warm", **item})
 
-        # Cold memory: tag-based search (embedding search requires embedding generation)
+        # Cold memory: semantic recall on the query (primary) plus a tag-based
+        # filter when tags are given (supplementary). Dedup by id so a memory
+        # matching both paths appears once. Semantic recall is best-effort —
+        # cold.search_by_query returns [] when no generator is wired.
+        seen_cold_ids: set[str] = set()
+        if query:
+            for item in await self.cold.search_by_query(query=query, limit=3):
+                if item.get("id") not in seen_cold_ids:
+                    seen_cold_ids.add(item["id"])
+                    results.append({"tier": "cold", **item})
         if tags:
-            cold_results = await self.cold.search_by_tags(tags=tags, limit=3)
-            for item in cold_results:
-                results.append({"tier": "cold", **item})
+            for item in await self.cold.search_by_tags(tags=tags, limit=3):
+                if item.get("id") not in seen_cold_ids:
+                    seen_cold_ids.add(item["id"])
+                    results.append({"tier": "cold", **item})
 
         return results[:limit]
 

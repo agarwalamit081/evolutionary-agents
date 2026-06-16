@@ -151,23 +151,49 @@ class TestMemoryConfig:
 
 
 class TestCodeImprovement:
-    """Tests for generate_code_improvement."""
+    """Tests for generate_code_improvement (real, loadable code — B2)."""
 
-    def test_returns_valid_json(self) -> None:
-        result = generate_code_improvement("Optimize loop", current_content="for i in range(10): pass")
-        parsed = json.loads(result["content"])
-        assert "analysis" in parsed
-        assert "suggestion" in parsed
+    def test_emits_valid_python(self) -> None:
+        import ast
 
-    def test_current_lines_counted(self) -> None:
-        code = "line1\nline2\nline3"
-        result = generate_code_improvement("test", current_content=code)
-        parsed = json.loads(result["content"])
-        assert parsed["current_lines"] == 3
+        result = generate_code_improvement("Optimize loop")
+        assert result["target_path"].endswith(".py")
+        ast.parse(result["content"])  # raises if not valid Python
 
-    def test_target_path_is_set(self) -> None:
+    def test_wraps_async_function_with_memoization(self) -> None:
+        code = "async def foo(x):\n    return x * 2\n"
+        result = generate_code_improvement("memoize", current_content=code)
+        assert "async def foo_cached" in result["content"]
+        assert "_EVOLUTION_MEMO_CACHE" in result["content"]
+        assert "await foo(*args, **kwargs)" in result["content"]
+        assert code in result["content"]  # original function preserved
+
+    def test_wraps_sync_function_without_await(self) -> None:
+        code = "def bar(n):\n    return n + 1\n"
+        result = generate_code_improvement("memoize", current_content=code)
+        assert "result = bar(*args, **kwargs)" in result["content"]
+        assert "await bar(" not in result["content"]
+
+    def test_standalone_helper_when_no_function(self) -> None:
+        result = generate_code_improvement(
+            "improve", current_content="for i in range(10): pass"
+        )
+        assert "async def memoized_compute" in result["content"]
+
+    def test_target_path_is_python(self) -> None:
         result = generate_code_improvement("test")
-        assert result["target_path"] == "evolution/code_analysis.json"
+        assert result["target_path"] == "evolution/code_improvement.py"
+
+    def test_emitted_code_passes_safety_pipeline(self) -> None:
+        """The heuristic mutation is real code the safety pipeline accepts."""
+        import asyncio
+
+        from src.safety.pipeline import SafetyPipeline
+
+        code = "async def compute(x):\n    return x\n"
+        result = generate_code_improvement("memoize", current_content=code)
+        safety = asyncio.run(SafetyPipeline().validate(result["content"]))
+        assert safety["passed"] is True
 
 
 class TestConfigTuning:

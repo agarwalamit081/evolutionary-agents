@@ -1,0 +1,29 @@
+{# Factored Decomposition: Independent sub-problem solving #}
+{% set num_subproblems = num_subproblems|default(3) %}
+
+Break the query into {{ num_subproblems }} independent sub-problems that can be solved in isolation.
+
+Query: {{ user_input }}
+
+[DECOMPOSITION]
+For each sub-problem:
+- Sub-problem ID: [unique identifier]
+- Description: [what needs to be solved]
+- Dependencies: [none - sub-problems are independent]
+- Solution: [independent solution]
+
+{% if sub_problems %}
+Sub-problems:
+{% for sp in sub_problems %}
+- {{ sp.sub_problem_id }}: {{ sp.description }}
+{% endfor %}
+{% endif %}
+
+[INDEPENDENT SOLVING]
+Solve each sub-problem in isolation. Do not reference solutions to other sub-problems during reasoning.
+
+[SYNTHESIS]
+Combine independent solutions into final answer:
+
+Combined answer: [Integration of all sub-solutions]
+Confidence: [Based on completeness of sub-problem coverage]

@@ -182,3 +182,42 @@ class TestAgentSettings:
         from src.config.settings import AgentSettings
 
         assert not hasattr(AgentSettings(_env_file=None), "max_sub_agents")
+
+    def test_cumulative_caps_and_retire_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """B3 de-bloat: cumulative caps + retirement fields default as specified."""
+        from src.config.settings import AgentSettings
+
+        for var in (
+            "MAX_ACTIVE_TOOLS",
+            "MAX_ACTIVE_SUB_AGENTS",
+            "CAPABILITY_REDUNDANCY_THRESHOLD",
+            "RETIRE_MIN_RUNS",
+            "RETIRE_SUCCESS_FLOOR",
+            "RETIRE_RECENCY_DAYS",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        agent = AgentSettings(_env_file=None)
+        assert agent.max_active_tools == 25
+        assert agent.max_active_sub_agents == 60
+        assert agent.capability_redundancy_threshold == 0.92
+        assert agent.retire_min_runs == 20
+        assert agent.retire_success_floor == 0.25
+        assert agent.retire_recency_days == 30
+
+    def test_cumulative_caps_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Cumulative caps + retirement are env-overridable (case-insensitive)."""
+        from src.config.settings import AgentSettings
+
+        monkeypatch.setenv("max_active_tools", "40")
+        monkeypatch.setenv("max_active_sub_agents", "20")
+        monkeypatch.setenv("capability_redundancy_threshold", "0.80")
+        monkeypatch.setenv("retire_min_runs", "50")
+        monkeypatch.setenv("retire_success_floor", "0.10")
+        monkeypatch.setenv("retire_recency_days", "7")
+        agent = AgentSettings(_env_file=None)
+        assert agent.max_active_tools == 40
+        assert agent.max_active_sub_agents == 20
+        assert agent.capability_redundancy_threshold == 0.80
+        assert agent.retire_min_runs == 50
+        assert agent.retire_success_floor == 0.10
+        assert agent.retire_recency_days == 7

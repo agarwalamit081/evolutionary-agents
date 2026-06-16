@@ -1,0 +1,30 @@
+{# Graph Prompting: Knowledge/tasks as graph structures #}
+Construct a knowledge graph to reason through the query.
+
+Query: {{ user_input }}
+
+[GRAPH CONSTRUCTION]
+Extract entities and relationships:
+1. Extract key entities as nodes
+2. Define relationships as directed edges
+3. Specify edge types (causes, implies, supports, contradicts)
+
+[GRAPH STRUCTURE]
+Nodes: [List of entities/concepts]
+Edges: [List of relationships: from→to with labels]
+
+{% if knowledge_graph %}
+Existing graph context:
+Nodes: {{ knowledge_graph.nodes }}
+Edges: {{ knowledge_graph.edges }}
+{% endif %}
+
+[GRAPH TRAVERSAL]
+Traverse the knowledge graph to derive the answer:
+1. Identify relevant nodes for the query
+2. Follow paths connecting query entities
+3. Aggregate evidence along paths
+4. Resolve conflicts at junctions using edge weights
+
+Output: [Final answer derived from graph traversal]
+Confidence: [Based on path strength and evidence]

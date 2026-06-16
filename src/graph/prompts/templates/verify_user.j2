@@ -14,6 +14,9 @@ Deliverable content (the actual text the agent wrote to disk):
 Tool outputs (ground truth for any numbers, counts, or statistics the agent cites):
 {{ tool_outputs }}
 
+Filesystem spot-check (programmatic cross-check of cited counts/paths vs. disk):
+{{ grounding_warning }}
+
 Verify whether the goal has been achieved. Treat any deliverable listed as
 MISSING or EMPTY/INCOMPLETE as an unmet success criterion — the goal is NOT
 complete until every declared output file exists and is non-empty.

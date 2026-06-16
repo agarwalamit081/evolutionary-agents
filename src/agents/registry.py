@@ -8,6 +8,7 @@ Mirrors the pattern from src/tools/registry.py (ToolRegistry).
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -21,11 +22,39 @@ if TYPE_CHECKING:
     from src.tools.registry import ToolRegistry
 
 
+def _is_stale(
+    last_used_at: datetime | None,
+    recency_days: int,
+    now: datetime | None,
+) -> bool:
+    """True when ``last_used_at`` is known and older than ``recency_days``.
+
+    A None ``last_used_at`` (never persisted/used) is NOT stale — a brand-new
+    capability should not be retired just because it has no usage history yet.
+    Naive datetimes are treated as UTC for the comparison.
+    """
+    if last_used_at is None or recency_days <= 0:
+        return False
+    reference = now if now is not None else datetime.now(timezone.utc)
+    last = (
+        last_used_at.replace(tzinfo=timezone.utc)
+        if last_used_at.tzinfo is None
+        else last_used_at
+    )
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    return (reference - last) > timedelta(days=recency_days)
+
+
 # ── Limits ──────────────────────────────────────────────────────────────
 
 MAX_SUB_AGENTS_PER_RUN: int = 3
 DEPRECATION_SUCCESS_RATE_THRESHOLD: float = 0.3
 DEPRECATION_MIN_RUNS: int = 10
+# Stale-capability window for the runtime check_deprecation default (days). The
+# cumulative-cap path (enforce_caps) uses the overridable
+# AgentSettings.retire_recency_days; this constant is only the legacy default.
+DEPRECATION_RECENCY_DAYS: int = 30
 
 
 class SubAgentRegistry:
@@ -154,36 +183,120 @@ class SubAgentRegistry:
 
     # ── Auto-Deprecation ───────────────────────────────────────────────
 
-    def check_deprecation(self, name: str) -> bool:
-        """Check if a sub-agent should be auto-deprecated.
+    def check_deprecation(
+        self,
+        name: str,
+        *,
+        min_runs: int = DEPRECATION_MIN_RUNS,
+        success_floor: float = DEPRECATION_SUCCESS_RATE_THRESHOLD,
+        recency_days: int = DEPRECATION_RECENCY_DAYS,
+        now: datetime | None = None,
+    ) -> bool:
+        """Check if a sub-agent should be auto-deprecated and retire it if so.
 
-        Deprecation criteria:
-            - At least DEPRECATION_MIN_RUNS total runs
-            - success_rate < DEPRECATION_SUCCESS_RATE_THRESHOLD
+        A capability is retired when EITHER retirement trigger fires:
+
+            - **Chronic low performer**: ``total_runs >= min_runs`` AND
+              ``success_rate < success_floor`` (enough data to be confident it
+              is bad).
+            - **Stale**: ``last_used_at`` is known and older than
+              ``recency_days`` (dead weight — unused for the window).
+
+        The defaults are the legacy module constants (min_runs=10,
+        success_floor=0.3, recency_days=30) so existing single-arg callers
+        (e.g. ``delegate`` at runtime) behave as before *plus* the new stale
+        trigger. The cumulative-cap path (:meth:`enforce_caps`) passes the
+        stricter ``AgentSettings.retire_*`` values.
 
         Args:
             name: Sub-agent name to check.
+            min_runs: Minimum runs before the success trigger is trusted.
+            success_floor: success_rate below this (with enough runs) retires.
+            recency_days: Unused-for-this-many-days retires (stale trigger).
+            now: Override "now" (UTC) for deterministic tests.
 
         Returns:
-            True if the agent was deprecated.
+            True if the agent was retired (``is_active`` set False).
         """
         spec = self._agents.get(name)
         if spec is None:
             return False
 
-        if spec.total_runs < DEPRECATION_MIN_RUNS:
+        is_bad = (
+            spec.total_runs >= min_runs and spec.success_rate < success_floor
+        )
+        is_stale = _is_stale(spec.last_used_at, recency_days, now)
+        if not (is_bad or is_stale):
             return False
 
-        if spec.success_rate < DEPRECATION_SUCCESS_RATE_THRESHOLD:
-            logger.warning(
-                f"Auto-deprecating sub-agent '{name}': "
-                f"success_rate={spec.success_rate:.2f} "
-                f"over {spec.total_runs} runs"
-            )
-            spec.is_active = False
-            return True
+        reason = "stale" if (is_stale and not is_bad) else (
+            "low-performer" if is_bad and not is_stale else "low-performer+stale"
+        )
+        logger.warning(
+            f"Retiring sub-agent '{name}' ({reason}): "
+            f"success_rate={spec.success_rate:.2f} "
+            f"over {spec.total_runs} runs, last_used={spec.last_used_at}"
+        )
+        spec.is_active = False
+        return True
 
-        return False
+    def enforce_caps(
+        self,
+        *,
+        max_active: int,
+        min_runs: int = DEPRECATION_MIN_RUNS,
+        success_floor: float = DEPRECATION_SUCCESS_RATE_THRESHOLD,
+        recency_days: int = DEPRECATION_RECENCY_DAYS,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Retire active sub-agents that are bad/stale, then enforce the cap.
+
+        Runs :meth:`check_deprecation` over every active agent (retiring chronic
+        low performers and stale ones), then — if still over ``max_active`` —
+        retires the lowest-scoring survivors until at/under the cap. Scoring is
+        ``(success_rate, total_runs, quality_score)`` compared as a tuple
+        (higher is better); the lowest tuples go first. Redundancy retirement
+        (semantic duplicates) is handled separately at the DB layer by
+        ``SubAgentPersister.retire_redundant`` before load.
+
+        Args:
+            max_active: Maximum number of active agents to keep.
+            min_runs/success_floor/recency_days: passed to check_deprecation.
+            now: Override "now" (UTC) for deterministic tests.
+
+        Returns:
+            Names of agents retired by this call, in retirement order.
+        """
+        retired: list[str] = []
+        for spec in list(self.list_active()):
+            if self.check_deprecation(
+                spec.name,
+                min_runs=min_runs,
+                success_floor=success_floor,
+                recency_days=recency_days,
+                now=now,
+            ):
+                retired.append(spec.name)
+
+        active = self.list_active()
+        if len(active) <= max_active:
+            return retired
+
+        # Lowest score first: worst success_rate, then fewest runs, then lowest
+        # quality. Stable sort keeps insertion order among ties.
+        overflow = sorted(
+            active,
+            key=lambda s: (s.success_rate, s.total_runs, s.quality_score),
+        )
+        for spec in overflow[: len(active) - max_active]:
+            spec.is_active = False
+            retired.append(spec.name)
+            logger.info(
+                f"Retiring sub-agent '{spec.name}' to enforce cap "
+                f"{max_active} (score={spec.success_rate:.2f}/"
+                f"{spec.total_runs}/{spec.quality_score:.2f})"
+            )
+        return retired
 
     @property
     def count(self) -> int:

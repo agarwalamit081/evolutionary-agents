@@ -165,24 +165,43 @@ class GitTracker:
             logger.error(f"Failed to get diff: {e}")
             return ""
 
-    async def rollback(self, commit_hash: str) -> None:
-        """Roll back the shadow repo to a specific commit.
+    async def rollback(self, commit_hash: str) -> bool:
+        """Roll back the shadow repo to exactly match a specific commit.
+
+        ``git reset --hard <hash>`` restores tracked files to that commit and
+        moves HEAD onto it; ``git clean -fd`` then removes untracked files and
+        directories added since. Together they make the working tree identical
+        to the target commit — unlike ``git checkout <hash> -- .`` which neither
+        moves HEAD nor removes files added after that commit, leaving the repo
+        in a half-reverted state. Confined to the disposable shadow repo
+        (``_repo_dir``); the running agent's ``src/`` is never touched.
 
         Args:
             commit_hash: The commit to roll back to.
+
+        Returns:
+            True if both reset and clean succeeded, False otherwise.
         """
         try:
-            returncode, _, stderr = await self._git(
-                "checkout", commit_hash, "--", "."
+            rc_reset, _, stderr_reset = await self._git(
+                "reset", "--hard", commit_hash
             )
-            if returncode == 0:
-                logger.info(f"Rolled back shadow repo to {commit_hash[:12]}")
-            else:
+            if rc_reset != 0:
                 logger.warning(
-                    f"Rollback may have failed (rc={returncode}): {stderr}"
+                    f"Rollback reset failed (rc={rc_reset}): {stderr_reset}"
                 )
+                return False
+            rc_clean, _, stderr_clean = await self._git("clean", "-fd")
+            if rc_clean != 0:
+                logger.warning(
+                    f"Rollback clean failed (rc={rc_clean}): {stderr_clean}"
+                )
+                return False
+            logger.info(f"Rolled back shadow repo to {commit_hash[:12]}")
+            return True
         except Exception as e:
             logger.error(f"Failed to rollback to {commit_hash}: {e}")
+            return False
 
     async def get_current_hash(self) -> str:
         """Get the current HEAD commit hash.

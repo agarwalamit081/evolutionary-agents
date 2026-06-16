@@ -8,6 +8,7 @@ narrowing, determinism (same input → same output), and budget capping
 from __future__ import annotations
 
 from src.graph.enums import TaskComplexity
+from src.graph.prompts import select_techniques_for_node
 from src.graph.prompts.technique_selector import (
     NODE_EXECUTE,
     NODE_PLAN,
@@ -154,3 +155,37 @@ class TestBudgetCap:
         )
         assert len(selected) == 1
         assert selected[0].name == "big"
+
+
+class TestSelectTechniquesForNode:
+    """The centralized wiring helper used by plan/execute/reflect/verify nodes."""
+
+    def test_none_complexity_returns_empty(self) -> None:
+        """A None complexity (heuristic-fallback path) never applies techniques —
+        the helper must not raise and must return an empty list."""
+        assert select_techniques_for_node(complexity=None, node=NODE_PLAN) == []
+
+    def test_infers_goal_pattern_from_text(self) -> None:
+        """The helper infers the goal pattern internally from goal_text, so a
+        math goal selects math/reasoning techniques without the caller passing a
+        goal_pattern explicitly."""
+        selected = select_techniques_for_node(
+            complexity=TaskComplexity.CRITICAL,
+            node=NODE_PLAN,
+            goal_text="calculate the sum of the convergent series",
+        )
+        names = {t.name for t in selected}
+        assert "chain_of_thought" in names  # top math/reasoning qualifier
+
+    def test_consistent_with_direct_select(self) -> None:
+        """The wrapper delegates to TechniqueSelector.select, so for identical
+        inputs it returns the same technique names as a direct select() call."""
+        via_wrapper = select_techniques_for_node(
+            complexity=TaskComplexity.CRITICAL, node=NODE_PLAN, goal_text="factor 91",
+        )
+        via_direct = TechniqueSelector().select(
+            complexity=TaskComplexity.CRITICAL,
+            node=NODE_PLAN,
+            goal_pattern=TechniqueSelector.infer_goal_pattern("factor 91"),
+        )
+        assert [t.name for t in via_wrapper] == [t.name for t in via_direct]

@@ -521,6 +521,14 @@ class ToolRegistration(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
+    # Capability embedding for semantic dedup/consolidation (B3). Nullable:
+    # rows created before this migration, or while no embedding API key is
+    # available (hash-fallback vectors are not stored — see
+    # ``EmbeddingGenerator.last_source``), are NULL. ``find_similar`` filters
+    # them. ``capability_text`` is the embedded text, kept for re-embedding/debug.
+    capability_embedding: Mapped[Vector] = mapped_column(Vector(768), nullable=True)
+    capability_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Relationships
     source_mutation: Mapped[Mutation | None] = relationship(back_populates="tool_registrations")
     tool_versions: Mapped[list[ToolVersion]] = relationship(
@@ -531,6 +539,13 @@ class ToolRegistration(Base):
     __table_args__ = (
         Index("idx_tool_registrations_active", "tool_name", postgresql_where="is_active = true"),
         Index("idx_tool_registrations_type", "tool_type"),
+        Index(
+            "idx_tool_registrations_capability_emb",
+            "capability_embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"capability_embedding": "vector_cosine_ops"},
+        ),
     )
 
 
@@ -615,6 +630,10 @@ class SubAgentModel(Base):
     source_mutation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("mutations.id"), nullable=True
     )
+    # Capability embedding for semantic dedup/consolidation (B3). See
+    # ``ToolRegistration.capability_embedding`` for the nullable rationale.
+    capability_embedding: Mapped[Vector] = mapped_column(Vector(768), nullable=True)
+    capability_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -646,6 +665,13 @@ class SubAgentModel(Base):
             "idx_sub_agents_performance",
             "success_rate",
             postgresql_where="is_active = true",
+        ),
+        Index(
+            "idx_sub_agent_capability_emb",
+            "capability_embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"capability_embedding": "vector_cosine_ops"},
         ),
     )
 

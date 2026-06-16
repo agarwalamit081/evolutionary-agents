@@ -287,6 +287,20 @@ class TestBuildKwargs:
         kwargs = gw._build_kwargs("gpt-4o-mini-2024-07-18", 0.5, 100, None)
         assert kwargs["timeout"] == 15.0
 
+    def test_qwen_default_max_tokens_within_api_cap(self, gateway: LLMGateway) -> None:
+        """qwen3.5-flash's registry max_output must stay within the DashScope
+        max_tokens API cap.
+
+        Regression: the gateway sends spec.max_output as max_tokens on calls
+        that don't override it. qwen3.5-flash was registered with max_output=
+        66_000, which DashScope hard-rejects with
+        ``Range of max_tokens should be [1, 65536]`` — so every cheap-classify
+        call 400'd and fell through the fallback chain. The registry value is
+        the source of truth, so guard the cap here.
+        """
+        kwargs = gateway._build_kwargs("qwen3.5-flash", 0.5, None, None)
+        assert kwargs["max_tokens"] <= 65_536
+
 
 # ─── Test _get_cheaper_fallback ──────────────────────────────────────
 

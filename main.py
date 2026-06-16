@@ -29,6 +29,7 @@ from src.observability.logging import reset_logging, setup_logging
 @click.option("--max-iterations", default=None, type=int, help="Maximum graph iterations (default: from settings)")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 @click.option("--run-id", default=None, help="Unique run identifier for per-query logging")
+@click.option("--stream", is_flag=True, help="Stream the final answer to the terminal token-by-token")
 def main(
     goal_text: str | None,
     interactive: bool,
@@ -38,6 +39,7 @@ def main(
     max_iterations: int,
     verbose: bool,
     run_id: str | None,
+    stream: bool,
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -62,14 +64,23 @@ def main(
     if max_iterations is None:
         max_iterations = settings.agent.max_iterations
 
-    # Run the agent
+    # Run the agent graph to completion.
     result = asyncio.run(
         _run_agent(goal_text, max_iterations, no_evolution, run_id, model)
     )
 
     click.echo("\n" + "=" * 60)
     click.echo("📋 Result:")
-    click.echo(result.get("final_output", "No output"))
+    if stream:
+        # Stream the final answer token-by-token. A fresh gateway is created for
+        # the streaming call (the run's gateway lived in a now-closed event
+        # loop). _stream_final_answer never raises — it falls back to the static
+        # final_output when no gateway is available or the stream fails.
+        asyncio.run(
+            _stream_final_answer(_create_gateway(get_settings(), model), goal_text, result)
+        )
+    else:
+        click.echo(result.get("final_output", "No output"))
     click.echo(f"\n   Iterations: {result.get('iteration_count', 0)}")
     click.echo(f"   Completed: {result.get('is_complete', False)}")
 
@@ -95,7 +106,7 @@ async def _run_agent(
             Threads the CLI ``--model`` flag through to ``LLMGateway``.
 
     Returns:
-        Final agent state.
+        Final agent state as a dict.
     """
     from src.config import get_settings
     from src.graph.factory import initial_state
@@ -150,15 +161,18 @@ async def _run_agent(
     memory = await _async_create_memory_manager(settings)
     tools = _create_tool_registry()
 
-    # Load previously created dynamic tools from database
+    # Load previously created dynamic tools from database. Passing settings
+    # enables the B3 governance passes (semantic dedup + cumulative max_active_tools cap).
     if tools is not None:
-        await _load_dynamic_tools(tools)
+        await _load_dynamic_tools(tools, settings)
 
-    # Load active sub-agents from database
+    # Load active sub-agents from database. Passing settings enables the B3
+    # governance passes (retire_redundant + enforce_caps) — without it the load
+    # is ungoverned and the active population bloats past the cap.
     from src.agents.registry import SubAgentRegistry
 
     sub_agent_registry = SubAgentRegistry()
-    await _load_sub_agents(sub_agent_registry)
+    await _load_sub_agents(sub_agent_registry, settings)
 
     # Create checkpointer if possible
     checkpointer = await _create_checkpointer(settings)
@@ -270,6 +284,74 @@ async def _run_agent(
     return result_dict
 
 
+async def _stream_final_answer(
+    gateway: object | None,
+    goal_text: str,
+    result_dict: dict,
+) -> None:
+    """Stream a concise final deliverable to stdout token-by-token.
+
+    Issues ONE synthesis call via ``gateway.astream(...)`` grounded in the run's
+    ``final_output``, printing each yielded token immediately with no buffering.
+    Never raises: if ``gateway`` is None or the stream raises any exception
+    (including ``asyncio.CancelledError``), it falls back to printing the static
+    ``final_output`` exactly as the non-stream path would.
+
+    Args:
+        gateway: The ``LLMGateway`` used for the run, or None.
+        goal_text: The original goal.
+        result_dict: The final agent state (reads ``final_output``,
+            ``iteration_count``, ``is_complete``).
+    """
+    fallback = result_dict.get("final_output", "No output")
+
+    if gateway is None:
+        print(fallback, flush=True)
+        return
+
+    # Truncate the grounding context so the synthesis prompt stays compact.
+    grounding = (result_dict.get("final_output", "") or "")[:2000]
+    run_summary = (
+        f"Iterations: {result_dict.get('iteration_count', 0)} | "
+        f"Completed: {result_dict.get('is_complete', False)}"
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are the Turing Agent. Produce the final answer/deliverable "
+                "for the goal below. Be complete and concise."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Goal: {goal_text}\n\n"
+                f"Run summary: {run_summary}\n\n"
+                f"Final output from the run (grounding context):\n{grounding}"
+            ),
+        },
+    ]
+
+    try:
+        streamed_any = False
+        astream = getattr(gateway, "astream")
+        async for token in astream(messages):
+            if token:
+                print(token, end="", flush=True)
+                streamed_any = True
+        if streamed_any:
+            print()  # trailing newline after the streamed answer
+        else:
+            print(fallback, flush=True)
+    except asyncio.CancelledError as exc:
+        logger.debug(f"Final-answer stream cancelled, falling back: {exc}")
+        print(fallback, flush=True)
+    except Exception as exc:  # noqa: BLE001 — streaming must never crash the run
+        logger.debug(f"Final-answer stream failed, falling back: {exc}")
+        print(fallback, flush=True)
+
+
 def _create_gateway(settings: Settings, pinned_model: str | None = None):
     """Create LLMGateway if provider key is available.
 
@@ -327,10 +409,12 @@ def _create_tool_registry():
         return None
 
 
-async def _load_dynamic_tools(tools: object) -> None:
+async def _load_dynamic_tools(tools: object, settings: Settings) -> None:
     """Load previously created dynamic tools from the database.
 
-    Best-effort — non-fatal if the database is unavailable.
+    Best-effort — non-fatal if the database is unavailable. Passing
+    ``settings.agent`` runs the B3 governance passes (semantic dedup, cumulative
+    ``max_active_tools`` cap, redundancy retirement) around the load.
     """
     try:
         from src.tools.dynamic.persister import ToolPersister
@@ -340,17 +424,19 @@ async def _load_dynamic_tools(tools: object) -> None:
             return
 
         persister = ToolPersister()
-        loaded = await persister.load_active_tools(tools)
+        loaded = await persister.load_active_tools(tools, settings=settings.agent)
         if loaded:
             logger.info(f"Loaded {len(loaded)} dynamic tools from DB: {', '.join(loaded)}")
     except Exception as e:
         logger.debug(f"Dynamic tool loading skipped: {e}")
 
 
-async def _load_sub_agents(registry: object) -> None:
+async def _load_sub_agents(registry: object, settings: Settings) -> None:
     """Load previously created sub-agents from the database.
 
-    Best-effort — non-fatal if the database is unavailable.
+    Best-effort — non-fatal if the database is unavailable. Passing
+    ``settings.agent`` runs the B3 governance passes (``retire_redundant`` +
+    ``enforce_caps``) so the active population stays within the cumulative cap.
     """
     try:
         from src.agents.persister import SubAgentPersister
@@ -360,7 +446,7 @@ async def _load_sub_agents(registry: object) -> None:
             return
 
         persister = SubAgentPersister()
-        loaded = await persister.load_active_agents(registry)
+        loaded = await persister.load_active_agents(registry, settings=settings.agent)
         if loaded:
             logger.info(f"Loaded {len(loaded)} sub-agents from DB: {', '.join(loaded)}")
     except Exception as e:

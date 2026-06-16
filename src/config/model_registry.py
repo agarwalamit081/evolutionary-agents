@@ -274,7 +274,11 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         provider="alibaba",
         tier=ModelTier.VERY_CHEAP,
         max_context=1_000_000,
-        max_output=66_000,
+        # Qwen/DashScope hard-rejects max_tokens > 65536 (API error:
+        # "Range of max_tokens should be [1, 65536]"). The gateway sends
+        # spec.max_output as max_tokens on calls that don't override it, so this
+        # MUST stay at/below that API cap. Verified live 2026-06.
+        max_output=65_536,
         supports_tool_calling=True,
         supports_json_mode=True,
         supports_streaming=True,

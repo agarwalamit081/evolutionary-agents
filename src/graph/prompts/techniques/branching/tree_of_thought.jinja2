@@ -1,0 +1,50 @@
+{# Tree of Thought: Branching reasoning with evaluation #}
+You are an expert AI assistant. Answer the following query by generating thought branches.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+{% set depth = depth|default(3) %}
+{% set num_children = num_children|default(3) %}
+{% set evaluation_method = evaluation_method|default("heuristic") %}
+{% set branch = branch|default(1) %}
+{% set total_branches = total_branches|default(num_children) %}
+
+<tree_info>
+Generate thought nodes systematically with depth={{ depth }} and {{ num_children }} children per node.
+</tree_info>
+
+{% if branch <= total_branches %}
+<phase>
+Generate thought #{{ branch }}/{{ total_branches }}
+</phase>
+
+Provide reasoning + score (0-1).
+
+<thought_{{ branch }}>
+Your reasoning for branch {{ branch }}
+</thought_{{ branch }}>
+
+<score_{{ branch }}>
+Your confidence score (0-1) for this branch
+</score_{{ branch }}>
+{% else %}
+<phase>
+Deepen from best thought
+</phase>
+
+Select the highest-scoring thought. Continue from the best thought. Provide 2 more steps + final answer. Score each.
+
+<deepened_thought>
+Your deepened reasoning
+</deepened_thought>
+
+<final_answer>
+Your complete solution
+</final_answer>
+
+<confidence>
+Best branch score
+</confidence>
+{% endif %}

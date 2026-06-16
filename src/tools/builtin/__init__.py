@@ -1,4 +1,11 @@
-"""Built-in tools package — 14 tools for the agent."""
+"""Built-in tools package — 14 distinct tools for the agent.
+
+The 14 tools were audited for true duplicates (M7b). All names and
+descriptions are unique; the similar clusters (listing / reading / fetching)
+are deliberately distinct, not mergeable. ``test_consolidation.py`` locks this
+in — it fails if a future change duplicates a name/description or collapses a
+cluster, preventing the B3 capability bloat that dynamic-tool dedup addresses.
+"""
 
 from src.tools.builtin.code_executor import TOOL_DEFINITION as CODE_EXECUTOR_DEF
 from src.tools.builtin.code_validator import TOOL_DEFINITION as CODE_VALIDATOR_DEF

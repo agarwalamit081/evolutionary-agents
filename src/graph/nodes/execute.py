@@ -204,23 +204,17 @@ def _is_producing_step(
 def _deliverable_on_disk(path: str) -> bool:
     """True if ``path`` already exists under results_root, non-empty.
 
-    Resolves the same way ``file_writer`` does (results_root with a de-nested
-    leading ``results/`` component) so the check sees what file_writer would
+    Resolves via the shared path resolver — the same one ``file_writer`` uses —
+    so the de-nest set matches exactly and the check sees what file_writer would
     write. Used so the goal-deliverable fall-back only nudges while the file is
     still missing — never re-nudges once it exists.
     """
-    from pathlib import Path
-
-    from src.config.settings import get_settings
+    from src.tools._paths import normalize
 
     try:
-        root = Path(get_settings().agent.results_root).resolve()
-    except Exception:  # noqa: BLE001 — settings/path failure must not abort a step
+        target = normalize(path, base="results")
+    except Exception:  # noqa: BLE001 — traversal/settings failure must not abort a step
         return False
-    parts = list(Path(path).parts)
-    while len(parts) > 1 and parts[0].lower() == "results":
-        parts.pop(0)
-    target = (root / Path(*parts)) if parts else (root / Path(path))
     try:
         return target.is_file() and target.stat().st_size > 0
     except (OSError, ValueError):  # noqa: BLE001 — unreadable/invalid path → not on disk
@@ -342,7 +336,13 @@ async def _llm_execute(
 ) -> dict[str, Any] | None:
     """Execute step via LLM with tool calling. Returns None on failure."""
     try:
-        from src.graph.prompts import EXECUTE_SYSTEM
+        from src.graph.enums import TaskComplexity
+        from src.graph.prompts import (
+            EXECUTE_SYSTEM,
+            NODE_EXECUTE,
+            select_techniques_for_node,
+            splice_techniques,
+        )
 
         plan_steps = state.get("plan_steps", [])
         step_index = state.get("current_step_index", 0)
@@ -371,6 +371,20 @@ async def _llm_execute(
             memory_context=memory_ctx,
             tool_results_context=tool_results_ctx,
         )
+
+        # §5: select prompting techniques for this execute call and splice their
+        # bodies into the system prompt. The execute prompt has no JSON-schema
+        # footer, so splice_techniques injects after the opening paragraph.
+        # Gate on the classified complexity so the heuristic/LLM-failure path
+        # (which carries no techniques) stays unchanged.
+        goal = state.get("current_goal")
+        execute_complexity = (
+            goal.complexity if goal and goal.complexity else TaskComplexity.SIMPLE
+        )
+        techniques = select_techniques_for_node(
+            complexity=execute_complexity, node=NODE_EXECUTE, goal_text=goal_text,
+        )
+        system_prompt = splice_techniques(system_prompt, techniques)
 
         # ── Stateful ReAct thread ─────────────────────────────────────────
         # state["messages"] is the canonical conversation history (seeded with

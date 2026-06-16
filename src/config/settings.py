@@ -334,6 +334,32 @@ class AgentSettings(BaseSettings):
     # FALLBACK_CHAINS entry; alt gpt-4.1-mini-2025-04-14. Empty string → fall
     # back to the legacy complexity=SIMPLE path. Env: TOOL_GENERATION_MODEL.
     tool_generation_model: str = "deepseek-v4-pro"
+    # Semantic capability dedup (B3): before creating a tool/sub-agent the agent
+    # embeds the capability gap and reuses an existing capability whose
+    # cosine similarity to the gap is >= this threshold, instead of spawning a
+    # duplicate. Conservative (0.85) to avoid false reuse; distinct from the
+    # consolidation redundancy cutoff (capability_redundancy_threshold, M3).
+    # Env: CAPABILITY_DEDUP_THRESHOLD.
+    capability_dedup_threshold: float = 0.85
+    # Cumulative capability caps + retirement (B3 de-bloat). Distinct from the
+    # per-run caps above (max_tools_per_run / max_sub_agents_per_run), which
+    # bound creation within ONE run. These bound the TOTAL active population and
+    # trigger retirement when a capability is a chronic low performer
+    # (success_rate < retire_success_floor over >= retire_min_runs), stale
+    # (unused for retire_recency_days), or redundant (cosine >=
+    # capability_redundancy_threshold with a better-scoring twin). Enforced on
+    # load by SubAgentPersister.load_active_agents / ToolPersister.load_active_tools
+    # when settings is passed. Env: MAX_ACTIVE_TOOLS, MAX_ACTIVE_SUB_AGENTS,
+    # CAPABILITY_REDUNDANCY_THRESHOLD, RETIRE_MIN_RUNS, RETIRE_SUCCESS_FLOOR,
+    # RETIRE_RECENCY_DAYS.
+    max_active_tools: int = 25  # every active tool loads into the registry/selection prompt → keep tight
+    # Sub-agents are delegated-to selectively (not all injected into every prompt),
+    # so a higher stored cap is safe and preserves a richer specialist ecosystem.
+    max_active_sub_agents: int = 60
+    capability_redundancy_threshold: float = 0.92
+    retire_min_runs: int = 20
+    retire_success_floor: float = 0.25
+    retire_recency_days: int = 30
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"

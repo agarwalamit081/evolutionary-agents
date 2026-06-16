@@ -77,6 +77,7 @@ def _make_mock_git_tracker() -> MagicMock:
     mock_tracker = MagicMock()
     mock_tracker.apply_mutation = AsyncMock(return_value=None)
     mock_tracker.snapshot = AsyncMock(return_value="abcdef1234567890")
+    mock_tracker.get_current_hash = AsyncMock(return_value="predeploy000000")
     return mock_tracker
 
 
@@ -183,6 +184,91 @@ class TestEvolutionEngine:
         assert metrics["execution_count"] == 1
         assert metrics["failure_count"] == 1
 
+    @pytest.mark.asyncio
+    async def test_analyze_emits_tool_opportunity_for_low_success(self) -> None:
+        """A tool with >=3 calls and <50% success yields a targeted TOOL opp."""
+        engine = SelfEvolutionEngine()
+        history = [
+            {"tool_results": [{"tool_name": "flaky_tool", "success": False, "output": ""}]}
+        ] * 3
+        result = await engine.analyze(execution_history=history, failure_patterns=[])
+
+        tool_opps = [
+            o for o in result["opportunities"] if o.get("target_tool") == "flaky_tool"
+        ]
+        assert len(tool_opps) == 1
+        assert tool_opps[0]["priority"] == "high"
+        assert tool_opps[0]["tool_metrics"]["calls"] == 3
+        assert tool_opps[0]["tool_metrics"]["success_rate"] < 0.5
+
+    @pytest.mark.asyncio
+    async def test_analyze_emits_tool_opportunity_for_high_empty(self) -> None:
+        """A tool succeeding but producing empty output yields a targeted opp."""
+        engine = SelfEvolutionEngine()
+        history = [
+            {"tool_results": [{"tool_name": "empty_tool", "success": True, "output": ""}]},
+            {"tool_results": [{"tool_name": "empty_tool", "success": True, "output": "   "}]},
+            {"tool_results": [{"tool_name": "empty_tool", "success": True, "output": ""}]},
+        ]
+        result = await engine.analyze(execution_history=history, failure_patterns=[])
+
+        tool_opps = [
+            o for o in result["opportunities"] if o.get("target_tool") == "empty_tool"
+        ]
+        assert len(tool_opps) == 1
+        assert tool_opps[0]["tool_metrics"]["empty_output_rate"] > 0.5
+
+    @pytest.mark.asyncio
+    async def test_analyze_healthy_tool_falls_back_to_generic(self) -> None:
+        """A healthy tool gets no targeted opp; the generic TOOL opp remains."""
+        engine = SelfEvolutionEngine()
+        history = [
+            {"tool_results": [{"tool_name": "good_tool", "success": True, "output": "data"}]}
+        ] * 5
+        result = await engine.analyze(execution_history=history, failure_patterns=[])
+
+        assert not any(
+            o.get("target_tool") == "good_tool" for o in result["opportunities"]
+        )
+        assert MutationType.TOOL in [o["type"] for o in result["opportunities"]]
+
+    @pytest.mark.asyncio
+    async def test_analyze_too_few_calls_no_targeted_opportunity(self) -> None:
+        """Under the 3-call significance floor, no targeted opp is emitted."""
+        engine = SelfEvolutionEngine()
+        history = [
+            {"tool_results": [{"tool_name": "rare_tool", "success": False, "output": ""}]},
+            {"tool_results": [{"tool_name": "rare_tool", "success": False, "output": ""}]},
+        ]
+        result = await engine.analyze(execution_history=history, failure_patterns=[])
+
+        assert not any(
+            o.get("target_tool") == "rare_tool" for o in result["opportunities"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_analyze_aggregates_tool_result_objects(self) -> None:
+        """ToolResult pydantic objects (attribute access) are aggregated too."""
+        from src.graph.models import ToolResult
+
+        engine = SelfEvolutionEngine()
+        history = [
+            {
+                "tool_results": [
+                    ToolResult(tool_name="obj_tool", success=False, output=""),
+                    ToolResult(tool_name="obj_tool", success=False, output=""),
+                    ToolResult(tool_name="obj_tool", success=False, output=""),
+                ]
+            }
+        ]
+        result = await engine.analyze(execution_history=history, failure_patterns=[])
+
+        tool_opps = [
+            o for o in result["opportunities"] if o.get("target_tool") == "obj_tool"
+        ]
+        assert len(tool_opps) == 1
+        assert tool_opps[0]["tool_metrics"]["calls"] == 3
+
     # ── Generate tests ───────────────────────────────────────────────
 
     @pytest.mark.asyncio
@@ -250,6 +336,48 @@ class TestEvolutionEngine:
         assert result["mutated_content"] is not None
         assert not result["mutated_content"].startswith("#")
 
+    @pytest.mark.asyncio
+    async def test_generate_code_routes_to_codegen_model(self) -> None:
+        """CODE mutations use the codegen model + JSON mode, not complexity."""
+        mock_gateway = _make_mock_gateway()
+        engine = SelfEvolutionEngine(gateway=mock_gateway)
+        opportunity = {
+            "type": MutationType.CODE,
+            "description": "Optimize handler",
+            "priority": "high",
+        }
+        await engine.generate(opportunity, current_content="async def f():\n    return 1\n")
+
+        assert mock_gateway.acompletion.await_count == 1
+        _, kwargs = mock_gateway.acompletion.call_args
+        assert kwargs.get("model") == "deepseek-v4-pro"
+        assert kwargs.get("response_format") == {"type": "json_object"}
+        assert "complexity" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_generate_tool_routes_to_codegen_model(self) -> None:
+        """TOOL mutations emit a tools/*.py module, so they use the codegen model.
+
+        Regression: TOOL mutations previously fell through to the generic
+        complexity-routed (code-weak) model, which truncated the handler every
+        retry — evolution never deployed a tool fix. Code-emitting mutations
+        (CODE + TOOL) both route to the code-strong codegen model + JSON mode.
+        """
+        mock_gateway = _make_mock_gateway()
+        engine = SelfEvolutionEngine(gateway=mock_gateway)
+        opportunity = {
+            "type": MutationType.TOOL,
+            "description": "Optimize duplicate_finder tool",
+            "priority": "high",
+        }
+        await engine.generate(opportunity, current_content="async def f():\n    return 1\n")
+
+        assert mock_gateway.acompletion.await_count == 1
+        _, kwargs = mock_gateway.acompletion.call_args
+        assert kwargs.get("model") == "deepseek-v4-pro"
+        assert kwargs.get("response_format") == {"type": "json_object"}
+        assert "complexity" not in kwargs
+
     # ── Validate tests ───────────────────────────────────────────────
 
     @pytest.mark.asyncio
@@ -275,6 +403,62 @@ class TestEvolutionEngine:
         }
         result = await engine.validate(proposal)
         assert result["passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_validate_code_threads_sandbox_root(self) -> None:
+        """validate() adds sandbox_root to the safety context for CODE mutations."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(
+            return_value={"passed": True, "layers": {}, "issues": []}
+        )
+        engine = SelfEvolutionEngine(safety_pipeline=mock_safety)
+        proposal = {
+            "mutation_type": MutationType.CODE,
+            "description": "memoize",
+            "mutated_content": "async def f():\n    return 1\n",
+        }
+        await engine.validate(proposal)
+        _, kwargs = mock_safety.validate.call_args
+        assert "sandbox_root" in kwargs["context"]
+
+    @pytest.mark.asyncio
+    async def test_validate_tool_threads_sandbox_root(self) -> None:
+        """TOOL mutations emit code too, so validate() threads sandbox_root.
+
+        Regression for the same Bug A class: only CODE got the sandbox_root
+        context, so a TOOL mutation's writes were Layer-5-checked against no
+        root. Code-emitting mutations (CODE + TOOL) both scope writes.
+        """
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(
+            return_value={"passed": True, "layers": {}, "issues": []}
+        )
+        engine = SelfEvolutionEngine(safety_pipeline=mock_safety)
+        proposal = {
+            "mutation_type": MutationType.TOOL,
+            "description": "memoize tool handler",
+            "mutated_content": "async def f():\n    return 1\n",
+        }
+        await engine.validate(proposal)
+        _, kwargs = mock_safety.validate.call_args
+        assert "sandbox_root" in kwargs["context"]
+
+    @pytest.mark.asyncio
+    async def test_validate_non_code_omits_sandbox_root(self) -> None:
+        """Non-CODE mutations don't add sandbox_root (no file-write scoping)."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(
+            return_value={"passed": True, "layers": {}, "issues": []}
+        )
+        engine = SelfEvolutionEngine(safety_pipeline=mock_safety)
+        proposal = {
+            "mutation_type": MutationType.PROMPT,
+            "description": "tweak",
+            "mutated_content": "{}",
+        }
+        await engine.validate(proposal)
+        _, kwargs = mock_safety.validate.call_args
+        assert "sandbox_root" not in kwargs["context"]
 
     # ── Sandbox test tests ───────────────────────────────────────────
 
@@ -507,6 +691,39 @@ class TestEvolutionEngine:
 
         result2 = await engine.deploy(proposal, validation)
         assert result2["generation"] == 2
+
+    @pytest.mark.asyncio
+    async def test_deploy_captures_pre_deploy_hash(self) -> None:
+        """Deploy captures the pre-deploy hash so M6 can roll back to it."""
+        mock_tracker = _make_mock_git_tracker()
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "mutation_type": MutationType.CODE,
+            "description": "test",
+            "target_path": "t.py",
+            "mutated_content": "x = 1",
+        }
+        result = await engine.deploy(
+            proposal, {"passed": True}, git_tracker=mock_tracker
+        )
+
+        assert result["deployed"] is True
+        assert result["pre_deploy_hash"] == "predeploy000000"
+        # Captured BEFORE the mutation is applied.
+        mock_tracker.get_current_hash.assert_awaited_once()
+        assert (
+            mock_tracker.get_current_hash.await_count
+            <= mock_tracker.apply_mutation.await_count
+        )
+
+    @pytest.mark.asyncio
+    async def test_deploy_without_tracker_has_no_pre_deploy_hash(self) -> None:
+        """No git tracker → pre_deploy_hash is None (nothing to roll back to)."""
+        engine = SelfEvolutionEngine()
+        proposal = {"mutation_type": MutationType.CODE, "description": "t", "mutated_content": "x"}
+        result = await engine.deploy(proposal, {"passed": True})
+
+        assert result["pre_deploy_hash"] is None
 
     # ── Reject tests ─────────────────────────────────────────────────
 
@@ -1044,3 +1261,290 @@ class TestEvolutionEngine:
 
         assert result["status"] == "validation_failed"
         assert result["chain_id"] is None
+
+    # ── Post-deploy verify tests (M6) ─────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_post_deploy_verify_no_sandbox_skips(self) -> None:
+        """No sandbox → verify skipped (passed) — nothing to smoke-test."""
+        engine = SelfEvolutionEngine()
+        result = await engine.post_deploy_verify(
+            {"mutated_content": "x = 1"}, sandbox=None
+        )
+        assert result["passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_post_deploy_verify_non_code_skips(self) -> None:
+        """Non-executable mutations skip the sandbox (PROMPT → passed)."""
+        mock_sandbox = _make_mock_sandbox()
+        engine = SelfEvolutionEngine()
+        proposal = {"mutated_content": "{}", "mutation_type": MutationType.PROMPT}
+        result = await engine.post_deploy_verify(proposal, sandbox=mock_sandbox)
+        assert result["passed"] is True
+        mock_sandbox.execute_code.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_post_deploy_verify_success(self) -> None:
+        """A CODE mutation that re-executes cleanly passes the smoke verify."""
+        mock_sandbox = _make_mock_sandbox(success=True)
+        engine = SelfEvolutionEngine()
+        proposal = {"mutated_content": "x = 1", "mutation_type": MutationType.CODE}
+        result = await engine.post_deploy_verify(proposal, sandbox=mock_sandbox)
+        assert result["passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_post_deploy_verify_failure(self) -> None:
+        """A CODE mutation that fails on re-execution fails the smoke verify."""
+        mock_sandbox = _make_mock_sandbox(success=False, exit_code=1)
+        engine = SelfEvolutionEngine()
+        proposal = {"mutated_content": "bad", "mutation_type": MutationType.CODE}
+        result = await engine.post_deploy_verify(proposal, sandbox=mock_sandbox)
+        assert result["passed"] is False
+        assert "smoke failed" in result["reason"]
+
+    @pytest.mark.asyncio
+    async def test_post_deploy_verify_exception(self) -> None:
+        """A sandbox exception during verify yields passed=False with the error."""
+        mock_sandbox = MagicMock()
+        mock_sandbox.execute_code = AsyncMock(side_effect=RuntimeError("sandbox died"))
+        engine = SelfEvolutionEngine()
+        proposal = {"mutated_content": "x", "mutation_type": MutationType.CODE}
+        result = await engine.post_deploy_verify(proposal, sandbox=mock_sandbox)
+        assert result["passed"] is False
+        assert "sandbox died" in result["reason"]
+
+    # ── Rollback deployment tests (M6) ────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_rollback_deployment_no_pre_deploy_hash(self) -> None:
+        """No pre_deploy_hash → no-op returning rolled_back=False."""
+        engine = SelfEvolutionEngine()
+        mock_tracker = MagicMock()
+        mock_tracker.rollback = AsyncMock(return_value=True)
+        result = await engine.rollback_deployment(
+            {"pre_deploy_hash": None}, mock_tracker
+        )
+        assert result["rolled_back"] is False
+        mock_tracker.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rollback_deployment_captures_diff_then_rolls_back(self) -> None:
+        """The diff is captured BEFORE rollback; rollback uses the pre-deploy hash."""
+        engine = SelfEvolutionEngine()
+        order: list[str] = []
+        mock_tracker = MagicMock()
+
+        def _diff(*args: object, **kwargs: object) -> str:
+            del args, kwargs  # AsyncMock passes the call args; order is all we track
+            order.append("diff")
+            return "deployed diff"
+
+        def _rollback(*args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            order.append("rollback")
+            return True
+
+        mock_tracker.get_diff = AsyncMock(side_effect=_diff)
+        mock_tracker.rollback = AsyncMock(side_effect=_rollback)
+
+        result = await engine.rollback_deployment(
+            {"pre_deploy_hash": "abc123"}, mock_tracker
+        )
+
+        assert result["rolled_back"] is True
+        assert result["reverted_diff"] == "deployed diff"
+        assert result["pre_deploy_hash"] == "abc123"
+        mock_tracker.rollback.assert_awaited_once_with("abc123")
+        mock_tracker.get_diff.assert_awaited_once()
+        assert mock_tracker.get_diff.await_args.kwargs["since_hash"] == "abc123"
+        assert order == ["diff", "rollback"]
+
+    @pytest.mark.asyncio
+    async def test_rollback_deployment_on_exception_returns_false(self) -> None:
+        """A rollback exception yields rolled_back=False carrying the error."""
+        engine = SelfEvolutionEngine()
+        mock_tracker = MagicMock()
+        mock_tracker.get_diff = AsyncMock(return_value="")
+        mock_tracker.rollback = AsyncMock(side_effect=RuntimeError("git blew up"))
+        result = await engine.rollback_deployment(
+            {"pre_deploy_hash": "abc"}, mock_tracker
+        )
+        assert result["rolled_back"] is False
+        assert "git blew up" in result["reason"]
+
+    @pytest.mark.asyncio
+    async def test_rollback_deployment_restores_state_with_real_tracker(self) -> None:
+        """End-to-end: rollback_deployment + a real GitTracker restores files."""
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        from src.evolution.git_tracker import GitTracker
+
+        source = Path(tempfile.mkdtemp(prefix="m6_src_"))
+        (source / "main.py").write_text("print('original')", encoding="utf-8")
+        repo = Path(tempfile.mkdtemp(prefix="m6_repo_"))
+        try:
+            tracker = GitTracker(source, repo)
+            await tracker.initialize()
+            pre_deploy = await tracker.get_current_hash()
+
+            # Simulate a deploy that writes a regression and commits it.
+            await tracker.apply_mutation("main.py", "print('REGRESSED')")
+            await tracker.snapshot("deploy regression")
+            assert (repo / "main.py").read_text(encoding="utf-8") == "print('REGRESSED')"
+
+            engine = SelfEvolutionEngine()
+            result = await engine.rollback_deployment(
+                {"pre_deploy_hash": pre_deploy}, tracker
+            )
+
+            assert result["rolled_back"] is True
+            assert "REGRESSED" in result["reverted_diff"]
+            assert (repo / "main.py").read_text(encoding="utf-8") == "print('original')"
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+            shutil.rmtree(repo, ignore_errors=True)
+
+    # ── run_cycle rollback integration tests (M6) ─────────────────────
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_post_deploy_failure_triggers_rollback(self) -> None:
+        """A failed post-deploy smoke verify reverts the shadow repo (B6).
+
+        Patches generate to a CODE mutation (original_content empty so ab_test
+        runs treatment-only) and sequences the sandbox so the post-deploy
+        re-execution is the only failing call.
+        """
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(return_value={"passed": True, "layers": {}})
+
+        mock_sandbox = MagicMock()
+        ok = _make_sandbox_result(success=True, duration_seconds=0.1)
+        fail = _make_sandbox_result(success=False, exit_code=1, duration_seconds=0.1)
+        # sandbox_test (ok) → ab_test treatment-only (ok) → post_deploy_verify (fail)
+        mock_sandbox.execute_code = AsyncMock(side_effect=[ok, ok, fail])
+
+        mock_tracker = _make_mock_git_tracker()
+        mock_tracker.get_diff = AsyncMock(return_value="diff of deployed change")
+        mock_tracker.rollback = AsyncMock(return_value=True)
+
+        mock_persister = _make_mock_persister()
+        engine = SelfEvolutionEngine(
+            safety_pipeline=mock_safety, persister=mock_persister
+        )
+
+        with patch.object(
+            engine, "generate",
+            new_callable=AsyncMock,
+            return_value={
+                "mutation_type": MutationType.CODE,
+                "description": "code mutation",
+                "original_content": "",
+                "mutated_content": "x = 1",
+                "target_path": "test.py",
+                "priority": "high",
+                "rationale": "testing rollback",
+                "model_used": None,
+                "tokens_used": 0,
+            },
+        ):
+            result = await engine.run_cycle(
+                execution_history=[],
+                failure_patterns=["timeout"],
+                sandbox=mock_sandbox,
+                git_tracker=mock_tracker,
+            )
+
+        assert result["status"] == "rolled_back"
+        assert result["deployed"] is False
+        assert result["mutations_deployed"] == 0
+        # Shadow repo reverted to the pre-deploy hash captured by deploy().
+        mock_tracker.rollback.assert_awaited_once_with("predeploy000000")
+        mock_tracker.get_diff.assert_awaited_once()
+        assert mock_tracker.get_diff.await_args.kwargs["since_hash"] == "predeploy000000"
+        assert result["rollback"]["rolled_back"] is True
+        # Persistence recorded the rollback outcome.
+        event_types = [c.args[1] for c in mock_persister.record_event.await_args_list]
+        assert "rolled_back" in event_types
+        assert mock_persister.complete_chain.await_args.args[1] == "rolled_back"
+        assert mock_persister.update_mutation_status.await_args.args[1] == "rolled_back"
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_verify_failed_when_no_tracker(self) -> None:
+        """Smoke failure with no git_tracker → status verify_failed (can't revert)."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(return_value={"passed": True, "layers": {}})
+
+        mock_sandbox = MagicMock()
+        ok = _make_sandbox_result(success=True, duration_seconds=0.1)
+        fail = _make_sandbox_result(success=False, exit_code=1, duration_seconds=0.1)
+        mock_sandbox.execute_code = AsyncMock(side_effect=[ok, ok, fail])
+
+        mock_persister = _make_mock_persister()
+        engine = SelfEvolutionEngine(
+            safety_pipeline=mock_safety, persister=mock_persister
+        )
+
+        with patch.object(
+            engine, "generate",
+            new_callable=AsyncMock,
+            return_value={
+                "mutation_type": MutationType.CODE,
+                "description": "code mutation",
+                "original_content": "",
+                "mutated_content": "x = 1",
+                "target_path": "test.py",
+                "priority": "high",
+                "rationale": "testing verify_failed",
+                "model_used": None,
+                "tokens_used": 0,
+            },
+        ):
+            result = await engine.run_cycle(
+                execution_history=[],
+                failure_patterns=["timeout"],
+                sandbox=mock_sandbox,
+                git_tracker=None,
+            )
+
+        assert result["status"] == "verify_failed"
+        assert result["deployed"] is False
+        assert result["mutations_deployed"] == 0
+        assert mock_persister.complete_chain.await_args.args[1] == "verify_failed"
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_smoke_pass_still_deploys_code(self) -> None:
+        """A CODE mutation whose post-deploy smoke passes still deploys."""
+        mock_safety = MagicMock()
+        mock_safety.validate = AsyncMock(return_value={"passed": True, "layers": {}})
+        mock_sandbox = _make_mock_sandbox(success=True, duration_seconds=0.1)
+        mock_tracker = _make_mock_git_tracker()
+
+        engine = SelfEvolutionEngine(safety_pipeline=mock_safety)
+
+        with patch.object(
+            engine, "generate",
+            new_callable=AsyncMock,
+            return_value={
+                "mutation_type": MutationType.CODE,
+                "description": "code mutation",
+                "original_content": "",
+                "mutated_content": "x = 1",
+                "target_path": "test.py",
+                "priority": "high",
+                "rationale": "testing happy path",
+                "model_used": None,
+                "tokens_used": 0,
+            },
+        ):
+            result = await engine.run_cycle(
+                execution_history=[],
+                failure_patterns=["timeout"],
+                sandbox=mock_sandbox,
+                git_tracker=mock_tracker,
+            )
+
+        assert result["status"] == "deployed"
+        assert result["deployed"] is True
+        assert result["smoke_result"]["passed"] is True

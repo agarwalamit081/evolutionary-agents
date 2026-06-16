@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from src.config.settings import get_settings
 from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.state import AgentState
+from src.tools._paths import normalize, results_root, strip_results_prefix
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
@@ -63,6 +63,13 @@ _PATH_NOISE_TOKENS = frozenset({
     "form", "way", "report", "summary", "function", "method", "module",
     "file", "directory", "subdirectory", "folder", "markdown", "table",
     "script", "string", "section", "block", "part", "note",
+    # Abbreviations whose internal dot matches the [stem].[ext] capture group
+    # so they masquerade as a file path ("e.g" → stem "e" + ext "g"; "i.e" →
+    # "i" + "e"), plus prose words leaked from goal/plan text (e.g. "mixed
+    # human formats" → "mixed"). Without these, verify treats the token as a
+    # missing deliverable and forces is_complete=False on an otherwise-finished
+    # run (observed leaking across battery-03 q2/q3).
+    "e.g", "eg", "i.e", "ie", "etc", "mixed", "human",
 })
 
 
@@ -218,8 +225,8 @@ async def _llm_verify(
             NODE_VERIFY,
             VERIFY_SYSTEM,
             VERIFY_USER,
-            TechniqueSelector,
             build_messages,
+            select_techniques_for_node,
         )
         from src.graph.schemas import VerificationResult
         from src.llm.structured_output import StructuredOutputManager
@@ -258,6 +265,11 @@ async def _llm_verify(
         tool_outputs = _summarize_data_tool_outputs(
             state.get("tool_results", []) or []
         )
+        # Programmatic fabrication guard (advisory): cross-check cited counts/
+        # paths against the actual filesystem, independent of the LLM.
+        grounding_warning = _spot_check_cited_paths(
+            deliverable_content, tool_outputs
+        )
 
         user_prompt = VERIFY_USER.format(
             goal_text=goal_text,
@@ -270,16 +282,16 @@ async def _llm_verify(
             evidence=evidence_text,
             deliverable_content=deliverable_content or "(no readable deliverable content)",
             tool_outputs=tool_outputs or "(no data-producing tool outputs)",
+            grounding_warning=grounding_warning or "(no grounding warnings)",
         )
 
         verify_complexity = (
             goal.complexity if goal and goal.complexity else TaskComplexity.SIMPLE
         )
-        goal_pattern = TechniqueSelector.infer_goal_pattern(goal.text if goal else None)
-        techniques = TechniqueSelector().select(
+        techniques = select_techniques_for_node(
             complexity=verify_complexity,
             node=NODE_VERIFY,
-            goal_pattern=goal_pattern,
+            goal_text=goal.text if goal else None,
         )
         messages = build_messages(str(VERIFY_SYSTEM), user_prompt, techniques)
 
@@ -467,26 +479,20 @@ def _extract_deliverable_paths(state: AgentState) -> list[str]:
 def _resolve_deliverable(raw: str) -> Path | None:
     """Resolve a declared deliverable to its on-disk path, or None if absent.
 
-    ``file_writer`` writes under ``results_root`` and de-nests a leading
-    ``results/`` component; we mirror that, then fall back to
-    ``workspace_root`` and a literal path. Returns the first existing match.
+    De-nesting is delegated to the shared resolver so the strip set matches
+    ``file_writer`` exactly. We then check, in order: ``results_root`` (where
+    ``file_writer`` lands), ``workspace_root`` (inputs/fixtures), and a literal
+    path. Returns the first existing match.
     """
-    agent = get_settings().agent
-    roots = [Path(agent.results_root), Path(agent.workspace_root)]
-    strip_names = {
-        n.lower()
-        for n in ("results", Path(agent.results_root).name, Path(agent.workspace_root).name)
-    }
-    parts = Path(raw).parts
-    while len(parts) > 1 and parts[0].lower() in strip_names:
-        parts = parts[1:]
-    if not parts:
-        return None
-
     candidates: list[Path] = []
-    for root in roots:
-        candidates.append(root.joinpath(*parts))
-    candidates.append(Path(*parts))
+    for base in ("results", "workspace"):
+        try:
+            candidates.append(normalize(raw, base=base))
+        except ValueError:
+            continue
+    parts = strip_results_prefix(Path(raw).parts)
+    if parts:
+        candidates.append(Path(*parts))
     candidates.append(Path(raw))
 
     seen: set[str] = set()
@@ -622,3 +628,85 @@ def _summarize_data_tool_outputs(tool_results: list[Any]) -> str:
         if len(lines) >= _MAX_DATA_TOOLS:
             break
     return "\n".join(lines)
+
+
+# ─── Filesystem spot-check (defense-in-depth fabrication guard) ───────
+# Programmatic cross-check that the numbers/paths the deliverable cites are
+# consistent with the actual filesystem. Unlike the LLM honesty check above
+# (which compares deliverable prose to tool-output prose), this catches a tool
+# whose *output itself* is fabricated — e.g. a script that prints "found 12
+# duplicates" while writing zero files (battery-02 N5's double-nest bug).
+# Advisory only: the warning is interpolated into the verify prompt and NEVER
+# touches ``_enforce_deliverables``/``_force_complete_on_evidence``, so it
+# cannot loop or force a false-incomplete verdict.
+_COUNT_NOUN_RE = re.compile(
+    r"\b(\d+)\s+(files?|duplicates?|duplicate files?|matches?|"
+    r"matching files?|documents?|artifacts?|markdown files?|md files?)\b",
+    re.IGNORECASE,
+)
+# Nouns whose counts refer to on-disk files (rows/entries are excluded — they
+# may live in a DB or in-memory and are not a reliable fabrication signal here).
+_FILE_COUNT_NOUNS = frozenset(
+    {"file", "files", "duplicate", "duplicates", "match", "matches",
+     "document", "documents", "artifact", "artifacts"}
+)
+_CITED_RESULTS_PATH_RE = re.compile(r"results/[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+")
+
+
+def _spot_check_cited_paths(deliverable_content: str, tool_outputs: str) -> str:
+    """Cross-check cited counts/paths against the filesystem — advisory only.
+
+    Scans the deliverable + tool-output text for (a) explicit file-counts
+    ("12 duplicate files", "3 matches") and (b) cited ``results/<file>`` paths,
+    then verifies them against disk: cited paths must exist, and a file-count is
+    suspicious when ``results/`` holds fewer files than claimed.
+
+    Returns a short warning string to interpolate into the verify prompt, or
+    ``""`` when everything checks out. This is defense-in-depth for the verifier
+    LLM — never a hard override — so a false positive only adds an advisory
+    line. Known false-positive risks: counts of non-file entities, and
+    planned-but-not-yet-written paths; both merely add a caveat the LLM weighs.
+    """
+    blob = f"{deliverable_content}\n{tool_outputs}"
+    warnings: list[str] = []
+
+    # (a) Cited results/<file> paths must exist on disk.
+    cited = sorted(set(_CITED_RESULTS_PATH_RE.findall(blob)))
+    missing_cited: list[str] = []
+    for rel in cited:
+        try:
+            target = normalize(rel, base="results")
+        except ValueError:
+            continue
+        if not target.exists():
+            missing_cited.append(rel)
+    if missing_cited:
+        warnings.append(
+            "Cited deliverable paths not found on disk: "
+            + ", ".join(missing_cited[:8])
+        )
+
+    # (b) A file-count assertion cross-checked against results/ contents.
+    file_counts = [
+        int(n)
+        for n, noun in _COUNT_NOUN_RE.findall(blob)
+        if noun.lower() in _FILE_COUNT_NOUNS and int(n) > 0
+    ]
+    if file_counts:
+        claimed = max(file_counts)
+        try:
+            root = results_root()
+            actual = (
+                sum(1 for p in root.rglob("*") if p.is_file())
+                if root.exists()
+                else 0
+            )
+        except OSError:  # noqa: BLE001 — unreadable results dir → treat as 0 files
+            actual = 0
+        if claimed > actual:
+            warnings.append(
+                f"Deliverable asserts ~{claimed} file(s) but results/ holds "
+                f"{actual} — counts may be fabricated."
+            )
+
+    return "; ".join(warnings)

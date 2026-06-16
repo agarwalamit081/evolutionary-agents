@@ -39,6 +39,14 @@ class EmbeddingGenerator:
                 dim = raw_dim
         self._model = model
         self._dimension = dim
+        # Provenance of the LAST ``generate()`` vector: ``"api"`` when a real
+        # provider embedding was returned, ``"hash"`` on the deterministic
+        # fallback, ``None`` before the first call. Capability dedup (B3) reads
+        # this to skip similarity search against unreliable hash vectors and to
+        # avoid storing them as capability embeddings — different texts yield
+        # dissimilar hash vectors so they can't cause false *reuse*, but they
+        # would pollute the index and waste a query.
+        self.last_source: str | None = None
 
     @property
     def model(self) -> str:
@@ -62,9 +70,11 @@ class EmbeddingGenerator:
         # Try API-based embedding first
         embedding = await self._api_embedding(text)
         if embedding is not None:
+            self.last_source = "api"
             return embedding
 
         # Fallback: deterministic hash-based pseudo-embedding
+        self.last_source = "hash"
         return self._hash_embedding(text)
 
     async def _api_embedding(self, text: str) -> list[float] | None:
@@ -109,3 +119,27 @@ class EmbeddingGenerator:
             embedding.append((int_val / 0xFFFFFFFF) * 2.0 - 1.0)
 
         return embedding
+
+
+async def embed_capability(text: str) -> tuple[list[float] | None, str | None]:
+    """Embed a capability description for semantic dedup (B3).
+
+    Shared by ``tool_create`` and ``agent_spawn`` so both reuse-vs-create
+    decisions use one embedding path. Returns ``(vector, source)`` where
+    ``source`` is ``"api"`` for a real provider embedding, ``"hash"`` for the
+    deterministic fallback, or ``(None, None)`` if embedding is unavailable.
+
+    Dedup/store act ONLY on ``"api"`` vectors: hash vectors for different texts
+    are dissimilar (so they cannot cause false reuse) but are not semantically
+    meaningful, so they are neither queried against the index nor stored as
+    capability embeddings.
+    """
+    try:
+        from src.config import get_settings
+
+        generator = EmbeddingGenerator(get_settings())
+        vector = await generator.generate(text)
+        return vector, generator.last_source
+    except Exception as e:
+        logger.debug(f"Capability embedding failed: {e}")
+        return None, None

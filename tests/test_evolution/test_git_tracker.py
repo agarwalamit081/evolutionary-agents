@@ -359,3 +359,75 @@ class TestGitTracker:
             import shutil
             shutil.rmtree(source_dir, ignore_errors=True)
             shutil.rmtree(repo_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_rollback_removes_untracked_files(self) -> None:
+        """reset --hard + clean -fd removes files added since the target commit.
+
+        This is the M4 fix: the old ``git checkout <hash> -- .`` left untracked
+        files (written by apply_mutation but never snapshotted) in place, so the
+        working tree never actually matched the rolled-back commit.
+        """
+        source_dir = self._create_source_dir()
+        repo_dir = self._create_repo_dir()
+        try:
+            tracker = GitTracker(source_dir, repo_dir)
+            await tracker.initialize()
+            initial_hash = await tracker.get_current_hash()
+
+            # Write a file WITHOUT snapshotting it → untracked on disk.
+            await tracker.apply_mutation("untracked.py", "x = 999")
+            assert (repo_dir / "untracked.py").exists()
+
+            ok = await tracker.rollback(initial_hash)
+
+            assert ok is True
+            assert not (repo_dir / "untracked.py").exists()  # clean -fd removed it
+        finally:
+            import shutil
+            shutil.rmtree(source_dir, ignore_errors=True)
+            shutil.rmtree(repo_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_rollback_returns_bool(self) -> None:
+        """rollback returns True on success, False on an invalid commit hash."""
+        source_dir = self._create_source_dir()
+        repo_dir = self._create_repo_dir()
+        try:
+            tracker = GitTracker(source_dir, repo_dir)
+            await tracker.initialize()
+            initial_hash = await tracker.get_current_hash()
+
+            assert await tracker.rollback(initial_hash) is True
+            assert await tracker.rollback("not_a_valid_commit_hash_xyz") is False
+        finally:
+            import shutil
+            shutil.rmtree(source_dir, ignore_errors=True)
+            shutil.rmtree(repo_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_rollback_restores_tracked_and_removes_untracked(self) -> None:
+        """A full rollback both restores modified files and drops added ones."""
+        source_dir = self._create_source_dir()
+        repo_dir = self._create_repo_dir()
+        try:
+            tracker = GitTracker(source_dir, repo_dir)
+            await tracker.initialize()
+            initial_hash = await tracker.get_current_hash()
+
+            # Commit a modification to a tracked file.
+            await tracker.apply_mutation("main.py", "print('mutated')")
+            await tracker.snapshot("mutate main")
+            # Add an untracked file (no snapshot).
+            await tracker.apply_mutation("stray.py", "x = 1")
+            assert (repo_dir / "stray.py").exists()
+
+            ok = await tracker.rollback(initial_hash)
+
+            assert ok is True
+            assert (repo_dir / "main.py").read_text(encoding="utf-8") == "print('hello')"
+            assert not (repo_dir / "stray.py").exists()
+        finally:
+            import shutil
+            shutil.rmtree(source_dir, ignore_errors=True)
+            shutil.rmtree(repo_dir, ignore_errors=True)

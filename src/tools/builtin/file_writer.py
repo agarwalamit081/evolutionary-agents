@@ -7,7 +7,7 @@ from typing import Optional
 
 from loguru import logger
 
-from src.config.settings import get_settings
+from src.tools._paths import normalize, results_root
 
 
 async def file_writer(
@@ -30,31 +30,16 @@ async def file_writer(
     Returns:
         Confirmation message or error.
     """
-    if sandbox_root is None:
-        sandbox_root = get_settings().agent.results_root
-    root = Path(sandbox_root).resolve()
+    # Resolve the sandbox root, then de-nest + traverse-guard via the shared
+    # resolver so file_writer, code_executor, and terminal_command all agree on
+    # where "results/<file>" lands. A None sandbox_root means the configured
+    # results_root (where deliverables live).
+    root = results_root() if sandbox_root is None else Path(sandbox_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-
-    # Goals embed the workspace name in the save path (e.g. "save to
-    # results/<file>"). Strip a leading workspace-name component so the path
-    # resolves under sandbox_root instead of double-nesting to
-    # results/results/<file>. Covers the literal "results" plus the configured
-    # and resolved results_root names, so per-query workspaces de-nest too.
-    ws_names = {
-        n.lower()
-        for n in (
-            "results",
-            Path(get_settings().agent.results_root).name,
-            root.name,
-        )
-    }
-    parts = Path(file_path).parts
-    while len(parts) > 1 and parts[0].lower() in ws_names:
-        parts = parts[1:]
-    target = (root / Path(*parts)).resolve()
-
-    # Security: prevent path traversal
-    if not str(target).startswith(str(root)):
+    try:
+        target = normalize(file_path, base=root)
+    except ValueError:
+        # normalize raises on path traversal outside the root.
         return f"ERROR: Path traversal blocked: {file_path}"
 
     # Size check (max 1MB)

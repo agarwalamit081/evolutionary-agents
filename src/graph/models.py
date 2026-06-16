@@ -95,6 +95,10 @@ class SubAgentSpec(BaseModel):
     avg_cost: float = 0.0
     avg_latency_ms: int = 0
     quality_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Recency of last use — populated from SubAgentModel.updated_at on load
+    # (updated whenever a run is recorded). Drives stale-capability retirement
+    # (retire_recency_days). None when never persisted/used.
+    last_used_at: datetime | None = None
 
 
 class ReflectionResult(BaseModel):

@@ -155,6 +155,45 @@ async def _create_single_tool(
 
         safety = SafetyPipeline()
 
+        # ── Semantic dedup (B3) ──────────────────────────────────────────
+        # Before spending an LLM generation call, embed the capability gap and
+        # reuse an existing tool whose capability is semantically identical
+        # (cosine >= capability_dedup_threshold). Only real ("api") embeddings
+        # participate — hash-fallback vectors are not semantically meaningful.
+        # The reused tool must already be in the in-memory registry (loaded at
+        # startup) so the agent can actually call it this run. Best-effort: any
+        # failure degrades to generation and never blocks the run.
+        from src.memory.embeddings import embed_capability
+
+        gap_embedding, emb_source = await embed_capability(gap_description)
+        if gap_embedding is not None and emb_source == "api":
+            try:
+                from src.config import get_settings
+                from src.tools.dynamic.persister import ToolPersister
+
+                threshold = get_settings().agent.capability_dedup_threshold
+                similar = await ToolPersister().find_similar(
+                    gap_embedding, threshold=threshold
+                )
+                for cand in similar:
+                    if registry.has(cand["tool_name"]):
+                        logger.info(
+                            f"Reusing existing tool '{cand['tool_name']}' for "
+                            f"gap '{gap_description[:60]}' "
+                            f"(similarity={cand['similarity']:.3f}) — skipping "
+                            f"generation"
+                        )
+                        return {
+                            "success": True,
+                            "tool_name": cand["tool_name"],
+                            "description": cand["description"],
+                            "reused": True,
+                            "safety_passed": True,
+                            "sandbox_passed": True,
+                        }
+            except Exception as e:
+                logger.debug(f"Tool capability dedup skipped: {e}")
+
         # Sandbox is optional — best-effort
         sandbox: Any = None
         try:
@@ -218,8 +257,17 @@ async def _create_single_tool(
 
             result = await generator.validate_and_register(generated, registry)
             if result["success"]:
-                # Best-effort persistence to DB (non-blocking, non-fatal)
-                await _persist_tool(generated)
+                # Best-effort persistence to DB (non-blocking, non-fatal). Store
+                # the capability embedding (only when a real "api" vector was
+                # produced) so future semantically-identical gaps reuse this
+                # tool instead of generating a duplicate (B3).
+                await _persist_tool(
+                    generated,
+                    capability_embedding=gap_embedding
+                    if emb_source == "api"
+                    else None,
+                    capability_text=gap_description if emb_source == "api" else None,
+                )
                 return {
                     "success": True,
                     "tool_name": generated.tool_name,
@@ -252,7 +300,11 @@ async def _create_single_tool(
         }
 
 
-async def _persist_tool(generated: Any) -> None:
+async def _persist_tool(
+    generated: Any,
+    capability_embedding: list[float] | None = None,
+    capability_text: str | None = None,
+) -> None:
     """Best-effort persistence of a validated tool to the database.
 
     Non-fatal — if the DB is unavailable, the tool is still registered
@@ -260,6 +312,8 @@ async def _persist_tool(generated: Any) -> None:
 
     Args:
         generated: GeneratedTool with handler_code and test_code.
+        capability_embedding: Optional capability vector to store (B3 dedup).
+        capability_text: The text the embedding was derived from.
     """
     try:
         from src.tools.dynamic.persister import ToolPersister
@@ -271,6 +325,8 @@ async def _persist_tool(generated: Any) -> None:
             input_schema=generated.input_schema,
             handler_code=generated.handler_code,
             test_code=generated.test_code,
+            capability_embedding=capability_embedding,
+            capability_text=capability_text,
         )
         logger.info(f"Persisted tool '{generated.tool_name}' to database")
     except Exception as e:

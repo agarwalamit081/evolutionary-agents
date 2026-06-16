@@ -92,8 +92,8 @@ async def _llm_plan(
             NODE_PLAN,
             PLAN_SYSTEM,
             PLAN_USER,
-            TechniqueSelector,
             build_messages,
+            select_techniques_for_node,
         )
         from src.graph.schemas import GeneratedPlan
         from src.llm.structured_output import StructuredOutputManager
@@ -131,11 +131,8 @@ async def _llm_plan(
         # §5: select prompting techniques for this call and splice their bodies
         # into the system prompt above the JSON-schema footer.
         plan_complexity = goal.complexity or TaskComplexity.SIMPLE
-        goal_pattern = TechniqueSelector.infer_goal_pattern(goal.text)
-        techniques = TechniqueSelector().select(
-            complexity=plan_complexity,
-            node=NODE_PLAN,
-            goal_pattern=goal_pattern,
+        techniques = select_techniques_for_node(
+            complexity=plan_complexity, node=NODE_PLAN, goal_text=goal.text,
         )
         messages = build_messages(system_prompt, user_prompt, techniques)
 

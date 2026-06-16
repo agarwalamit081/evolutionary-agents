@@ -65,6 +65,24 @@ LLM_REQUEST_ERRORS = _counter(
     ["model", "provider", "error_type"],
 )
 
+LLM_CACHE_HITS = _counter(
+    "llm_cache_hits_total",
+    "Prompt-cache lookups that returned a cached response",
+    ["model"],
+)
+
+LLM_CACHE_MISSES = _counter(
+    "llm_cache_misses_total",
+    "Prompt-cache lookups that missed (no entry present)",
+    ["model"],
+)
+
+CIRCUIT_BREAKER_STATE_TRANSITIONS = _counter(
+    "circuit_breaker_state_transitions_total",
+    "Per-provider circuit breaker state transitions",
+    ["provider", "state"],
+)
+
 # ─── Graph Metrics ──────────────────────────────────────────────────
 
 GRAPH_NODE_DURATION = _histogram(
@@ -130,6 +148,14 @@ def record_llm_request(
         LLM_REQUEST_TOKENS.labels(model=model, provider=provider, token_type="output").inc(output_tokens)
     if LLM_REQUEST_COST and cost_usd > 0:
         LLM_REQUEST_COST.labels(model=model, provider=provider).inc(cost_usd)
+
+
+def record_cache_lookup(model: str, hit: bool) -> None:
+    """Record a prompt-cache lookup outcome (hit or miss)."""
+    if hit and LLM_CACHE_HITS:
+        LLM_CACHE_HITS.labels(model=model).inc()
+    elif not hit and LLM_CACHE_MISSES:
+        LLM_CACHE_MISSES.labels(model=model).inc()
 
 
 def record_node_duration(node_name: str, duration_seconds: float) -> None:

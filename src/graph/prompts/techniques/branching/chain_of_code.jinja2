@@ -1,0 +1,34 @@
+{# Chain-of-Code: Code interpreter execution #}
+Translate this problem into executable Python code that solves it step by step.
+
+Query: {{ user_input }}
+
+[CODE GENERATION]
+Write Python code that:
+- Solves the problem systematically
+- Uses step-by-step execution
+- Includes print() statements for the final answer
+- Handles errors gracefully
+
+```python
+# Your solution code here
+```
+
+[CODE EXECUTION]
+The code will be executed automatically.
+
+{% if execution_output %}
+Execution output:
+{{ execution_output }}
+{% endif %}
+
+[FINAL ANSWER]
+Based on the code execution output, provide the final answer.
+
+{% if execution_success %}
+Answer: [Result from successful code execution]
+Confidence: [High - verified through execution]
+{% else %}
+Answer: [Analytical answer if execution failed]
+Confidence: [Medium - analytical reasoning only]
+{% endif %}

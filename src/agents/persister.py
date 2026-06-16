@@ -9,6 +9,7 @@ Follows the same pattern as src/tools/dynamic/persister.py (ToolPersister).
 
 from __future__ import annotations
 
+import math
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -16,13 +17,19 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from src.agents.registry import SubAgentRegistry
+    from src.config.settings import AgentSettings
     from src.graph.models import SubAgentSpec
 
 
 class SubAgentPersister:
     """Persist and load sub-agent definitions from the database."""
 
-    async def persist(self, spec: SubAgentSpec) -> uuid.UUID | None:
+    async def persist(
+        self,
+        spec: SubAgentSpec,
+        capability_embedding: list[float] | None = None,
+        capability_text: str | None = None,
+    ) -> uuid.UUID | None:
         """Write or update a SubAgentModel in the database.
 
         If a sub-agent with the same name already exists, increments
@@ -31,6 +38,11 @@ class SubAgentPersister:
 
         Args:
             spec: SubAgentSpec to persist.
+            capability_embedding: Optional 768-d capability vector (B3 dedup),
+                stored so future gaps can reuse this agent via
+                :meth:`find_similar`. Pass None when no real embedding is
+                available.
+            capability_text: The text ``capability_embedding`` was derived from.
 
         Returns:
             UUID of the SubAgentModel row, or None on failure.
@@ -63,7 +75,12 @@ class SubAgentPersister:
                     await session.flush()
 
                     # Create new version row
-                    model = _spec_to_model(spec, version=new_version)
+                    model = _spec_to_model(
+                        spec,
+                        version=new_version,
+                        capability_embedding=capability_embedding,
+                        capability_text=capability_text,
+                    )
                     session.add(model)
                     await session.flush()
 
@@ -73,7 +90,12 @@ class SubAgentPersister:
                     return model.id
 
                 # Create new sub-agent
-                model = _spec_to_model(spec, version=1)
+                model = _spec_to_model(
+                    spec,
+                    version=1,
+                    capability_embedding=capability_embedding,
+                    capability_text=capability_text,
+                )
                 session.add(model)
                 await session.flush()
 
@@ -84,18 +106,207 @@ class SubAgentPersister:
             logger.warning(f"Failed to persist sub-agent '{spec.name}': {e}")
             return None
 
+    async def find_similar(
+        self,
+        embedding: list[float],
+        threshold: float = 0.85,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Cosine-search active sub-agent capability embeddings (B3 dedup).
+
+        Mirrors :meth:`src.tools.dynamic.persister.ToolPersister.find_similar`.
+        Returns agents at/above ``threshold``, most-similar first, as
+        ``[{"name", "description", "similarity"}]``. Best-effort: ``[]`` on DB
+        error so dedup degrades to "spawn" instead of blocking.
+        """
+        try:
+            from sqlalchemy import select
+
+            from src.db.models import SubAgentModel
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                distance = SubAgentModel.capability_embedding.cosine_distance(
+                    embedding
+                )
+                stmt = (
+                    select(
+                        SubAgentModel.name,
+                        SubAgentModel.description,
+                        distance.label("distance"),
+                    )
+                    .where(
+                        SubAgentModel.capability_embedding.isnot(None),
+                        SubAgentModel.is_active.is_(True),
+                    )
+                    .order_by(distance)
+                    .limit(limit)
+                )
+                result = await session.execute(stmt)
+                matches: list[dict[str, Any]] = []
+                for name, desc, dist in result.all():
+                    similarity = 1.0 - float(dist)
+                    if similarity >= threshold:
+                        matches.append(
+                            {
+                                "name": name,
+                                "description": desc,
+                                "similarity": similarity,
+                            }
+                        )
+                return matches
+        except Exception as e:
+            logger.debug(f"Sub-agent capability find_similar failed: {e}")
+            return []
+
+    async def retire(self, names: list[str]) -> int:
+        """Mark named sub-agents ``is_active=False`` in the DB.
+
+        Used by :meth:`load_active_agents` to persist in-memory retirements
+        decided by ``SubAgentRegistry.enforce_caps`` / :meth:`retire_redundant`,
+        so a capability retired on one run is not reloaded on the next.
+
+        Returns:
+            Number of agents retired (best-effort; logs on DB error).
+        """
+        if not names:
+            return 0
+        try:
+            from sqlalchemy import update
+
+            from src.db.models import SubAgentModel
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                await session.execute(
+                    update(SubAgentModel)
+                    .where(SubAgentModel.name.in_(names))
+                    .values(is_active=False, updated_at=_utcnow())
+                )
+            logger.info(f"Retired {len(names)} sub-agents: {', '.join(names)}")
+            return len(names)
+        except Exception as e:
+            logger.warning(f"Failed to retire sub-agents {names}: {e}")
+            return 0
+
+    async def _active_capability_rows(self) -> list[dict[str, Any]]:
+        """Fetch active sub-agents' capability vectors + scoring signals.
+
+        Powers :meth:`retire_redundant`'s pairwise cosine without N DB
+        round-trips. Each row: ``{"name", "embedding" (list|None),
+        "success_rate", "total_runs", "quality_score"}``.
+        """
+        from sqlalchemy import select
+
+        from src.db.models import SubAgentModel
+        from src.db.session import get_session
+
+        rows: list[dict[str, Any]] = []
+        async with get_session() as session:
+            stmt = select(
+                SubAgentModel.name,
+                SubAgentModel.capability_embedding,
+                SubAgentModel.success_rate,
+                SubAgentModel.total_runs,
+                SubAgentModel.quality_score,
+            ).where(SubAgentModel.is_active.is_(True))
+            result = await session.execute(stmt)
+            for name, emb, sr, tr, qs in result.all():
+                vector = (
+                    [float(x) for x in emb] if emb is not None else None
+                )
+                sr_f = float(sr or 0.0)
+                tr_i = int(tr or 0)
+                qs_f = float(qs or 0.5)
+                rows.append(
+                    {
+                        "name": name,
+                        "embedding": vector,
+                        "success_rate": sr_f,
+                        "total_runs": tr_i,
+                        "quality_score": qs_f,
+                        # Self-describing sort key so callers (retire_redundant,
+                        # governance consolidation) stay shape-agnostic.
+                        "score": (sr_f, tr_i, qs_f),
+                    }
+                )
+        return rows
+
+    async def retire_redundant(self, threshold: float) -> list[str]:
+        """Retire semantically-duplicate active sub-agents (B3 de-bloat).
+
+        Loads every active agent's capability embedding, then retires the
+        lower-scoring twin of any pair whose cosine similarity >= ``threshold``
+        (the stricter consolidation cutoff, distinct from the creation-time
+        ``capability_dedup_threshold``). Higher ``(success_rate, total_runs,
+        quality_score)`` tuple wins. Pure-Python pairwise cosine over the
+        fetched vectors — the active set is small (<100), so this avoids N DB
+        round-trips. Best-effort: any error degrades to no retirement.
+
+        Returns:
+            Names of agents retired (sorted).
+        """
+        try:
+            rows = await self._active_capability_rows()
+        except Exception as e:
+            logger.debug(f"Sub-agent redundancy scan failed: {e}")
+            return []
+
+        retired: set[str] = set()
+        for i, a in enumerate(rows):
+            if a["name"] in retired or a["embedding"] is None:
+                continue
+            for b in rows[i + 1:]:
+                if b["name"] in retired or b["embedding"] is None:
+                    continue
+                sim = _cosine(a["embedding"], b["embedding"])
+                if sim >= threshold:
+                    loser = (
+                        a["name"]
+                        if a["score"] < b["score"]
+                        else b["name"]
+                    )
+                    retired.add(loser)
+        if retired:
+            await self.retire(sorted(retired))
+            logger.info(
+                f"Retired {len(retired)} redundant sub-agents "
+                f"(threshold={threshold}): {', '.join(sorted(retired))}"
+            )
+        return sorted(retired)
+
     async def load_active_agents(
         self,
         registry: SubAgentRegistry,
+        settings: AgentSettings | None = None,
     ) -> list[str]:
         """Load all active sub-agents from DB and register them.
 
+        When ``settings`` is provided, two B3 de-bloat passes run around the
+        load: :meth:`retire_redundant` first (DB-level, marks semantic
+        duplicates inactive so they are never loaded), then
+        ``registry.enforce_caps`` (in-memory retirement of chronic low
+        performers / stale / over-cap agents), whose decisions are persisted via
+        :meth:`retire`. Passing ``settings=None`` (the existing behavior) skips
+        both passes — used by recall tests that assert the raw load path.
+
         Args:
             registry: SubAgentRegistry to register loaded agents into.
+            settings: AgentSettings enabling cumulative caps/retirement. None
+                disables enforcement (backward compatible).
 
         Returns:
-            List of loaded sub-agent names.
+            List of loaded sub-agent names (excludes anything retired here).
         """
+        # Pass 1: retire semantic duplicates before load (best-effort).
+        if settings is not None:
+            try:
+                await self.retire_redundant(
+                    settings.capability_redundancy_threshold
+                )
+            except Exception as e:
+                logger.debug(f"Sub-agent redundancy retirement skipped: {e}")
+
         loaded: list[str] = []
 
         try:
@@ -123,6 +334,20 @@ class SubAgentPersister:
 
         except Exception as e:
             logger.debug(f"Could not load sub-agents from DB: {e}")
+
+        # Pass 2: enforce cumulative cap + retire bad/stale (in-memory),
+        # then persist so the decision survives to the next run.
+        if settings is not None:
+            retired = registry.enforce_caps(
+                max_active=settings.max_active_sub_agents,
+                min_runs=settings.retire_min_runs,
+                success_floor=settings.retire_success_floor,
+                recency_days=settings.retire_recency_days,
+            )
+            if retired:
+                await self.retire(retired)
+                retired_set = set(retired)
+                loaded = [n for n in loaded if n not in retired_set]
 
         if loaded:
             logger.info(
@@ -254,7 +479,12 @@ class SubAgentPersister:
 # ── Conversion Helpers ──────────────────────────────────────────────────
 
 
-def _spec_to_model(spec: SubAgentSpec, version: int = 1) -> Any:
+def _spec_to_model(
+    spec: SubAgentSpec,
+    version: int = 1,
+    capability_embedding: list[float] | None = None,
+    capability_text: str | None = None,
+) -> Any:
     """Convert a SubAgentSpec to a SubAgentModel ORM instance."""
     import uuid as _uuid
 
@@ -286,6 +516,8 @@ def _spec_to_model(spec: SubAgentSpec, version: int = 1) -> Any:
         system_prompt_override=spec.system_prompt_override,
         is_active=spec.is_active,
         version=version,
+        capability_embedding=capability_embedding,
+        capability_text=capability_text,
         total_runs=spec.total_runs,
         success_count=int(spec.success_rate * spec.total_runs),
         success_rate=spec.success_rate,
@@ -323,6 +555,9 @@ def _model_to_spec(model: Any) -> SubAgentSpec:
         avg_cost=float(model.avg_cost or 0),
         avg_latency_ms=int(model.avg_latency_ms or 0),
         quality_score=float(model.quality_score or 0.5),
+        # updated_at is bumped on every run-record (see _update_rolling_metrics),
+        # so it is a faithful "last used" proxy without a dedicated column.
+        last_used_at=getattr(model, "updated_at", None),
     )
 
 
@@ -331,3 +566,20 @@ def _utcnow() -> Any:
     import datetime as dt
 
     return dt.datetime.now(dt.timezone.utc)
+
+
+def _cosine(u: list[float], v: list[float]) -> float:
+    """Cosine similarity; 0.0 for zero-norm vectors (no direction).
+
+    ``u`` and ``v`` must be equal-length (768-d capability embeddings).
+    """
+    dot = 0.0
+    nu = 0.0
+    nv = 0.0
+    for a, b in zip(u, v, strict=True):
+        dot += a * b
+        nu += a * a
+        nv += b * b
+    if nu == 0.0 or nv == 0.0:
+        return 0.0
+    return dot / (math.sqrt(nu) * math.sqrt(nv))

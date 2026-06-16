@@ -11,6 +11,7 @@ from loguru import logger
 
 from src.config.settings import Settings
 from src.llm.models import LLMResponse
+from src.observability.metrics import record_cache_lookup
 
 
 class PromptCache:
@@ -23,6 +24,11 @@ class PromptCache:
         self._redis = redis_client
         self._ttl = settings.redis.cache_ttl_seconds
         self._prefix = "turing:llm_cache:"
+        # In-memory hit/miss counters (fast stats without a Redis round-trip).
+        # The authoritative time-series lives in the Prometheus counters fed by
+        # record_cache_lookup; these mirror them for a cheap stats() read.
+        self._hits = 0
+        self._misses = 0
 
     def _make_cache_key(
         self,
@@ -55,12 +61,43 @@ class PromptCache:
         try:
             raw = await self._redis.get(key)
             if raw is None:
+                self._misses += 1
+                record_cache_lookup(model, hit=False)
                 return None
             data = json.loads(raw)
+            self._hits += 1
+            record_cache_lookup(model, hit=True)
             return LLMResponse(cached=True, **data)
         except Exception as exc:
             logger.warning(f"Cache lookup failed for {key}: {exc}")
             return None
+
+    async def stats(self) -> dict[str, Any]:
+        """Return cache hit/miss counters and an estimated live entry count.
+
+        ``hits``/``misses`` are in-memory counters maintained on every ``get``;
+        ``hit_rate`` is ``hits / (hits + misses)`` (0.0 when no lookups yet).
+        ``size_est`` is a Redis ``SCAN`` over this cache's key prefix, so it
+        reflects the live cache size and degrades to 0 if Redis is unreachable.
+        """
+        total = self._hits + self._misses
+        return {
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": (self._hits / total) if total else 0.0,
+            "size_est": await self._estimate_size(),
+        }
+
+    async def _estimate_size(self) -> int:
+        """Count live cache entries via SCAN over the key prefix (best-effort)."""
+        try:
+            count = 0
+            async for _ in self._redis.scan_iter(match=f"{self._prefix}*"):
+                count += 1
+            return count
+        except Exception as exc:
+            logger.warning(f"Cache size estimate failed: {exc}")
+            return 0
 
     async def set(
         self,

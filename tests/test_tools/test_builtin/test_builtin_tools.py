@@ -83,7 +83,7 @@ class TestFileReader:
             workspace_root=str(workspace), results_root=str(results)
         )
         with patch(
-            "src.tools.builtin.file_reader.get_settings",
+            "src.config.settings.get_settings",
             return_value=type("S", (), {"agent": mock_settings}),
         ):
             result = await file_reader("out.txt")  # default sandbox
@@ -150,51 +150,64 @@ class TestToolDefinitions:
 
 
 class TestCodeExecutorCWD:
-    """Tests for code_executor setting CWD to results directory."""
+    """Tests for code_executor running at the shared project root."""
 
     @pytest.mark.asyncio
     async def test_file_created_in_results_dir(self, tmp_path: Path) -> None:
-        """Files created with relative paths land in the results directory."""
+        """A script writing ``results/<file>`` lands it under results_root.
+
+        cwd is the project root (parent of results_root), so a deliverable must be
+        written explicitly under ``results/``. With results_root=tmp_path/results,
+        project_root==tmp_path and ``results/<file>`` resolves into results_root —
+        the parity that previously broke (double-nest → empty glob → fabrication).
+        """
         from src.config.settings import AgentSettings
 
-        mock_settings = AgentSettings(results_root=str(tmp_path))
-        with patch("src.tools.builtin.code_executor.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+        mock_settings = AgentSettings(results_root=str(tmp_path / "results"))
+        with patch("src.config.settings.get_settings", return_value=type("S", (), {"agent": mock_settings})):
             await code_executor(
-                "import pathlib; pathlib.Path('test_output.txt').write_text('hello')"
+                "with open('results/test_output.txt', 'w') as f:\n"
+                "    f.write('hello')"
             )
-        assert (tmp_path / "test_output.txt").exists()
-        assert (tmp_path / "test_output.txt").read_text() == "hello"
+        assert (tmp_path / "results" / "test_output.txt").exists()
+        assert (tmp_path / "results" / "test_output.txt").read_text() == "hello"
 
     @pytest.mark.asyncio
-    async def test_results_dir_auto_created(self, tmp_path: Path) -> None:
-        """Results directory is created automatically if missing."""
+    async def test_project_root_auto_created(self, tmp_path: Path) -> None:
+        """code_executor creates its cwd (project_root) if missing.
+
+        project_root = parent of results_root; code_executor mkdir's it so the
+        subprocess always has a valid working directory.
+        """
         nested = tmp_path / "nested" / "results"
         from src.config.settings import AgentSettings
 
         mock_settings = AgentSettings(results_root=str(nested))
-        with patch("src.tools.builtin.code_executor.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+        with patch("src.config.settings.get_settings", return_value=type("S", (), {"agent": mock_settings})):
             await code_executor("print('ok')")
-        assert nested.exists()
+        # cwd = project_root = nested.parent, auto-created.
+        assert (tmp_path / "nested").exists()
 
     @pytest.mark.asyncio
     async def test_subdir_writes_auto_create_parents(self, tmp_path: Path) -> None:
-        """F8: ``open('subdir/file')`` in generated code auto-creates the subdir.
+        """F8: ``open('results/subdir/file')`` auto-creates the subdir.
 
         The ``_WRITE_BOOTSTRAP`` shim patches ``builtins.open`` so a generator
-        script that writes to a relative nested path (e.g. ``design_patterns/x.md``)
-        succeeds instead of failing on a missing parent directory — the gap that
-        left ``results/design_patterns/`` empty in the prior e2e run.
+        script that writes to a relative nested path under results/ (e.g.
+        ``results/design_patterns/x.md``) succeeds instead of failing on a missing
+        parent directory — the gap that left ``results/design_patterns/`` empty.
         """
         from src.config.settings import AgentSettings
 
-        mock_settings = AgentSettings(results_root=str(tmp_path))
-        with patch("src.tools.builtin.code_executor.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+        mock_settings = AgentSettings(results_root=str(tmp_path / "results"))
+        with patch("src.config.settings.get_settings", return_value=type("S", (), {"agent": mock_settings})):
             await code_executor(
-                "with open('design_patterns/singleton.md', 'w') as f:\n"
+                "with open('results/design_patterns/singleton.md', 'w') as f:\n"
                 "    f.write('pattern')"
             )
-        assert (tmp_path / "design_patterns" / "singleton.md").exists()
-        assert (tmp_path / "design_patterns" / "singleton.md").read_text() == "pattern"
+        target = tmp_path / "results" / "design_patterns" / "singleton.md"
+        assert target.exists()
+        assert target.read_text() == "pattern"
 
 
 class TestFileWriterResultsDir:
@@ -206,7 +219,7 @@ class TestFileWriterResultsDir:
         from src.config.settings import AgentSettings
 
         mock_settings = AgentSettings(results_root=str(tmp_path))
-        with patch("src.tools.builtin.file_writer.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+        with patch("src.config.settings.get_settings", return_value=type("S", (), {"agent": mock_settings})):
             result = await file_writer("test.txt", "results content", create_dirs=True)
 
         assert "success" in result.lower() or "wrote" in result.lower()
@@ -219,7 +232,7 @@ class TestFileWriterResultsDir:
 
         mock_settings = AgentSettings(results_root=str(tmp_path))
         with patch(
-            "src.tools.builtin.file_writer.get_settings",
+            "src.config.settings.get_settings",
             return_value=type("S", (), {"agent": mock_settings}),
         ):
             result = await file_writer("results/report.html", "<html/>", create_dirs=True)
@@ -237,7 +250,7 @@ class TestFileWriterResultsDir:
 
         mock_settings = AgentSettings(results_root=str(tmp_path))
         with patch(
-            "src.tools.builtin.file_writer.get_settings",
+            "src.config.settings.get_settings",
             return_value=type("S", (), {"agent": mock_settings}),
         ):
             result = await file_writer(
@@ -608,7 +621,10 @@ class TestTerminalCommand:
     def _settings(self, tmp_path: Path) -> object:
         from src.config.settings import AgentSettings
 
-        return type("S", (), {"agent": AgentSettings(workspace_root=str(tmp_path))})
+        # terminal_command cwd = project_root = parent of results_root. Set
+        # results_root under tmp_path so project_root resolves to tmp_path and the
+        # cwd-sandboxed commands (ls/echo) run there.
+        return type("S", (), {"agent": AgentSettings(results_root=str(tmp_path / "results"))})
 
     @pytest.mark.asyncio
     async def test_disallowed_command_rejected(self) -> None:
@@ -638,7 +654,7 @@ class TestTerminalCommand:
     async def test_cwd_traversal_blocked(self, tmp_path: Path) -> None:
         """cwd outside the allowed roots is rejected."""
         with patch(
-            "src.tools.builtin.terminal_command.get_settings",
+            "src.config.settings.get_settings",
             return_value=self._settings(tmp_path),
         ):
             result = await terminal_command("ls", cwd="../../etc")
@@ -648,7 +664,7 @@ class TestTerminalCommand:
     async def test_shell_metacharacters_literal(self, tmp_path: Path) -> None:
         """Shell metacharacters are passed literally — no shell injection."""
         with patch(
-            "src.tools.builtin.terminal_command.get_settings",
+            "src.config.settings.get_settings",
             return_value=self._settings(tmp_path),
         ):
             result = await terminal_command("echo", ["hello; rm -rf /", "$(whoami)"])
@@ -659,8 +675,56 @@ class TestTerminalCommand:
         """A real ls lists a file (list-form subprocess, no shell)."""
         (tmp_path / "marker.txt").write_text("x")
         with patch(
-            "src.tools.builtin.terminal_command.get_settings",
+            "src.config.settings.get_settings",
             return_value=self._settings(tmp_path),
         ):
             result = await terminal_command("ls", cwd=".")
         assert "marker.txt" in result
+
+
+class TestCrossToolPathParity:
+    """Headline regression for battery-02 B1 (fabrication).
+
+    The original bug: each file tool resolved its own cwd (results_root vs
+    workspace_root) with no shared resolver, so a ``code_executor`` script
+    globbing ``results/*.md`` from inside ``results/`` found
+    ``results/results/*.md`` (nothing) and the LLM fabricated output. With a
+    single shared resolver + cwd aligned to ``project_root``, a path like
+    ``results/<file>`` resolves identically whether written, executed, or cat'd.
+    """
+
+    @staticmethod
+    def _settings(tmp_path: Path) -> object:
+        from src.config.settings import AgentSettings
+
+        # results_root under tmp_path → project_root == tmp_path.
+        return type(
+            "S", (), {"agent": AgentSettings(results_root=str(tmp_path / "results"))}
+        )
+
+    @pytest.mark.asyncio
+    async def test_write_glob_and_cat_agree(self, tmp_path: Path) -> None:
+        """file_writer, code_executor (glob), and terminal_command (cat) agree."""
+        settings = self._settings(tmp_path)
+        with patch("src.config.settings.get_settings", return_value=settings):
+            # 1. Write a deliverable under results/ via file_writer.
+            write_result = await file_writer(
+                "results/report.md", "FOUND IT", create_dirs=True
+            )
+            assert "success" in write_result.lower() or "wrote" in write_result.lower()
+
+            # 2. A code_executor script globbing results/*.md from project root
+            #    MUST find the file (the empty-glob → fabrication path).
+            glob_code = (
+                "import glob\n"
+                "files = sorted(glob.glob('results/*.md'))\n"
+                "print('GLOB_COUNT=' + str(len(files)))\n"
+                "print('GLOB_FILES=' + ','.join(f.split('/')[-1] for f in files))"
+            )
+            exec_out = await code_executor(glob_code)
+            assert "GLOB_COUNT=1" in exec_out, exec_out
+            assert "GLOB_FILES=report.md" in exec_out, exec_out
+
+            # 3. terminal_command `cat results/report.md` reads the same bytes.
+            cat_out = await terminal_command("cat", ["results/report.md"])
+            assert "FOUND IT" in cat_out, cat_out

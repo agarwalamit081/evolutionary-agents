@@ -8,7 +8,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from src.config.settings import get_settings
+from src.tools._paths import project_root
 
 
 # Prepended to every executed script. The subprocess CWD is already the results
@@ -33,10 +33,14 @@ _WRITE_BOOTSTRAP = (
 async def code_executor(code: str, timeout: int = 30) -> str:
     """Execute Python code in a subprocess and return the output.
 
-    The subprocess working directory is set to ``settings.agent.results_root``
-    so that files created via relative paths (e.g. ``plt.savefig("chart.png")``)
-    land in the run's workspace directory (the current working directory) instead
-    of the project root.
+    The subprocess working directory is the **project root** (parent of
+    ``results_root``) — the same root ``file_writer``/``terminal_command`` use —
+    so a path like ``results/foo.md`` resolves identically whether written here,
+    read via ``file_reader``, or globbed in this script. Write deliverables
+    explicitly to ``results/<file>`` (the bootstrap auto-creates parent dirs);
+    read existing deliverables as ``results/<file>`` (e.g.
+    ``glob('results/*.md')``). Aligning cwd here fixes the double-nest
+    (``results/results/*.md``) that previously left scripts finding nothing.
 
     Args:
         code: Python source code to execute.
@@ -47,9 +51,10 @@ async def code_executor(code: str, timeout: int = 30) -> str:
     """
     logger.info(f"Executing code ({len(code)} chars, timeout={timeout}s)")
 
-    # Resolve results directory as subprocess CWD
-    results_dir = Path(get_settings().agent.results_root).resolve()
-    results_dir.mkdir(parents=True, exist_ok=True)
+    # Subprocess CWD = project root (parent of results_root), shared with
+    # file_writer/terminal_command so ``results/<file>`` resolves uniformly.
+    cwd_dir = project_root()
+    cwd_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", prefix="turing_exec_", delete=False
@@ -62,7 +67,7 @@ async def code_executor(code: str, timeout: int = 30) -> str:
             "python", tmp_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(results_dir),
+            cwd=str(cwd_dir),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
@@ -93,12 +98,13 @@ TOOL_DEFINITION = {
     "description": (
         "Execute Python code in a subprocess for one-off calculations, quick "
         "data transformations, and testing code snippets. The working directory "
-        "is the results/ folder, so files written via relative paths persist "
-        "there (parent directories are created automatically); for final "
-        "deliverables prefer file_writer. A configurable timeout (default 30s) "
-        "is enforced: avoid infinite loops, and use http_request/web_scraper "
-        "for network access instead of raw sockets (which can hang until the "
-        "timeout fires)."
+        "is the PROJECT ROOT, so reference deliverables by their results/ path "
+        "(e.g. glob('results/*.md'), open('results/out.md')). Write any scratch "
+        "or generated files explicitly under results/ (parent directories are "
+        "created automatically); for final deliverables prefer file_writer. A "
+        "configurable timeout (default 30s) is enforced: avoid infinite loops, "
+        "and use http_request/web_scraper for network access instead of raw "
+        "sockets (which can hang until the timeout fires)."
     ),
     "parameters": {
         "type": "object",

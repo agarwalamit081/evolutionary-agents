@@ -1,0 +1,29 @@
+{# Active-Prompt: Select examples based on uncertainty #}
+Analyze the query characteristics and select the most informative approach.
+
+Query: {{ user_input }}
+
+[ANALYSIS]
+Analyze:
+1. Reasoning type required (math/logic/creative/factual)
+2. Difficulty level (basic/intermediate/advanced)
+3. Ideal example or approach for this type
+
+{% if example_pool %}
+Available examples:
+{% for ex in example_pool %}
+- {{ ex }}
+{% endfor %}
+{% endif %}
+
+[SELECTION STRATEGY]
+Select {{ k|default(3) }} approaches that would MOST improve performance:
+- Diversity: Cover different reasoning patterns
+- Relevance: Share structure/semantics with query
+- Difficulty: Include edge cases the model struggles with
+
+[APPLY BEST APPROACH]
+Based on analysis, generate the optimal answer using the selected approach.
+
+Final answer: [Answer using optimized approach]
+Confidence: [Based on analysis quality]

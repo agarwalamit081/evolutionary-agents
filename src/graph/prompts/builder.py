@@ -15,9 +15,63 @@ With no techniques the base prompt is passed through unchanged.
 
 from __future__ import annotations
 
-from src.graph.prompts.technique_selector import JSON_SCHEMA_MARKER, Technique
+from loguru import logger
+
+from src.graph.enums import TaskComplexity
+from src.graph.prompts.technique_selector import (
+    JSON_SCHEMA_MARKER,
+    Technique,
+    TechniqueSelector,
+)
 
 _TECHNIQUE_HEADING = "Reasoning techniques to apply:"
+
+# Pure/stateless selector — cheap to instantiate once and reuse across nodes.
+_SELECTOR = TechniqueSelector()
+
+
+def select_techniques_for_node(
+    complexity: TaskComplexity | None,
+    node: str,
+    goal_text: str | None = None,
+    budget_tokens: int = 512,
+) -> list[Technique]:
+    """Select prompting techniques for a node's LLM call (§5 wiring helper).
+
+    Centralizes the (complexity, node, goal-pattern) → technique-list lookup so
+    each node's LLM branch stays a one-liner. Infers the goal pattern from the
+    goal text, then delegates to :meth:`TechniqueSelector.select`.
+
+    Degrades cleanly on missing inputs so a heuristic/fallback path never raises:
+    a ``None`` complexity returns ``[]`` (techniques are only applied on the LLM
+    path, where the classified complexity is always known). Returns ``[]`` for a
+    node the registry does not key on.
+
+    Args:
+        complexity: The classified task complexity. ``None`` → no techniques
+            (heuristic-fallback safety).
+        node: Node identifier constant (``NODE_PLAN`` / ``NODE_EXECUTE`` / …).
+        goal_text: The goal's raw text, used to infer a goal pattern.
+        budget_tokens: Soft cap on total injected token cost.
+
+    Returns:
+        Ordered (priority desc) list of techniques to splice into the prompt;
+        possibly empty.
+    """
+    if complexity is None:
+        return []
+    goal_pattern = TechniqueSelector.infer_goal_pattern(goal_text)
+    selected = _SELECTOR.select(
+        complexity=complexity,
+        node=node,
+        goal_pattern=goal_pattern,
+        budget_tokens=budget_tokens,
+    )
+    logger.info(
+        f"Techniques selected for {node}/{complexity.value}/"
+        f"{goal_pattern or 'none'}: {[t.name for t in selected]}"
+    )
+    return selected
 
 
 def render_technique_block(techniques: list[Technique]) -> str:

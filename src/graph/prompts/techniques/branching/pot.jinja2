@@ -1,0 +1,44 @@
+{# Program of Thoughts: Delegate computation to code #}
+You are an expert AI assistant. Answer the following query using Program of Thoughts.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+{% set phase = phase|default(1) %}
+
+{% if phase == 1 %}
+<phase>
+Phase 1: Reason and generate code
+</phase>
+
+Program of Thoughts: Reason through the problem, then write Python code.
+
+<reasoning>
+Think through the problem step by step.
+</reasoning>
+
+<code_generation>
+Write Python code in a ```python``` block that solves the problem.
+- Include print() statements for the final answer
+- Handle edge cases
+- Verify correctness
+</code_generation>
+{% else %}
+<phase>
+Phase 2: Final answer based on execution
+</phase>
+
+{% if execution_output %}
+<execution_output>
+Code execution output:
+{{ execution_output }}
+</execution_output>
+{% endif %}
+
+Based on the code execution output, provide the final answer.
+
+<final_answer>
+Your final answer based on code execution
+</final_answer>
+{% endif %}

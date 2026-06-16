@@ -127,17 +127,24 @@ flowchart TD
     class exec_router,reflect_router,tc_router,v_router decision
 ```
 
-### Built-in Tools (7)
+### Built-in Tools (14)
 
-The agent starts with these foundational tools:
+The agent starts with these foundational tools (7 core + 7 capability-expansion):
 
 | Tool | Purpose |
 |---|---|
 | `code_executor` | Run Python code in subprocess with timeout |
 | `code_validator` | AST + security validation for Python code |
-| `web_search` | DuckDuckGo HTML search with result parsing |
+| `terminal_command` | Allowlisted, shell-free terminal command tool |
 | `file_reader` | Read files within sandboxed directory |
 | `file_writer` | Write files with path traversal protection |
+| `list_directory` | List directory entries within a sandboxed root |
+| `web_search` | Web search with result parsing |
+| `web_scraper` | Fetch a URL and return its main content as clean markdown |
+| `http_request` | Controlled HTTP requests to external APIs/services |
+| `document_parser` | Extract text from PDF/DOCX/XLSX/CSV documents |
+| `environment_inspect` | Inspect the runtime environment (OS, CPU, disk, RAM, packages) |
+| `get_current_time` | Current wall-clock timestamp, timezone, and date |
 | `self_inspect` | Read the agent's own source code |
 | `memory_search` | Query 3-tier memory (Redis, PostgreSQL, pgvector) |
 
@@ -171,17 +178,24 @@ Generated tools operate under strict constraints:
 
 | Allowed Module | Category |
 |---|---|
-| `httpx` | HTTP client |
+| `httpx`, `requests` | HTTP clients |
 | `json` | Serialization |
 | `re` | Regular expressions |
 | `math`, `statistics`, `decimal` | Computation |
-| `datetime` | Date/time |
+| `datetime`, `dateutil` | Date/time (dateutil pip name: `python-dateutil`) |
 | `pathlib` | File paths (within sandbox) |
 | `collections`, `itertools` | Data structures |
 | `textwrap`, `typing`, `dataclasses`, `copy` | Utilities |
 | `hashlib`, `base64` | Encoding |
 | `urllib.parse`, `html.parser` | URL/HTML parsing |
+| `jsonschema` | JSON-Schema validation |
+| `tenacity` | Retry-with-backoff primitives |
 | `loguru` | Logging |
+
+> **Browser-automation packages** (`playwright`, `selenium`, `puppeteer`,
+> `playwright_stealth`) are a **deliberately deferred opt-in** — they require a
+> managed browser binary and a stricter egress allowlist, so they stay blocked
+> even though the read-only packages above were expanded.
 
 **Rate Limit**: Maximum 3 tools created per run.
 
@@ -532,6 +546,73 @@ After each agent execution, a markdown run history file is generated at `.turing
 - Sub-agents spawned and delegation results
 - Metrics (iterations, tokens, cost)
 - Errors and final output
+
+### Capability Governance (Semantic Dedup + Caps + Retirement)
+
+Stored tools and sub-agents are curated at load time so the ecosystem does not
+bloat across runs (gated behind the `settings` passed into the loaders):
+
+- **Semantic dedup** — a newly proposed tool/sub-agent is embedded and compared
+  against existing active capabilities; a near-duplicate (`find_similar`) is
+  rejected rather than re-created.
+- **Cumulative caps** — active counts are enforced against
+  `max_active_tools` (25) and `max_active_sub_agents` (60); the lowest-scoring
+  excess is retired (`enforce_caps` / `_retire_excess_tools`).
+- **Redundancy retirement** — capabilities superseded by a better-scoring peer
+  are retired (`retire_redundant`), preserving history while trimming the active set.
+
+### Provider Circuit Breaker
+
+The LLM gateway wraps provider calls in a per-provider circuit breaker
+(CLOSED → OPEN → HALF_OPEN). After consecutive **transient** failures
+(rate-limit / 5xx / timeout) it OPENs, and `_execute_with_fallback` skips the
+open provider to the next entry in its fallback chain, then a HALF_OPEN probe
+tests recovery. **Authentication (401/403) and bad-request (400) errors never
+trip the breaker** (per the error-handling rule — only transient errors retry).
+State transitions are exported via a Prometheus counter
+(`circuit_breaker_state_transitions_total`).
+
+### Prompting-Technique Selection Layer
+
+A selector maps `TaskComplexity` × node × inferred goal-pattern to the right
+prompting technique(s) — few-shot for simple, chain-of-thought /
+least-to-most for complex, chain-of-verification / self-consistency /
+checklist for verify-critical — and splices them into the plan, execute,
+reflect, and verify prompts. The helper `select_techniques_for_node()`
+returns `[]` on a `None` complexity (the heuristic-fallback path applies no
+techniques). Techniques render from versioned Jinja2 templates under
+`src/graph/prompts/techniques/`.
+
+### Cost-Ledger Resilience
+
+Cost tracking (`CostTracker.record_usage`) is **observability-only**: the
+`add` + `commit` is wrapped so a failed ledger write rolls back its own
+transaction, is logged at WARNING, and **never re-raises** — a transient DB
+problem in the ledger can never abort an otherwise-successful run. A poisoned
+session recovers on the next call.
+
+### Verify Grounding
+
+Before a run is marked complete, the verify node spot-checks that result paths
+it cites actually exist on disk (`_spot_check_cited_paths`), catching
+hallucinated deliverable paths.
+
+### Autonomous Memory Folding
+
+The reflect node compresses a long live conversation into three structured
+summaries — episode (key events/decisions), working (current goals/next
+actions), tool (usage patterns/rules) — via LangGraph `RemoveMessage`, which
+genuinely shrinks context. Summaries persist to warm memory
+(`memory_type="folded_memory"`) and are recalled on later runs. A trigger
+ladder (cap → min-guard → cooldown → live-token → message-count →
+context-size) bounds folding to `MEMORY_FOLDING_MAX_FOLDS` per run.
+
+### Final-Answer Streaming
+
+`python main.py --stream` streams the final answer token-by-token to stdout
+over a fresh gateway (non-streaming runs are unchanged). The stream handler
+absorbs `asyncio.CancelledError` and falls back to the static `final_output`
+if the stream is empty.
 
 ---
 

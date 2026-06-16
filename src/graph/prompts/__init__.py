@@ -7,7 +7,7 @@ importing from ``src.graph.prompts`` work unchanged.
 
 from __future__ import annotations
 
-from src.graph.prompts.builder import build_messages, splice_techniques
+from src.graph.prompts.builder import build_messages, select_techniques_for_node, splice_techniques
 from src.graph.prompts.loader import PromptManager, PromptTemplate
 from src.graph.prompts.technique_selector import (
     JSON_SCHEMA_MARKER,
@@ -64,6 +64,7 @@ __all__ = [
     "prompt_manager",
     # ── §5 prompting-technique layer ────────────────────────────────────
     "build_messages",
+    "select_techniques_for_node",
     "splice_techniques",
     "Technique",
     "TechniqueSelector",

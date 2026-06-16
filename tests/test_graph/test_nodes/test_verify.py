@@ -14,6 +14,7 @@ from src.graph.models import Goal, GoalStatus, PlanStep, ReflectionResult, ToolR
 from src.graph.nodes.verify import (
     _extract_deliverable_paths,
     _load_deliverable_content,
+    _spot_check_cited_paths,
     _summarize_data_tool_outputs,
     verify_node,
 )
@@ -399,10 +400,11 @@ class TestVerifyNodeLLM:
 def _patch_deliverable_roots(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> str:
-    """Point verify's get_settings at isolated tmp results/workspace roots.
+    """Point the shared settings source at isolated tmp results/workspace roots.
 
-    verify_node reads deliverables off the filesystem via the configured
-    ``results_root``/``workspace_root``. Routing both at a tmp dir keeps these
+    verify_node resolves deliverables via the shared path resolver, which reads
+    ``src.config.settings.get_settings`` (the single source) — so that is what we
+    patch, not a per-module symbol. Routing both roots at a tmp dir keeps these
     regression tests hermetic (no real ``results/`` pollution).
     """
     results_root = tmp_path / "results"
@@ -414,7 +416,7 @@ def _patch_deliverable_roots(
             results_root=str(results_root), workspace_root=str(workspace_root)
         )
     )
-    monkeypatch.setattr("src.graph.nodes.verify.get_settings", lambda: fake_settings)
+    monkeypatch.setattr("src.config.settings.get_settings", lambda: fake_settings)
     return str(results_root)
 
 
@@ -752,6 +754,54 @@ class TestVerifyDeliverableEvidence:
         assert "several" not in paths
         assert "various" not in paths
 
+    def test_abbreviation_and_prose_tokens_are_not_deliverables(self) -> None:
+        """Regression: battery-03 q2/q3 leaked "e.g" and "mixed" as deliverables.
+
+        The ``[stem].[ext]`` capture group matches the abbreviation "e.g"
+        (stem "e" + ext "g") and "i.e" ("i" + "e"), and ``_DIR_OUTPUT_RE``
+        captures the prose word "mixed" from "generate ... in mixed human
+        formats". Each phantom is never on disk, so ``_check_deliverables``
+        flags it missing and ``_force_complete_on_evidence`` bails — forcing
+        ``is_complete=False`` on runs whose real deliverable IS present
+        (observed: battery-03 q3 finished with a correct results/q03_stats.csv
+        yet Completed=False, verify WARNING listed "e.g" as a missing output).
+        ``_PATH_NOISE_TOKENS`` now rejects these so only the real path survives.
+        """
+        state = initial_state(
+            "Create a reusable tool named date_normalizer that extracts dates "
+            "written in mixed human formats (e.g. 'Jan 5th, 2024', '05/01/2024') "
+            "and writes the normalized ISO-8601 results to results/q09_dates.jsonl.",
+            "thread-battery03-noise",
+        )
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description=(
+                    "Generate example inputs in mixed human formats "
+                    "(e.g. 'Jan 5th, 2024') and write the normalized output, "
+                    "i.e. to results/q09_dates.jsonl, documenting each match"
+                ),
+                tool_name=None,
+                tool_input={},
+                status="pending",
+                result="",
+            ),
+            PlanStep(
+                id="s2",
+                description="Write the normalized results to results/q09_dates.jsonl.",
+                tool_name="file_writer",
+                tool_input={"file_path": "results/q09_dates.jsonl", "content": "{}"},
+                status="completed",
+                result="wrote",
+            ),
+        ]
+        state["completed_steps"] = [state["plan_steps"][1]]
+        paths = _extract_deliverable_paths(state)
+        assert "results/q09_dates.jsonl" in paths
+        assert "mixed" not in paths
+        assert "e.g" not in paths
+        assert "i.e" not in paths
+
 
 def _user_prompt_from(messages: list) -> str:
     """Extract the user-role message content captured by a mock gateway."""
@@ -878,3 +928,136 @@ class TestVerifyDeliverableHonesty:
         assert "duplicate_finder" in summary
         assert "file_writer" not in summary
         assert "broken_tool" not in summary
+
+    @pytest.mark.asyncio
+    async def test_fabrication_warning_is_advisory_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The filesystem spot-check is advisory: its fabrication warning
+        surfaces in the verify prompt but never forces an incomplete verdict.
+
+        The deliverable physically exists yet claims "Found 12 duplicate files"
+        while ``results/`` holds only that one file, so
+        ``_spot_check_cited_paths`` emits a fabrication warning. That warning is
+        interpolated into the prompt (advisory input to the LLM), but it does
+        NOT itself touch ``_enforce_deliverables`` /
+        ``_force_complete_on_evidence``: with a present, non-empty deliverable,
+        all steps done, and no errors, the verdict is still forced COMPLETE. The
+        spot-check therefore cannot reintroduce the verify→plan loop (the P0c
+        design contract). This is NOT "we accept fabrication" — the verdict is
+        governed by the deliverable-evidence clamps; the spot-check only
+        *advises* the LLM.
+        """
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        # Only the deliverable itself is on disk — it claims 12 files, not 1.
+        Path(results_root, "n6_dups.md").write_text(
+            "Found 12 duplicate files\n", encoding="utf-8"
+        )
+        state = self._state(
+            "Scan for duplicate lines and save the summary to results/n6_dups.md",
+            "results/n6_dups.md",
+            "Found 12 duplicate files\n",
+        )
+
+        llm_json = (
+            '{"is_complete": false, "completion_percentage": 0.0, '
+            '"gaps": ["uncertain counts"], "quality_assessment": "Cannot confirm", '
+            '"should_evolve": false}'
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(
+            return_value=LLMResponse(
+                content=llm_json,
+                model="claude-haiku-4-5-20251001",
+                provider="anthropic",
+                input_tokens=10,
+                output_tokens=20,
+                total_tokens=30,
+                cost_usd=0.0001,
+            )
+        )
+        result = await verify_node(state, gateway=gateway)
+
+        prompt = _user_prompt_from(gateway.acompletion.call_args.kwargs["messages"])
+        # (1) Advisory: the fabrication warning reached the verify prompt.
+        assert "counts may be fabricated" in prompt
+        # (2) Advisory-only: it did not force incomplete — the present
+        #     deliverable still completes (no verify→plan loop).
+        assert result["is_complete"] is True
+        assert result["phase"] == Phase.COMPLETE
+
+
+class TestSpotCheckCitedPaths:
+    """Unit tests for the filesystem spot-check (P0c fabrication guard).
+
+    ``_spot_check_cited_paths`` cross-checks the counts/paths the deliverable
+    cites against the actual filesystem and returns an *advisory* warning string
+    — it never forces a verdict. Each test points the shared settings source at
+    an isolated ``tmp_path`` via ``_patch_deliverable_roots`` so no real
+    ``results/`` is touched.
+    """
+
+    def test_no_counts_no_cited_paths_returns_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Innocuous text with no counts or cited paths → no warning."""
+        _patch_deliverable_roots(monkeypatch, tmp_path)
+        assert _spot_check_cited_paths("The task is essentially done.", "") == ""
+
+    def test_cited_path_present_no_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cited results/<file> that exists on disk → no warning."""
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        Path(results_root, "report.md").write_text("payload", encoding="utf-8")
+        assert _spot_check_cited_paths("See results/report.md for details.", "") == ""
+
+    def test_missing_cited_path_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cited results/<file> that does NOT exist → cited-path warning."""
+        _patch_deliverable_roots(monkeypatch, tmp_path)
+        warning = _spot_check_cited_paths("Saved to results/ghost.md.", "")
+        assert "Cited deliverable paths not found on disk" in warning
+        assert "results/ghost.md" in warning
+
+    def test_count_with_empty_results_warns_fabrication(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file-count claim against an empty results/ → fabrication warning."""
+        _patch_deliverable_roots(monkeypatch, tmp_path)
+        warning = _spot_check_cited_paths("Found 12 duplicate files.", "")
+        assert "~12" in warning
+        assert "holds 0" in warning
+        assert "fabricated" in warning
+
+    def test_count_satisfied_no_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file-count claim that matches the on-disk count → no warning."""
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        for i in range(3):
+            Path(results_root, f"f{i}.md").write_text("x", encoding="utf-8")
+        assert _spot_check_cited_paths("Identified 3 files.", "") == ""
+
+    def test_non_file_count_noun_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Counts of non-file entities (rows/entries) do not trigger the guard.
+
+        Rows/entries may live in a DB or in-memory, so a high count is not a
+        reliable fabrication signal here — this documents the false-positive
+        guard (battery-02 N6 synthesized DB-style counts).
+        """
+        _patch_deliverable_roots(monkeypatch, tmp_path)
+        assert _spot_check_cited_paths("Found 500 rows in the table.", "") == ""
+
+    def test_counts_scanned_across_both_inputs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Counts in the deliverable AND the tool outputs are scanned together;
+        the largest file-count drives the warning (claimed = max)."""
+        _patch_deliverable_roots(monkeypatch, tmp_path)
+        warning = _spot_check_cited_paths("Wrote 3 files.", "matched 50 duplicates")
+        assert "~50" in warning
+        assert "fabricated" in warning

@@ -577,7 +577,9 @@ class TestPersistAgent:
 
             await _persist_agent(spec)
 
-            mock_persister.persist.assert_called_once_with(spec)
+            mock_persister.persist.assert_called_once_with(
+                spec, capability_embedding=None, capability_text=None
+            )
 
     @pytest.mark.asyncio
     async def test_persist_agent_failure_non_fatal(self) -> None:

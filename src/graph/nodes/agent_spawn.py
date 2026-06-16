@@ -210,6 +210,46 @@ async def _spawn_single_agent(
         )
         return None
 
+    # ── Semantic dedup (B3) ──────────────────────────────────────────────
+    # Before persisting/registering a new agent, embed the capability (gap +
+    # proposal) and reuse an existing active agent whose capability is
+    # semantically identical (cosine >= capability_dedup_threshold). Only real
+    # ("api") embeddings participate. The reused agent must already be in the
+    # in-memory registry so delegate can spawn it this run. Best-effort: any
+    # failure degrades to spawn-and-register, never blocks the run.
+    from src.memory.embeddings import embed_capability
+
+    dedup_text = (
+        f"{gap_description} | {proposal.description} | {proposal.goal_description}"
+    )
+    cap_embedding, emb_source = await embed_capability(dedup_text)
+    if cap_embedding is not None and emb_source == "api":
+        try:
+            from src.agents.persister import SubAgentPersister
+
+            threshold = get_settings().agent.capability_dedup_threshold
+            similar = await SubAgentPersister().find_similar(
+                cap_embedding, threshold=threshold
+            )
+            for cand in similar:
+                existing_spec = registry.get(cand["name"])
+                if existing_spec is not None:
+                    logger.info(
+                        f"Reusing existing sub-agent '{cand['name']}' for "
+                        f"gap '{gap_description[:60]}' "
+                        f"(similarity={cand['similarity']:.3f}) — skipping spawn"
+                    )
+                    return {
+                        "name": existing_spec.name,
+                        "description": existing_spec.description,
+                        "template_type": existing_spec.template_type,
+                        "tool_scope": existing_spec.tool_scope,
+                        "id": existing_spec.id,
+                        "reused": True,
+                    }
+        except Exception as e:
+            logger.debug(f"Sub-agent capability dedup skipped: {e}")
+
     # Create SubAgentSpec from proposal
     spec = SubAgentSpec(
         name=proposal.name,
@@ -224,8 +264,14 @@ async def _spawn_single_agent(
         depth_limit=0,
     )
 
-    # Persist to DB (best-effort, non-blocking)
-    await _persist_agent(spec)
+    # Persist to DB (best-effort, non-blocking). Store the capability embedding
+    # (only when a real "api" vector was produced) so future semantically-
+    # identical gaps reuse this agent instead of spawning a duplicate (B3).
+    await _persist_agent(
+        spec,
+        capability_embedding=cap_embedding if emb_source == "api" else None,
+        capability_text=dedup_text if emb_source == "api" else None,
+    )
 
     # Register in memory
     registry.register(spec)
@@ -282,13 +328,27 @@ def _parse_model_tier(tier_str: str) -> TaskComplexity:
     return tier_map.get(tier_str, TaskComplexity.SIMPLE)
 
 
-async def _persist_agent(spec: SubAgentSpec) -> None:
-    """Persist a sub-agent definition to DB (best-effort, non-fatal)."""
+async def _persist_agent(
+    spec: SubAgentSpec,
+    capability_embedding: list[float] | None = None,
+    capability_text: str | None = None,
+) -> None:
+    """Persist a sub-agent definition to DB (best-effort, non-fatal).
+
+    Args:
+        spec: SubAgentSpec to persist.
+        capability_embedding: Optional capability vector to store (B3 dedup).
+        capability_text: The text the embedding was derived from.
+    """
     try:
         from src.agents.persister import SubAgentPersister
 
         persister = SubAgentPersister()
-        agent_id = await persister.persist(spec)
+        agent_id = await persister.persist(
+            spec,
+            capability_embedding=capability_embedding,
+            capability_text=capability_text,
+        )
         if agent_id:
             logger.debug(f"Persisted sub-agent '{spec.name}' to DB: {agent_id}")
     except Exception as e:

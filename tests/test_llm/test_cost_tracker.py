@@ -258,7 +258,7 @@ class TestCheckBudget:
         """Budget messages should include dollar-formatted spend and limit."""
         tracker.get_daily_spend = AsyncMock(return_value=5.0)
 
-        is_ok, msg = await tracker.check_budget()
+        _, msg = await tracker.check_budget()  # budget flag not asserted here
 
         assert "$5.00" in msg
         assert "$10.00" in msg
@@ -378,21 +378,59 @@ class TestDBErrorHandling:
     """Tests for database error handling in CostTracker."""
 
     @pytest.mark.asyncio
-    async def test_record_usage_db_commit_error_propagates(
+    async def test_record_usage_commit_error_does_not_propagate(
         self, mock_session: MagicMock, mock_settings: MagicMock
     ) -> None:
-        """If session.commit fails, the error should propagate."""
+        """Bug D: a failed commit must not crash the run or poison the session.
+
+        Cost tracking is observability-only. Previously a failed commit raised
+        out of gateway.acompletion on every subsequent LLM call, cascading the
+        agent to heuristic fallbacks. record_usage must now swallow the failure,
+        roll the session back to a usable state, and return the calculated cost.
+        """
         mock_session.commit = AsyncMock(side_effect=RuntimeError("DB commit failed"))
+        mock_session.rollback = AsyncMock()
 
         with patch("src.llm.cost_tracker.CostLedger"):
             tracker = CostTracker(session=mock_session, settings=mock_settings)
-            with pytest.raises(RuntimeError, match="DB commit failed"):
-                await tracker.record_usage(
-                    model="test",
-                    provider="test",
-                    input_tokens=10,
-                    output_tokens=5,
-                )
+            cost = await tracker.record_usage(
+                model="test",
+                provider="test",
+                input_tokens=10,
+                output_tokens=5,
+            )
+
+        mock_session.rollback.assert_called_once()
+        assert cost == CostTracker.calculate_cost("test", 10, 5)
+
+    @pytest.mark.asyncio
+    async def test_record_usage_recovers_session_after_failure(
+        self, mock_session: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Bug D regression: the session is usable again after a failed commit.
+
+        The shared cost session is reused across every LLM call. Before the fix
+        a single duplicate-key IntegrityError left it in a pending-rollback
+        state that re-raised on every later call. After rollback(), the next
+        record_usage must commit normally with no second rollback.
+        """
+        mock_session.rollback = AsyncMock()
+        # First commit raises (simulating the poisoned flush); the next succeeds.
+        mock_session.commit = AsyncMock(side_effect=[RuntimeError("DB commit failed"), None])
+
+        with patch("src.llm.cost_tracker.CostLedger"):
+            tracker = CostTracker(session=mock_session, settings=mock_settings)
+            cost1 = await tracker.record_usage(
+                model="m", provider="p", input_tokens=10, output_tokens=5
+            )
+            cost2 = await tracker.record_usage(
+                model="m", provider="p", input_tokens=20, output_tokens=10
+            )
+
+        assert cost1 == CostTracker.calculate_cost("m", 10, 5)
+        assert cost2 == CostTracker.calculate_cost("m", 20, 10)
+        # Exactly one rollback — the recovery from the first call only.
+        assert mock_session.rollback.call_count == 1
 
     @pytest.mark.asyncio
     async def test_get_daily_spend_db_error_propagates(

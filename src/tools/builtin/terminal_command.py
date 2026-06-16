@@ -11,8 +11,8 @@ the locked ``code_executor`` sandbox cannot provide. Defense in depth:
 3. **Sub-command allowlists** for multi-mode tools: ``git`` read-only only;
    ``curl`` GET only; ``find`` dangerous predicates (``-exec``/``-delete``/…)
    blocked — so ``find . -exec rm {} \\;`` cannot escape the allowlist.
-4. **Sandboxed cwd** — resolved under ``workspace_root``/``results_root``;
-   path traversal rejected. Plus timeout + output cap.
+4. **Sandboxed cwd** — resolved under the shared project root (parent of
+   ``results_root``); path traversal rejected. Plus timeout + output cap.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing import Optional
 
 from loguru import logger
 
-from src.config.settings import get_settings
+from src.tools._paths import project_root
 
 # Layer 1: commands the agent may invoke. All read-oriented.
 _ALLOWED_COMMANDS = frozenset(
@@ -66,15 +66,19 @@ _DEFAULT_TIMEOUT = 30.0
 
 
 def _resolve_cwd(cwd: Optional[str]) -> tuple[Optional[Path], str]:
-    """Resolve cwd under an allowed root. Returns (path, error_or_empty)."""
-    settings = get_settings().agent
-    ws = Path(settings.workspace_root).resolve()
-    res = Path(settings.results_root).resolve()
+    """Resolve cwd under the shared project root. Returns (path, error_or_empty).
+
+    The project root (parent of ``results_root``) is the single cwd every
+    file-touching tool runs from; both ``results/`` and the workspace sit beneath
+    it, so resolving candidates relative to it accepts them uniformly instead of
+    a per-root disjunction. Traversal outside the root is rejected.
+    """
+    root = project_root()
     if cwd is None:
-        return ws, ""
+        return root, ""
     # Path joining: if `cwd` is absolute it replaces; if relative it appends.
-    candidate = (ws / cwd).resolve()
-    if candidate.is_relative_to(ws) or candidate.is_relative_to(res):
+    candidate = (root / cwd).resolve()
+    if candidate.is_relative_to(root):
         return candidate, ""
     return None, f"ERROR: cwd outside allowed roots: {cwd}"
 

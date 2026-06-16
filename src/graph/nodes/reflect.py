@@ -342,8 +342,8 @@ async def _llm_reflect(
             NODE_REFLECT,
             REFLECT_SYSTEM,
             REFLECT_USER,
-            TechniqueSelector,
             build_messages,
+            select_techniques_for_node,
         )
         from src.graph.schemas import ReflectionAnalysis
         from src.llm.structured_output import StructuredOutputManager
@@ -403,11 +403,10 @@ async def _llm_reflect(
         reflect_complexity = (
             goal.complexity if goal and goal.complexity else TaskComplexity.COMPLEX
         )
-        goal_pattern = TechniqueSelector.infer_goal_pattern(goal.text if goal else None)
-        techniques = TechniqueSelector().select(
+        techniques = select_techniques_for_node(
             complexity=reflect_complexity,
             node=NODE_REFLECT,
-            goal_pattern=goal_pattern,
+            goal_text=goal.text if goal else None,
         )
         messages = build_messages(str(REFLECT_SYSTEM), user_prompt, techniques)
 

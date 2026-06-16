@@ -16,6 +16,31 @@ if TYPE_CHECKING:
     from src.evolution.persister import EvolutionPersister
     from src.llm.gateway import LLMGateway
 
+# Mutation types whose content is not executable Python and so cannot be
+# sandbox-run. Shared by sandbox_test, ab_test, and post_deploy_verify so the
+# skip set stays in one place.
+_NON_EXECUTABLE_MUTATIONS: frozenset[MutationType] = frozenset({
+    MutationType.PROMPT,
+    MutationType.CONFIG,
+    MutationType.MEMORY,
+    MutationType.SUB_AGENT_PROMPT,
+    MutationType.SUB_AGENT_TOOLS,
+    MutationType.SUB_AGENT_CONFIG,
+    MutationType.SUB_AGENT_MODEL_TIER,
+})
+
+# Mutation types whose mutated_content is executable Python source
+# (CODE mutates a module, TOOL creates/edits a tools/<name>.py module). Both
+# must route through the code-strong codegen model with the no-truncation
+# syntax constraint (cheaper/code-weak models drop parens and fail the AST
+# gate on every retry), and both need the workspace sandbox_root in the
+# safety context so Layer 5's AST write-scoping (M4) doesn't false-positive
+# legitimate relative-path writes.
+_CODE_EMITTING_MUTATIONS: frozenset[MutationType] = frozenset({
+    MutationType.CODE,
+    MutationType.TOOL,
+})
+
 
 class SelfEvolutionEngine:
     """4-phase self-evolution engine.
@@ -77,12 +102,19 @@ class SelfEvolutionEngine:
                     "priority": "medium",
                 })
 
-        # Always consider tool optimization
-        opportunities.append({
-            "type": MutationType.TOOL,
-            "description": "Optimize tool selection and chaining",
-            "priority": "low",
-        })
+        # Tool optimization: metric-driven when execution_history carries
+        # per-tool results, else a generic fallback. The metric is derived (no
+        # new table) from ToolResult-like records — B2 prerequisite grounding
+        # M5's codegen in real per-tool performance.
+        tool_opps = self._tool_opportunities(execution_history)
+        if tool_opps:
+            opportunities.extend(tool_opps)
+        else:
+            opportunities.append({
+                "type": MutationType.TOOL,
+                "description": "Optimize tool selection and chaining",
+                "priority": "low",
+            })
 
         # Analyze sub-agent performance for optimization
         sub_agent_metrics = []
@@ -116,6 +148,57 @@ class SelfEvolutionEngine:
                 "generation": self._generation,
             },
         }
+
+    @staticmethod
+    def _tool_opportunities(
+        execution_history: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Derive per-tool optimization opportunities from execution metrics.
+
+        Scans ``execution_history`` for ToolResult-like records (a record that
+        is itself a tool result, or one carrying a ``tool_results`` list),
+        aggregates per-tool ``calls`` / ``success_rate`` / ``empty_output_rate``,
+        and emits a ``MutationType.TOOL`` opportunity for any tool with enough
+        samples (>=3) that is low-success (<0.5) or mostly-empty output (>0.5).
+        Returns ``[]`` when there is no tool-result data, so the caller falls
+        back to a generic tool opportunity.
+        """
+        per_tool: dict[str, dict[str, int]] = {}
+        for record in execution_history:
+            for tr in _iter_tool_results(record):
+                name = tr.get("tool_name") or "unknown"
+                bucket = per_tool.setdefault(
+                    name, {"calls": 0, "successes": 0, "empty": 0}
+                )
+                bucket["calls"] += 1
+                if tr.get("success"):
+                    bucket["successes"] += 1
+                if not str(tr.get("output", "") or "").strip():
+                    bucket["empty"] += 1
+
+        opportunities: list[dict[str, Any]] = []
+        for name, m in per_tool.items():
+            calls = m["calls"]
+            if calls < 3:
+                continue
+            success_rate = m["successes"] / calls
+            empty_rate = m["empty"] / calls
+            if success_rate < 0.5 or empty_rate > 0.5:
+                opportunities.append({
+                    "type": MutationType.TOOL,
+                    "description": (
+                        f"Tool '{name}' underperforming "
+                        f"(success={success_rate:.0%}, empty={empty_rate:.0%})"
+                    ),
+                    "priority": "high",
+                    "target_tool": name,
+                    "tool_metrics": {
+                        "calls": calls,
+                        "success_rate": success_rate,
+                        "empty_output_rate": empty_rate,
+                    },
+                })
+        return opportunities
 
     async def generate(
         self,
@@ -187,10 +270,35 @@ class SelfEvolutionEngine:
                 {"role": "user", "content": user_prompt},
             ]
 
-            response = await self._gateway.acompletion(  # type: ignore[union-attr]
-                messages=messages,
-                complexity=TaskComplexity.COMPLEX,
-            )
+            # Code-emitting mutations (CODE module edits + TOOL handler creation)
+            # route to a code-strong model with a strict codegen instruction (one
+            # complete function, no truncation), grounded in current_content —
+            # cheaper/general models truncate non-trivial handlers and fail the
+            # AST gate on every retry (a TOOL mutation on the generic tier dropped
+            # a paren every attempt, so evolution never deployed a tool fix).
+            # Other (config/prompt) types keep complexity routing.
+            emits_code = mutation_type in _CODE_EMITTING_MUTATIONS
+            if emits_code:
+                from src.config import get_settings
+
+                messages[1]["content"] += (
+                    "\n\nCODEGEN CONSTRAINT: emit exactly ONE complete, "
+                    "syntactically valid Python `async def` (plus any module-level "
+                    "helpers it needs) as mutated_content. Do NOT emit analysis, "
+                    "comments-only, or a partial/truncated function. Derive it "
+                    "from current_content. target_path must end in .py."
+                )
+                codegen_model = get_settings().agent.tool_generation_model
+                response = await self._gateway.acompletion(  # type: ignore[union-attr]
+                    messages=messages,
+                    model=codegen_model,
+                    response_format={"type": "json_object"},
+                )
+            else:
+                response = await self._gateway.acompletion(  # type: ignore[union-attr]
+                    messages=messages,
+                    complexity=TaskComplexity.COMPLEX,
+                )
 
             extractor = StructuredOutputManager()
             proposal = await extractor.extract(response.content, MutationProposal)
@@ -291,12 +399,25 @@ class SelfEvolutionEngine:
         logger.info(f"Validating mutation: {proposal.get('description', 'unknown')}")
 
         # Run safety pipeline
+        context: dict[str, Any] = {
+            "mutation_type": proposal.get("mutation_type"),
+            "description": proposal.get("description"),
+        }
+        # Code-emitting mutations may write files — give Layer 5 the sandbox
+        # root so its AST write-scoping (M4) flags only out-of-sandbox writes
+        # (relative workspace writes are legitimate and must not be
+        # false-positived).
+        if proposal.get("mutation_type") in _CODE_EMITTING_MUTATIONS:
+            try:
+                from src.config import get_settings
+
+                context["sandbox_root"] = get_settings().agent.workspace_root
+            except Exception:
+                pass
+
         safety_result = await self._safety.validate(
             code=mutated_content,
-            context={
-                "mutation_type": proposal.get("mutation_type"),
-                "description": proposal.get("description"),
-            },
+            context=context,
         )
 
         if not safety_result["passed"]:
@@ -337,9 +458,7 @@ class SelfEvolutionEngine:
 
         # Non-code mutations (prompts, configs) cannot be executed in a sandbox
         mutation_type = proposal.get("mutation_type")
-        if mutation_type in (MutationType.PROMPT, MutationType.CONFIG, MutationType.MEMORY,
-                            MutationType.SUB_AGENT_PROMPT, MutationType.SUB_AGENT_TOOLS,
-                            MutationType.SUB_AGENT_CONFIG, MutationType.SUB_AGENT_MODEL_TIER):
+        if mutation_type in _NON_EXECUTABLE_MUTATIONS:
             logger.debug(f"Skipping sandbox for {mutation_type} mutation (non-executable)")
             return {"passed": True, "note": f"non-code mutation ({mutation_type}), sandbox skipped"}
 
@@ -393,9 +512,7 @@ class SelfEvolutionEngine:
 
         # Non-code mutations cannot be meaningfully A/B tested in a sandbox
         mutation_type = proposal.get("mutation_type")
-        if mutation_type in (MutationType.PROMPT, MutationType.CONFIG, MutationType.MEMORY,
-                            MutationType.SUB_AGENT_PROMPT, MutationType.SUB_AGENT_TOOLS,
-                            MutationType.SUB_AGENT_CONFIG, MutationType.SUB_AGENT_MODEL_TIER):
+        if mutation_type in _NON_EXECUTABLE_MUTATIONS:
             logger.debug(f"Skipping A/B test for {mutation_type} mutation (non-executable)")
             return {"is_significant": True, "note": f"non-code mutation ({mutation_type}), A/B test skipped"}
 
@@ -504,12 +621,16 @@ class SelfEvolutionEngine:
         logger.info(f"Deploying mutation (generation {self._generation})")
 
         commit_hash: str | None = None
+        pre_deploy_hash: str | None = None
         target_path = proposal.get("target_path")
         mutated_content = proposal.get("mutated_content", "")
 
-        # Apply via git tracker if available
+        # Apply via git tracker if available. Capture the pre-deploy hash FIRST
+        # so a failed post-deploy verify (M6) can roll the shadow repo back to
+        # exactly this state via git_tracker.rollback(pre_deploy_hash).
         if git_tracker is not None:
             try:
+                pre_deploy_hash = await git_tracker.get_current_hash()
                 # Use a fallback path when target_path is not set
                 write_path = target_path or "evolution/latest_mutation.json"
                 await git_tracker.apply_mutation(write_path, mutated_content)
@@ -520,6 +641,7 @@ class SelfEvolutionEngine:
             except Exception as e:
                 logger.warning(f"Git tracker failed during deploy: {e}")
                 commit_hash = None
+                pre_deploy_hash = None
 
         return {
             "deployed": True,
@@ -527,9 +649,110 @@ class SelfEvolutionEngine:
             "mutation_type": proposal.get("mutation_type"),
             "description": proposal.get("description"),
             "commit_hash": commit_hash,
+            "pre_deploy_hash": pre_deploy_hash,
             "target_path": target_path,
             "rationale": proposal.get("rationale", ""),
             "ab_result": ab_result,
+        }
+
+    async def post_deploy_verify(
+        self,
+        proposal: dict[str, Any],
+        sandbox: Any | None = None,
+    ) -> dict[str, Any]:
+        """Phase 6.5: post-deploy smoke verify (B6).
+
+        Re-executes the deployed artifact in the sandbox to confirm it still
+        runs cleanly once committed to the shadow repo — a guard against a
+        regression that only surfaces once the mutation is at rest. A failure
+        here triggers ``rollback_deployment`` in ``run_cycle``. Non-executable
+        mutations (prompts, configs) and a missing sandbox skip the verify
+        (``passed``) because there is nothing to smoke-test.
+
+        Args:
+            proposal: The mutation proposal (its ``mutated_content`` is re-run).
+            sandbox: Optional SandboxExecutor.
+
+        Returns:
+            Dict with ``passed`` and, on failure, a ``reason``.
+        """
+        if sandbox is None:
+            return {"passed": True, "note": "no sandbox — post-deploy verify skipped"}
+
+        mutation_type = proposal.get("mutation_type")
+        if mutation_type in _NON_EXECUTABLE_MUTATIONS:
+            logger.debug(f"Skipping post-deploy verify for {mutation_type} (non-executable)")
+            return {
+                "passed": True,
+                "note": f"non-code mutation ({mutation_type}), verify skipped",
+            }
+
+        mutated_content = proposal.get("mutated_content", "")
+        if not mutated_content:
+            return {"passed": False, "reason": "No mutated content to verify post-deploy"}
+
+        logger.info("Running post-deploy smoke verify")
+        try:
+            result = await sandbox.execute_code(mutated_content)
+            passed = result.success and not result.timed_out
+            if not passed:
+                reason = "timed out" if result.timed_out else f"exit code {result.exit_code}"
+                logger.warning(f"Post-deploy verify failed: {reason}")
+                return {"passed": False, "reason": f"post-deploy smoke failed: {reason}"}
+            return {"passed": True, "sandbox_result": {"success": result.success}}
+        except Exception as e:
+            logger.warning(f"Post-deploy verify error: {e}")
+            return {"passed": False, "reason": str(e)}
+
+    async def rollback_deployment(
+        self,
+        deployment: dict[str, Any],
+        git_tracker: Any,
+    ) -> dict[str, Any]:
+        """Revert the shadow repo to ``pre_deploy_hash`` after a failed verify (B6).
+
+        Captures the diff the deployment introduced (vs ``pre_deploy_hash``)
+        BEFORE undoing it — after ``git reset --hard`` the tree is clean and the
+        diff is empty. Then delegates to ``git_tracker.rollback`` (M4: reset
+        --hard + clean -fd), confined to the disposable shadow repo. The running
+        agent's ``src/`` is never touched.
+
+        Args:
+            deployment: The ``deploy`` result carrying ``pre_deploy_hash``.
+            git_tracker: The GitTracker whose shadow repo should be reverted.
+
+        Returns:
+            Dict with ``rolled_back`` (bool), ``pre_deploy_hash``, and the
+            ``reverted_diff`` text for telemetry.
+        """
+        pre_deploy_hash = deployment.get("pre_deploy_hash")
+        if not pre_deploy_hash:
+            return {"rolled_back": False, "reason": "no pre_deploy_hash recorded"}
+
+        reverted_diff = ""
+        try:
+            reverted_diff = await git_tracker.get_diff(since_hash=pre_deploy_hash)
+        except Exception as e:
+            logger.debug(f"Could not capture reverted diff: {e}")
+
+        try:
+            ok = await git_tracker.rollback(pre_deploy_hash)
+        except Exception as e:
+            logger.warning(f"Rollback of shadow repo failed: {e}")
+            return {
+                "rolled_back": False,
+                "reason": str(e),
+                "pre_deploy_hash": pre_deploy_hash,
+            }
+
+        logger.info(
+            f"Rolled back shadow repo to {pre_deploy_hash[:8]} "
+            f"(reverted {len(reverted_diff)} bytes of diff)"
+        )
+        return {
+            "rolled_back": bool(ok),
+            "pre_deploy_hash": pre_deploy_hash,
+            "reverted_diff": reverted_diff,
         }
 
     async def run_cycle(
@@ -684,12 +907,67 @@ class SelfEvolutionEngine:
 
         deployed = deployment.get("deployed", False)
 
-        # Persist the final mutation + terminal outcome (deployed|rejected).
+        # Phase 6.5: post-deploy smoke verify (B6). Re-execute the deployed
+        # artifact; a regression reverts the shadow repo to pre_deploy_hash.
+        # Non-code mutations skip the smoke (nothing to execute), so this only
+        # ever triggers for executable (CODE) deployments.
+        rolled_back = False
+        smoke_failed = False
+        smoke_result: dict[str, Any] = {}
+        rollback_info: dict[str, Any] = {}
+        if deployed:
+            smoke_result = await self.post_deploy_verify(proposal, sandbox)
+            smoke_failed = not smoke_result.get("passed", True)
+            if smoke_failed:
+                if git_tracker is not None and deployment.get("pre_deploy_hash"):
+                    rollback_info = await self.rollback_deployment(
+                        deployment, git_tracker
+                    )
+                    rolled_back = bool(rollback_info.get("rolled_back"))
+                logger.warning(
+                    f"Post-deploy verify failed; rolled_back={rolled_back}: "
+                    f"{smoke_result.get('reason')}"
+                )
+
+        # Terminal status — rolled_back / verify_failed take precedence over
+        # deployed so a regressing mutation is never reported as a success.
+        if rolled_back:
+            terminal_status = "rolled_back"
+        elif smoke_failed:
+            terminal_status = "verify_failed"
+        elif deployed:
+            terminal_status = "deployed"
+        else:
+            terminal_status = "rejected"
+
+        effective_deploy = deployed and not smoke_failed
+
+        # Persist the final mutation + terminal outcome.
         if self._persister is not None:
             mutation_id = await self._persister.record_mutation(
                 chain_id, proposal, status="generated"
             )
-            if deployed:
+            if terminal_status == "rolled_back":
+                await self._persister.update_mutation_status(mutation_id, "rolled_back")
+                await self._persister.record_event(
+                    chain_id,
+                    "rolled_back",
+                    {
+                        "reason": smoke_result.get("reason"),
+                        "pre_deploy_hash": deployment.get("pre_deploy_hash"),
+                        "rolled_back": True,
+                    },
+                )
+                await self._persister.complete_chain(chain_id, "rolled_back")
+            elif terminal_status == "verify_failed":
+                await self._persister.update_mutation_status(mutation_id, "verify_failed")
+                await self._persister.record_event(
+                    chain_id,
+                    "verify_failed",
+                    {"reason": smoke_result.get("reason"), "rolled_back": False},
+                )
+                await self._persister.complete_chain(chain_id, "verify_failed")
+            elif effective_deploy:
                 await self._persister.update_mutation_status(mutation_id, "deployed")
                 await self._persister.record_event(
                     chain_id,
@@ -710,15 +988,41 @@ class SelfEvolutionEngine:
                 await self._persister.complete_chain(chain_id, "rejected")
 
         return {
-            "status": "deployed" if deployed else "rejected",
-            "deployed": deployed,
+            "status": terminal_status,
+            "deployed": effective_deploy,
             "generation": self._generation,
             "proposal": proposal,
             "validation": validation,
             "sandbox_result": sandbox_result,
             "ab_result": ab_result,
             "deployment": deployment,
+            "smoke_result": smoke_result,
+            "rollback": rollback_info,
             "mutations_proposed": 1,
-            "mutations_deployed": 1 if deployed else 0,
+            "mutations_deployed": 1 if effective_deploy else 0,
             "chain_id": chain_id,
         }
+
+
+def _iter_tool_results(record: Any) -> list[dict[str, Any]]:
+    """Extract ToolResult-like dicts from one ``execution_history`` record.
+
+    Handles: a record that IS a tool result (``tool_name`` + ``success``), one
+    carrying a nested ``tool_results`` list, and a pydantic ``ToolResult`` object
+    exposed via attribute access. Non-tool records yield nothing.
+    """
+    out: list[dict[str, Any]] = []
+    if isinstance(record, dict):
+        if "tool_name" in record and "success" in record:
+            out.append(record)
+        nested = record.get("tool_results")
+        if isinstance(nested, list):
+            for tr in nested:
+                out.extend(_iter_tool_results(tr))
+    elif hasattr(record, "tool_name") and hasattr(record, "success"):
+        out.append({
+            "tool_name": getattr(record, "tool_name", ""),
+            "success": bool(getattr(record, "success", False)),
+            "output": getattr(record, "output", ""),
+        })
+    return out

@@ -111,7 +111,13 @@ START -> classify -> plan -> retrieve_memory -> execute <-> reflect
 - **7-Layer Safety** — AST validation, type checking, semantic analysis, sandboxed execution, regression tests, HITL, version control
 - **Skill Crystallization** — successful patterns auto-extracted into versioned, reusable skills (80–95% cost reduction over time)
 - **A/B Testing** — statistical comparison before deploying any mutation
-- **Budget Enforcement** — 70% warn, 90% critical, 100% hard-cap
+- **Budget Enforcement** — 70% warn, 90% critical, 100% hard-cap with model-tier downgrade
+- **Provider Circuit Breaker** — per-provider breaker on the LLM gateway opens after consecutive transient (rate-limit/5xx/timeout) failures, skips to the next fallback-chain provider, and half-open probes recovery; auth (401/403) errors never trip it
+- **Prompting-Technique Layer** — a selector maps task complexity + node + goal pattern to the right technique (few-shot for simple, chain-of-thought / least-to-most for complex, chain-of-verification / self-consistency for verify-critical), spliced into plan/execute/reflect/verify prompts from versioned Jinja2 templates
+- **Capability Governance** — stored tools (≤25 active) and sub-agents (≤60 active) are curated at load: semantic-dedup against existing capabilities, cumulative-cap retirement of the lowest-scoring, and redundancy retirement keep the ecosystem from bloating across runs
+- **Cost-Ledger Resilience** — cost tracking is observability-only: a failed ledger write rolls back its own transaction and is logged, but never aborts the run
+- **Verify Grounding** — the verify node spot-checks that cited result paths actually exist on disk before a run is marked complete
+- **Autonomous Memory Folding** — the reflect node compresses long live conversations into episode/working/tool summaries (via `RemoveMessage`), persisting them to warm memory for recall on later runs
 - **Runtime Tool Creation** — Agent detects missing capabilities, generates tools via LLM with double-barrier security, and registers them for immediate use
 - **Sub-Agent Delegation** — Agent spawns specialized sub-agents as isolated LangGraph subgraphs, delegates subtasks, tracks performance with rolling metrics, and optimizes them via the evolution engine
 
@@ -252,19 +258,22 @@ alembic upgrade head
 > evolution history. Use `docker compose down` (no flags) to stop the containers
 > while preserving data; `docker compose up -d` resumes on the same volumes.
 >
-> The host runs against the docker-published ports (`5432` Postgres, `6379`
-> Redis). If a host-local Postgres/Redis is also listening on those ports it
-> will silently shadow the container — every run logs the resolved database on
-> connect (e.g. `Database engine created → localhost:5432/turing_agent`); verify
-> the host/database match the container (`turing-postgres` / `turing_agent`).
+> The host runs against the docker-published ports (`5433` Postgres, `6380`
+> Redis — the non-default host ports avoid clashing with a host-local
+> Postgres/Redis that other apps may own on `5432`/`6379`; the container ports
+> remain the standard `5432`/`6379`). If a host-local Postgres/Redis is also
+> listening on those published ports it will silently shadow the container —
+> every run logs the resolved database on connect (e.g.
+> `Database engine created → localhost:5433/turing_agent`); verify the
+> host/database match the container (`turing-postgres` / `turing_agent`).
 
 ### 2. Configure
 
 ```bash
 cp .env.example .env
 # Edit .env — at minimum set:
-#   DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/turing_agent
-#   REDIS_URL=redis://localhost:6379/0
+#   DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5433/turing_agent
+#   REDIS_URL=redis://localhost:6380/0
 #   OPENAI_API_KEY=your-key-here
 ```
 
@@ -289,6 +298,9 @@ python main.py --interactive
 
 # Skip evolution phase
 python main.py --no-evolution --goal "..."
+
+# Stream the final answer token-by-token to stdout
+python main.py --stream --goal "..."
 ```
 
 ### 4. Run tests
@@ -314,9 +326,16 @@ All tools use the **LangChain `@tool` decorator** with type-annotated parameters
 |---|---|
 | `code_executor` | Run Python in a subprocess (async, timeout-safe) |
 | `code_validator` | AST + security check on Python code |
-| `web_search` | Web search via httpx |
+| `terminal_command` | Allowlisted, shell-free terminal command tool |
 | `file_reader` | Read any text file |
 | `file_writer` | Write files (creates dirs automatically) |
+| `list_directory` | List directory entries within a sandboxed root |
+| `web_search` | Web search via httpx |
+| `web_scraper` | Fetch a URL and return its main content as clean markdown |
+| `http_request` | Make controlled HTTP requests to external APIs/services |
+| `document_parser` | Extract text from PDF/DOCX/XLSX/CSV documents |
+| `environment_inspect` | Inspect the runtime environment (OS, CPU, disk, RAM, packages) |
+| `get_current_time` | Return the current wall-clock timestamp, timezone, and date |
 | `self_inspect` | Read the agent's own source code |
 | `memory_search` | Query agent's 3-tier memory |
 
@@ -384,7 +403,7 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | Variable | Default | Description |
 |---|---|---|
 | `DATABASE_URL` | — | PostgreSQL connection string (asyncpg driver) |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
+| `REDIS_URL` | `redis://localhost:6380/0` | Redis connection string |
 | `OPENAI_API_KEY` | — | OpenAI provider API key |
 | `ANTHROPIC_API_KEY` | — | Anthropic provider API key |
 | `DEEPSEEK_API_KEY` | — | DeepSeek provider API key |

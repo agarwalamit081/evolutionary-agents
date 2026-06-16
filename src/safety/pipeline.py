@@ -6,6 +6,8 @@ import ast
 import re
 from typing import Any
 
+from src.graph.enums import MutationType
+
 
 
 # Forbidden patterns that should never appear in generated code
@@ -24,6 +26,19 @@ _FORBIDDEN_PATTERNS: list[str] = [
     r"netrc",
     r"cred",
 ]
+
+
+# Mutation types whose ``mutated_content`` is executable Python source. Only
+# these run the AST-dependent safety layers (syntax / imports / semantic);
+# prompt/config/memory text would hard-fail ``ast.parse`` and so could never
+# deploy — the most common evolution opportunity (prompt refinement) was
+# permanently rejected at the syntax layer. Callers that pass no
+# ``mutation_type`` (dynamic-tool validation) are treated as code and run every
+# layer. New mutation types default to non-code (code is the special case).
+_CODE_MUTATIONS: frozenset[MutationType] = frozenset({
+    MutationType.CODE,
+    MutationType.TOOL,
+})
 
 
 class SafetyPipeline:
@@ -64,8 +79,19 @@ class SafetyPipeline:
         results: dict[str, dict[str, Any]] = {}
         all_issues: list[str] = []
 
+        # AST-dependent layers (syntax/imports/semantic) only apply to
+        # Python-source mutations. Non-code mutations (prompt/config/memory
+        # text) skip them — ast.parse on natural language hard-fails, so
+        # otherwise non-code mutations could never deploy. Absent mutation_type
+        # (dynamic-tool validation) runs every layer.
+        mutation_type = _ctx.get("mutation_type")
+        run_code_layers = mutation_type is None or mutation_type in _CODE_MUTATIONS
+
         # Layer 1: Syntax validation
-        results["syntax"] = self._check_syntax(code)
+        if run_code_layers:
+            results["syntax"] = self._check_syntax(code)
+        else:
+            results["syntax"] = {"passed": True, "issues": [], "note": "skipped: non-code mutation"}
         if not results["syntax"]["passed"]:
             all_issues.extend(results["syntax"]["issues"])
 
@@ -79,13 +105,22 @@ class SafetyPipeline:
         if not results["security"]["passed"]:
             all_issues.extend(results["security"]["issues"])
 
-        # Layer 4: Import validation
-        results["imports"] = self._check_imports(code, allowlisted_modules)
+        # Layer 4: Import validation — context-requested modules extend the
+        # allowlist (e.g. an evolution CODE mutation that legitimately needs a
+        # normally-blocked module), layered on the caller's explicit allowlist.
+        effective_allowlist = set(allowlisted_modules or ())
+        required = _ctx.get("required_modules")
+        if isinstance(required, (set, list, tuple)):
+            effective_allowlist |= set(required)
+        if run_code_layers:
+            results["imports"] = self._check_imports(code, effective_allowlist)
+        else:
+            results["imports"] = {"passed": True, "issues": [], "note": "skipped: non-code mutation"}
         if not results["imports"]["passed"]:
             all_issues.extend(results["imports"]["issues"])
 
-        # Layer 5: Behavioral constraints
-        results["behavioral"] = self._check_behavioral(code)
+        # Layer 5: Behavioral constraints (AST file-write scoping)
+        results["behavioral"] = self._check_behavioral(code, _ctx)
         if not results["behavioral"]["passed"]:
             all_issues.extend(results["behavioral"]["issues"])
 
@@ -98,7 +133,10 @@ class SafetyPipeline:
             results["sandbox"] = {"passed": True, "issues": [], "note": "sandbox skipped (no executor)"}
 
         # Layer 7: Semantic check
-        results["semantic"] = self._check_semantic(code)
+        if run_code_layers:
+            results["semantic"] = self._check_semantic(code)
+        else:
+            results["semantic"] = {"passed": True, "issues": [], "note": "skipped: non-code mutation"}
         if not results["semantic"]["passed"]:
             all_issues.extend(results["semantic"]["issues"])
 
@@ -201,22 +239,65 @@ class SafetyPipeline:
             return {"passed": False, "issues": issues}
         return {"passed": True, "issues": []}
 
-    def _check_behavioral(self, code: str) -> dict[str, Any]:
-        """Layer 5: Check for behavioral constraints."""
+    def _check_behavioral(
+        self, code: str, context: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Layer 5: Behavioral constraints.
+
+        Flags (a) unconditional ``while True`` loops with no break/return
+        (heuristic) and (b) ``open(...)`` calls in a write mode whose literal
+        path resolves outside the sandbox root. This replaces the former brittle
+        ``"open(" in code and "write" in code`` substring test, which false-
+        positives on any legitimate relative-path write and false-negatives on
+        writes that never mention the word "write". Writes with a dynamic
+        (non-literal) path can't be statically resolved and are left to Layer 6.
+        """
         issues: list[str] = []
 
-        # Check for infinite loop patterns
         if "while True:" in code and "break" not in code and "return" not in code:
             issues.append("Potential infinite loop: while True without break/return")
 
-        # Check for file write without sandbox
-        if "open(" in code and "write" in code:
-            if "sandbox" not in code.lower() and "tmp" not in code.lower():
-                issues.append("File write outside sandbox directory")
+        issues.extend(self._detect_unsandboxed_writes(code, context))
 
         if issues:
             return {"passed": False, "issues": issues}
         return {"passed": True, "issues": []}
+
+    def _detect_unsandboxed_writes(
+        self, code: str, context: dict[str, Any] | None
+    ) -> list[str]:
+        """AST-walk ``open()`` calls; flag write-mode paths outside the sandbox.
+
+        Non-Python or syntactically-invalid input yields no issues here (Layer 1
+        reports syntax errors). The sandbox root is ``context["sandbox_root"]``,
+        defaulting to ``AgentSettings.workspace_root`` when absent.
+        """
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return []
+
+        sandbox_root = (context or {}).get("sandbox_root")
+        if sandbox_root is None:
+            try:
+                from src.config import get_settings
+
+                sandbox_root = get_settings().agent.workspace_root
+            except Exception:
+                sandbox_root = None
+
+        issues: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Name) and node.func.id == "open"):
+                continue
+            path = _open_path_literal(node)
+            if path is None or not _is_write_open(node):
+                continue
+            if _path_outside_sandbox(path, sandbox_root):
+                issues.append(f"File write outside sandbox directory: {path}")
+        return issues
 
     async def _check_sandbox(self, code: str, sandbox_executor: Any) -> dict[str, Any]:
         """Layer 6: Execute code in sandbox and check for runtime errors."""
@@ -289,3 +370,58 @@ class SafetyPipeline:
         if issues:
             return {"passed": False, "issues": issues}
         return {"passed": True, "issues": []}
+
+
+# ── Layer 5 helpers ────────────────────────────────────────────────────
+
+
+def _open_path_literal(call: ast.Call) -> str | None:
+    """Return the literal path arg of an ``open()`` call, or None if dynamic."""
+    if not call.args:
+        return None
+    arg = call.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    return None
+
+
+def _is_write_open(call: ast.Call) -> bool:
+    """True if the ``open()`` mode implies writing (``w``/``a``/``x``/``+``)."""
+    mode = "r"
+    if len(call.args) >= 2:
+        val = call.args[1]
+        if isinstance(val, ast.Constant) and isinstance(val.value, str):
+            mode = val.value
+    else:
+        for kw in call.keywords:
+            if (
+                kw.arg == "mode"
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+            ):
+                mode = kw.value.value
+                break
+    return any(ch in mode for ch in ("w", "a", "x", "+"))
+
+
+def _path_outside_sandbox(path: str, sandbox_root: str | None) -> bool:
+    """True if ``path`` is an absolute write target outside ``sandbox_root``.
+
+    Relative paths resolve under the process working directory (the sandbox) and
+    are treated as inside — a legitimate ``open("out.json", "w")`` is allowed.
+    An absolute path with no determinable sandbox root is flagged, since we
+    cannot prove it is safe.
+    """
+    from pathlib import Path
+
+    target = Path(path)
+    if not target.is_absolute():
+        return False
+    if sandbox_root is None:
+        return True
+    try:
+        root = Path(sandbox_root).resolve()
+        target.resolve().relative_to(root)
+        return False
+    except (ValueError, OSError):
+        return True

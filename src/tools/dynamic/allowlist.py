@@ -5,10 +5,14 @@ pre-imported namespace for handler materialization (double-barrier security).
 
 Scope note: the dynamic-tool executor is Python-only, so this allowlist covers
 Python import names only. Node/npm packages are N/A — there is no JS runtime to
-install them into. Browser-automation packages (playwright/selenium) are a
-deliberately DEFERRED opt-in: they require a managed browser binary and
-network-egress policy that the sandbox does not yet provide, so they stay off
-the allowlist until that work lands.
+install them into. Browser-automation packages (playwright/selenium/puppeteer/
+playwright_stealth) are a deliberately DEFERRED opt-in: they require a managed
+browser binary and network-egress/detection-evasion policy that the sandbox
+does not yet provide, so they stay off the allowlist until that work lands.
+Safe read-only packages added in this pass: requests (HTTP client),
+dateutil (python-dateutil, date parsing), jsonschema (JSON schema validation),
+and tenacity (retry primitives) — none introduce a managed binary or
+detection-evasion surface.
 """
 
 from __future__ import annotations
@@ -73,6 +77,15 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     # allowlisted infra endpoints. ``httpx``/``aiohttp`` above carry the same
     # egress capability and the same responsibility.
     "redis",
+    # ── Safe read-only utilities ───────────────────────────────────
+    # ``requests``: synchronous HTTP client (network-egress, same contract as
+    #   httpx/aiohttp above). ``dateutil``: robust date parsing (pip:
+    #   python-dateutil). ``jsonschema``: validate generated/captured JSON.
+    #   ``tenacity``: retry-with-backoff primitives for transient failures.
+    "requests",
+    "dateutil",
+    "jsonschema",
+    "tenacity",
 })
 
 # Maximum number of tools that can be created per agent run.
@@ -105,6 +118,13 @@ SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     "markdown-it-py",
     # ── Infrastructure (network egress — see ALLOWED_MODULES note) ─
     "redis",
+    # ── Safe read-only utilities (see ALLOWED_MODULES note) ────────
+    # requests ← requests; dateutil ← python-dateutil; jsonschema ← jsonschema;
+    # tenacity ← tenacity.
+    "requests",
+    "python-dateutil",
+    "jsonschema",
+    "tenacity",
 })
 
 

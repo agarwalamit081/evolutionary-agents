@@ -29,6 +29,7 @@ from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY, ModelTier
 from src.config.settings import Settings
 from src.graph.enums import TaskComplexity
 from src.graph.models import CostRecord
+from src.llm.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from src.llm.cache import PromptCache
 from src.llm.cost_tracker import CostTracker
 from src.llm.model_router import ModelRouter
@@ -71,6 +72,10 @@ class LLMGateway:
         self._settings = settings
         self._rate_limiter = RateLimiterRegistry(settings)
         self._model_router = ModelRouter(settings)
+        # Per-provider circuit breaker (sits ABOVE per-call tenacity retry):
+        # decides whether a provider should be attempted at all. When open for
+        # a provider, the fallback loop skips to the next provider in the chain.
+        self._circuit_breaker = CircuitBreaker()
         self._structured_output = StructuredOutputManager()
         self._cost_tracker: CostTracker | None = None
         self._cache: PromptCache | None = None
@@ -112,6 +117,18 @@ class LLMGateway:
     def reset_cost_records(self) -> None:
         """Clear the accumulated cost records."""
         self._cost_records.clear()
+
+    async def cache_stats(self) -> dict[str, Any]:
+        """Return prompt-cache hit/miss stats, or zeros when caching is disabled.
+
+        Delegates to the injected :class:`PromptCache` (see :meth:`set_cache`).
+        When no cache is wired up the returned counters are all zero rather than
+        raising, so callers (metrics sinks, health endpoints) can treat the
+        absence of a cache as a degenerate-but-valid state.
+        """
+        if self._cache is None:
+            return {"hits": 0, "misses": 0, "hit_rate": 0.0, "size_est": 0}
+        return await self._cache.stats()
 
     async def acompletion(
         self,
@@ -375,6 +392,15 @@ class LLMGateway:
         for attempt_model in fallback_chain:
             attempt_provider = self._extract_provider(attempt_model)
             try:
+                # Circuit breaker: skip providers whose breaker is open, falling
+                # through to the next provider in the chain (outage protection).
+                await self._circuit_breaker.before_call(attempt_provider)
+            except CircuitBreakerOpenError:
+                logger.info(
+                    f"Circuit open for {attempt_provider}, skipping to next fallback"
+                )
+                continue
+            try:
                 kwargs = self._build_kwargs(
                     attempt_model, temperature, max_tokens, metadata,
                     thinking=thinking, reasoning_effort=reasoning_effort,
@@ -385,19 +411,31 @@ class LLMGateway:
                     kwargs["response_format"] = response_format
 
                 response = await self._retry_call(messages, **kwargs)
+                await self._circuit_breaker.record_success(attempt_provider)
                 return self._parse_response(response, attempt_model, attempt_provider)
 
             except _TRANSIENT_ERRORS as exc:
                 last_error = exc
+                await self._circuit_breaker.record_failure(
+                    attempt_provider, transient=True
+                )
                 logger.warning(
                     f"LLM call failed for {attempt_model}: {exc.__class__.__name__}: {exc}"
                 )
                 continue
             except (litellm.AuthenticationError, litellm.BadRequestError) as exc:  # type: ignore[attr-defined]
+                # Auth/validation errors must NOT trip the breaker (one bad key
+                # is not a provider outage); record with transient=False.
+                await self._circuit_breaker.record_failure(
+                    attempt_provider, transient=False
+                )
                 logger.error(f"Non-retryable error for {attempt_model}: {exc}")
                 continue
             except Exception as exc:
                 last_error = exc
+                await self._circuit_breaker.record_failure(
+                    attempt_provider, transient=True
+                )
                 logger.error(f"Unexpected error for {attempt_model}: {exc}")
                 continue
 

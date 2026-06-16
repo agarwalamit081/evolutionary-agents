@@ -291,41 +291,106 @@ def generate_memory_config(
     }
 
 
+def _first_function(source: str) -> tuple[str, bool] | None:
+    """Return ``(name, is_async)`` of the first top-level function, or None."""
+    import ast as _ast
+
+    if not source:
+        return None
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if isinstance(node, _ast.AsyncFunctionDef):
+            return node.name, True
+        if isinstance(node, _ast.FunctionDef):
+            return node.name, False
+    return None
+
+
+def _memoization_wrapper(name: str, is_async: bool) -> str:
+    """Emit an async memoization wrapper around function ``name``.
+
+    The wrapper caches results keyed by ``(args, sorted kwargs)``. ``is_async``
+    selects ``await`` vs. a plain call so the wrapper composes with either
+    signature. Module-level ``_EVOLUTION_MEMO_CACHE`` avoids colliding with any
+    caller-defined cache.
+    """
+    call = (
+        f"await {name}(*args, **kwargs)"
+        if is_async
+        else f"{name}(*args, **kwargs)"
+    )
+    return (
+        "_EVOLUTION_MEMO_CACHE = {}\n"
+        "\n"
+        "\n"
+        f"async def {name}_cached(*args, **kwargs):\n"
+        f'    """Memoized variant of {name} (evolution heuristic)."""\n'
+        "    key = (args, tuple(sorted(kwargs.items())))\n"
+        "    if key in _EVOLUTION_MEMO_CACHE:\n"
+        "        return _EVOLUTION_MEMO_CACHE[key]\n"
+        f"    result = {call}\n"
+        "    _EVOLUTION_MEMO_CACHE[key] = result\n"
+        "    return result\n"
+    )
+
+
+# Standalone memoization helper emitted when current_content has no parseable
+# function to wrap (still real, loadable, Layer-7-passing async code).
+_STANDALONE_MEMO_HELPER = (
+    "_EVOLUTION_MEMO_CACHE = {}\n"
+    "\n"
+    "\n"
+    "async def memoized_compute(key, factory):\n"
+    '    """Return the cached result for key, computing it via factory once."""\n'
+    "    if key in _EVOLUTION_MEMO_CACHE:\n"
+    "        return _EVOLUTION_MEMO_CACHE[key]\n"
+    "    result = await factory()\n"
+    "    _EVOLUTION_MEMO_CACHE[key] = result\n"
+    "    return result\n"
+)
+
+
 def generate_code_improvement(
     description: str,
     current_content: str | None = None,
 ) -> dict[str, Any]:
-    """Generate a code improvement suggestion.
+    """Generate a real, loadable code improvement (heuristic fallback).
 
-    For heuristic mode this produces a structured analysis rather than
-    actual code changes (LLM generation is preferred for CODE mutations).
+    When ``current_content`` defines a function, wraps it with a memoization
+    layer (a cached variant avoiding recomputation of repeated calls);
+    otherwise emits a standalone memoization helper. Unlike the prior
+    analysis-only JSON, this is real Python that passes the safety pipeline and
+    can be sandbox-tested and deployed (B2). ``target_path`` is a ``.py``.
 
     Args:
         description: The opportunity description.
         current_content: Current code to improve.
 
     Returns:
-        Dict with content, target_path, and rationale.
+        Dict with content (Python source), target_path (.py), and rationale.
     """
-    _ = current_content  # noqa: ARG001 — kept for interface consistency with LLM generation
-    content = {
-        "analysis": description,
-        "suggestion": (
-            "LLM generation recommended for code mutations. "
-            "Heuristic mode provides analysis only."
-        ),
-        "current_lines": len(current_content.splitlines()) if current_content else 0,
-        "generation_source": "heuristic",
-    }
-
-    rationale = (
-        f"Code improvement analysis for: {description[:80]}. "
-        "Full code generation requires LLM — heuristic mode provides structural analysis."
-    )
+    base = (current_content or "").strip()
+    target = _first_function(base)
+    if target is not None:
+        name, is_async = target
+        content = base + "\n\n\n" + _memoization_wrapper(name, is_async)
+        rationale = (
+            f"Wrapped '{name}' with a memoization layer to cache repeated "
+            f"results (evolution heuristic). Based on: {description[:80]}"
+        )
+    else:
+        content = _STANDALONE_MEMO_HELPER
+        rationale = (
+            "Emitted a standalone async memoization helper (no parseable "
+            f"function found in current content). Based on: {description[:80]}"
+        )
 
     return {
-        "content": json.dumps(content, indent=2),
-        "target_path": "evolution/code_analysis.json",
+        "content": content,
+        "target_path": "evolution/code_improvement.py",
         "rationale": rationale,
     }
 

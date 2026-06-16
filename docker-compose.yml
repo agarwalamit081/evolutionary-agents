@@ -48,6 +48,15 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/turing_agent
       REDIS_URL: redis://redis:6379/0
+      # Persist deliverables + workspace across container restarts. Both land on
+      # the already-mounted turing-workspace volume (/home/turing/.turing), so no
+      # new volume is needed. Without these overrides the relative defaults
+      # (".turing/workspace", "results") resolve under /app and are ephemeral —
+      # and the workspace volume above was effectively unused. results_root's
+      # parent (/home/turing/.turing) is the project_root every file tool runs
+      # from, so a written results/<file> survives restarts.
+      WORKSPACE_ROOT: /home/turing/.turing/workspace
+      RESULTS_ROOT: /home/turing/.turing/results
     depends_on:
       postgres:
         condition: service_healthy

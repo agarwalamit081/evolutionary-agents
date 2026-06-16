@@ -39,9 +39,11 @@ COPY alembic.ini .
 COPY pytest.ini .
 COPY tests/ tests/
 
-# Create non-root user for security
+# Create non-root user for security. The results dir is pre-created (and
+# owned) so the agent's persisted RESULTS_ROOT (set in docker-compose) is
+# writable on first run — file_writer/code_executor deliverables land there.
 RUN useradd -m -r turing && \
-    mkdir -p /home/turing/.turing/workspace /home/turing/logs && \
+    mkdir -p /home/turing/.turing/workspace /home/turing/.turing/results /home/turing/logs && \
     chown -R turing:turing /app /home/turing/.turing /home/turing/logs
 
 USER turing

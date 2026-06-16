@@ -1,0 +1,20 @@
+{# CoT-SC: Ensemble reasoning via voting #}
+{% set num_paths = num_paths|default(3) %}
+
+Generate {{ num_paths }} distinct Chain-of-Thought reasoning paths.
+
+Query: {{ user_input }}
+
+[For each path 1-{{ num_paths }}]
+CoT path {{ loop.index + 1 }}/{{ num_paths }}. Show every step. End with ANSWER: <answer>.
+
+[ENSEMBLE]
+Aggregate reasoning from all paths. Identify where paths agree vs diverge.
+
+- Where paths agree → High-confidence elements
+- Where paths diverge → Identify critical assumptions
+
+Select the most consistent answer as final output.
+
+Final answer: [Consensus answer]
+Confidence: [Agreement level across paths]

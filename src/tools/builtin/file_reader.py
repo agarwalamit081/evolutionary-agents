@@ -8,6 +8,7 @@ from typing import Optional
 from loguru import logger
 
 from src.config.settings import get_settings
+from src.tools._paths import normalize
 
 
 def _results_root_fallback(file_path: str) -> Optional[Path]:
@@ -19,16 +20,15 @@ def _results_root_fallback(file_path: str) -> Optional[Path]:
     ``file_reader`` reports "not found", which verify misreads as a missing
     deliverable (F13). Returns the resolved Path if it exists there and stays
     within ``results_root``; absolute paths return ``None`` (kept blocked).
+    De-nesting/traversal is delegated to the shared resolver so reads agree with
+    writes.
     """
     if file_path is None or Path(file_path).is_absolute():
         return None
     try:
-        results_root = Path(get_settings().agent.results_root).resolve()
-    except Exception:
-        return None
-    candidate = (results_root / file_path).resolve()
-    if not str(candidate).startswith(str(results_root)):
-        return None
+        candidate = normalize(file_path, base="results")
+    except ValueError:
+        return None  # path traversal outside results_root
     return candidate if candidate.exists() and candidate.is_file() else None
 
 

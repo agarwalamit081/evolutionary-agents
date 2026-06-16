@@ -54,8 +54,27 @@ class CostTracker:
             task_id=task_id,
             latency_ms=latency_ms,
         )
-        self._session.add(entry)
-        await self._session.commit()
+        # Cost tracking is observability-only — a persistence failure here
+        # (e.g. a duplicate-key IntegrityError from interleaved commits on the
+        # shared session, or a transient connection blip) must never crash the
+        # run. Before this guard, a single failed INSERT poisoned the shared
+        # session: every later LLM call's record_usage re-raised the same error
+        # out of gateway.acompletion, cascading every LLM-integrated node
+        # (plan/verify/memory-folding) onto its heuristic fallback. Roll back to
+        # clear the failed pending row and recover the session, then return the
+        # calculated cost so budgeting stays approximately correct.
+        try:
+            self._session.add(entry)
+            await self._session.commit()
+        except Exception as exc:
+            logger.warning(
+                f"Cost-ledger write failed for {model} (run continues): {exc}"
+            )
+            try:
+                await self._session.rollback()
+            except Exception as rollback_exc:  # never mask the original failure
+                logger.debug(f"Cost-ledger rollback failed: {rollback_exc}")
+            return cost_usd
 
         logger.debug(
             f"Cost recorded: {model} | "

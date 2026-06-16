@@ -42,6 +42,29 @@ _DIR_OUTPUT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Phrasal-cue captures that are clearly not deliverable paths. _DIR_OUTPUT_RE
+# can grab the determiner/pronoun right after the preposition ("Create the tool
+# in a module" → captures "a"; "Produce the report under the results dir" →
+# "the"), or a plurality/quantifier adjective ("Create a tool that ... appears
+# in multiple files" → captures "multiple"). Treated as a deliverable, such a
+# token reads as missing and loops verify→plan until the iteration hard-cap
+# (observed: N1 ran 455s looping on a phantom "a"; the post-fix N5 re-run looped
+# 4+ verify cycles on a phantom "multiple"). Single chars and these prose tokens
+# are rejected in _add() before a capture ever becomes an expected deliverable.
+_PATH_NOISE_TOKENS = frozenset({
+    "a", "an", "the", "this", "that", "these", "those", "another", "every",
+    "our", "your", "its", "their", "his", "her", "one", "two", "each",
+    "some", "any", "all", "both", "such", "more", "most", "other", "new",
+    # Plurality/quantifier adjectives _DIR_OUTPUT_RE grabs from plan prose
+    # ("...appears in multiple/several files", "produce across various
+    # modules") — never a legitimate standalone deliverable path component.
+    "multiple", "several", "various", "numerous", "many", "different",
+    "separate", "distinct", "individual", "consecutive", "successive",
+    "form", "way", "report", "summary", "function", "method", "module",
+    "file", "directory", "subdirectory", "folder", "markdown", "table",
+    "script", "string", "section", "block", "part", "note",
+})
+
 
 async def verify_node(
     state: AgentState,
@@ -225,6 +248,17 @@ async def _llm_verify(
         if reflection and hasattr(reflection, "summary"):
             final_output = reflection.summary
 
+        # Deliverable honesty: feed the deliverable's own content + the real tool
+        # outputs as ground truth so the verifier can flag fabricated numbers
+        # (battery-02 N6's synthesized counts) rather than rubber-stamping a
+        # well-structured but dishonest deliverable.
+        deliverable_content = _load_deliverable_content(
+            _extract_deliverable_paths(state)
+        )
+        tool_outputs = _summarize_data_tool_outputs(
+            state.get("tool_results", []) or []
+        )
+
         user_prompt = VERIFY_USER.format(
             goal_text=goal_text,
             success_criteria=success_criteria,
@@ -234,6 +268,8 @@ async def _llm_verify(
             error_count=len(errors),
             final_output=final_output or "In progress",
             evidence=evidence_text,
+            deliverable_content=deliverable_content or "(no readable deliverable content)",
+            tool_outputs=tool_outputs or "(no data-producing tool outputs)",
         )
 
         verify_complexity = (
@@ -387,6 +423,8 @@ def _extract_deliverable_paths(state: AgentState) -> list[str]:
             return
         if cleaned.startswith(("http://", "https://")):
             return
+        if len(cleaned) < 2 or cleaned.lower() in _PATH_NOISE_TOKENS:
+            return
         seen.add(cleaned)
         paths.append(cleaned)
 
@@ -516,3 +554,71 @@ def _check_deliverables(
         else "No concrete deliverable paths were declared or detected."
     )
     return evidence_text, missing, empty
+
+
+# ─── Deliverable honesty ─────────────────────────────────────────────
+# The verify LLM must be able to compare the deliverable's *claims* against the
+# *real* tool outputs, so a well-structured but fabricated deliverable (battery-02
+# N6: synthesized duplicate counts) is detected. We feed (a) the deliverable's
+# own on-disk content and (b) a compact summary of the data-producing tool
+# outputs as ground truth; the verify prompt instructs the LLM to flag any
+# quantitative claim that is not present in or supported by that ground truth.
+_DELIVERABLE_CONTENT_CAP = 6000  # total chars of deliverable text fed to verify
+_TOOL_OUTPUT_CAP = 600  # per-tool chars
+_MAX_DATA_TOOLS = 8
+# file_writer outputs ("Successfully wrote N bytes to <path>") carry no data, so
+# they are excluded: nothing in them grounds or contradicts the deliverable's
+# quantitative claims, and including them would only pad the verify prompt.
+_NON_DATA_TOOLS = frozenset({"file_writer"})
+
+
+def _load_deliverable_content(paths: list[str]) -> str:
+    """Read the on-disk content of declared deliverables for honesty checking.
+
+    Only *present* deliverables are read (a missing one is already a hard
+    failure via ``_enforce_deliverables``). The combined text is capped so the
+    verify prompt stays bounded. Returns ``""`` if nothing readable is found.
+    """
+    chunks: list[str] = []
+    total = 0
+    for raw in paths:
+        if total >= _DELIVERABLE_CONTENT_CAP:
+            break
+        resolved = _resolve_deliverable(raw)
+        if resolved is None or resolved.is_dir():
+            continue
+        try:
+            text = resolved.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        remaining = _DELIVERABLE_CONTENT_CAP - total
+        if len(text) > remaining:
+            text = text[:remaining] + "\n…[truncated]"
+        chunks.append(f"--- {raw} ---\n{text}")
+        total += len(text)
+    return "\n\n".join(chunks)
+
+
+def _summarize_data_tool_outputs(tool_results: list[Any]) -> str:
+    """Summarize successful tool outputs as ground truth for the verify LLM.
+
+    One compact line per data-producing tool (file_writer excluded), each
+    truncated, so the verifier can check that numbers/claims in the deliverable
+    appear in real tool output rather than being fabricated.
+    """
+    lines: list[str] = []
+    for tr in tool_results:
+        name = getattr(tr, "tool_name", "")
+        if name in _NON_DATA_TOOLS or not getattr(tr, "success", False):
+            continue
+        output = (getattr(tr, "output", "") or "").strip()
+        if not output:
+            continue
+        if len(output) > _TOOL_OUTPUT_CAP:
+            output = output[:_TOOL_OUTPUT_CAP] + "…[truncated]"
+        # collapse internal whitespace/newlines for a compact one-liner
+        output = " ".join(output.split())
+        lines.append(f"- {name}: {output}")
+        if len(lines) >= _MAX_DATA_TOOLS:
+            break
+    return "\n".join(lines)

@@ -30,22 +30,40 @@ def _ground_should_evolve(
     deliverable successes — the battery's Q7/Q8 hit ``confidence=high`` yet the
     LLM said ``should_evolve=False``, and every other successful query likewise
     — so evolution never fired (0 mutations across all 10 queries). Grounding it
-    in objective evidence (no errors, ≥3 steps completed, and — for deliverable
-    goals — the artifact actually on disk) makes evolution fire on genuine
-    successes while preserving a model's own ``should_evolve=True`` via OR. The
-    on-disk check reuses execute's deliverable helpers so reflect, verify, and
-    the write-nudge all agree on what "produced" means.
+    in objective evidence (no errors +, for deliverable goals, the artifact
+    actually on disk) makes evolution fire on genuine successes while preserving
+    a model's own ``should_evolve=True`` via OR.
+
+    Step count is intentionally NOT a gate for deliverable goals: a
+    delegate-style run hands all execution to a sub-agent, so the main graph's
+    ``completed_steps`` can be empty (or <3) even though the deliverable was
+    produced and verify marked the run complete (battery-02 N8 —
+    ``repo_map_builder`` did the work; main ``completed_steps`` stayed empty;
+    the <3-step guard wrongly suppressed evolution). The step-count +
+    confidence bar still applies to non-deliverable goals, where there is no
+    artifact to confirm success.
+
+    The on-disk check reuses execute's deliverable helpers so reflect, verify,
+    and the write-nudge all agree on what "produced" means.
     """
     if proposed:
         return True
-    if errors or len(completed_steps or []) < 3:
+    if errors:
         return False
     from src.graph.nodes.execute import _deliverable_on_disk, _extract_goal_deliverable
 
     goal_deliverable = _extract_goal_deliverable(goal_text)
     if goal_deliverable is not None:
+        # Deliverable goal: the artifact on disk is the strongest objective
+        # evidence of success (this branch is reached at route_after_verify only
+        # when is_complete=True). Fire regardless of step count — see docstring.
         return _deliverable_on_disk(goal_deliverable)
-    # Non-deliverable goal: require high confidence (mirrors the heuristic bar).
+    # Non-deliverable goal: require ≥3 completed steps AND high confidence so a
+    # trivial/empty success does not evolve. (Reached at route_after_verify only
+    # when is_complete=True, but the reflect call sites use it mid-run, where the
+    # step-count guard still matters.)
+    if len(completed_steps or []) < 3:
+        return False
     return confidence in {Confidence.HIGH, Confidence.VERY_HIGH}
 
 
@@ -219,9 +237,14 @@ def _heuristic_reflect(
     # the need for specialized sub-agents to handle independent subtask categories
     missing_agents = _detect_agent_gaps_heuristic(state, goal_text, plan_steps)
     if missing_agents:
-        # Deduplicate against gaps already accumulated in state
-        existing_agent_gaps = state.get("pending_agent_gaps", [])
-        new_agent_gaps = [g for g in missing_agents if g not in existing_agent_gaps]
+        # Deduplicate against gaps already ATTEMPTED this run. attempted_agent_gaps
+        # is an operator.add accumulator (survives across cycles); agent_spawn
+        # clears pending_agent_gaps every cycle, so deduping against pending would
+        # re-detect the same gap endlessly → agent_spawn re-fires → fails →
+        # re-converts to a tool gap → endless spawn→tool_create churn
+        # (battery-02 N6: 19 tool_create entries, ~56 generations, 764s).
+        attempted = state.get("attempted_agent_gaps", [])
+        new_agent_gaps = [g for g in missing_agents if g not in attempted]
         if new_agent_gaps:
             result["pending_agent_gaps"] = new_agent_gaps
 
@@ -446,9 +469,11 @@ async def _llm_reflect(
 
         # Propagate missing sub-agent gaps identified by LLM
         if analysis.missing_sub_agents:
-            # Deduplicate against gaps already accumulated in state
-            existing_agent_gaps = state.get("pending_agent_gaps", [])
-            new_agent_gaps = [g for g in analysis.missing_sub_agents if g not in existing_agent_gaps]
+            # Deduplicate against gaps already ATTEMPTED this run, not the
+            # (cleared-each-cycle) pending_agent_gaps — see heuristic path above
+            # for the spawn→tool_create churn this prevents (battery-02 N6).
+            attempted = state.get("attempted_agent_gaps", [])
+            new_agent_gaps = [g for g in analysis.missing_sub_agents if g not in attempted]
             if new_agent_gaps:
                 result["pending_agent_gaps"] = new_agent_gaps
 

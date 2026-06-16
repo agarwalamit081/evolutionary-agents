@@ -22,6 +22,18 @@ if TYPE_CHECKING:
     from src.tools.registry import ToolRegistry
 
 
+# Bounded retry count for LLM tool-handler generation. Cheaper models
+# frequently truncate the generated handler on the first attempt (unclosed
+# paren / partial function → AST fail) but succeed once told what broke.
+# Feeding the validation error back and regenerating mirrors the evolution
+# retry-with-feedback pattern (commit d4c9951). Bounded so a stubborn failure
+# degrades gracefully instead of looping. Without this, a single truncated
+# handler fails validation and the tool is never registered — breaking
+# cross-run persistence+recall for tool-create goals (observed: N5's
+# duplicate_finder handler came back at 156 chars, "'(' was never closed").
+_MAX_GENERATION_ATTEMPTS = 3
+
+
 async def tool_create_node(
     state: AgentState,
     *,
@@ -45,6 +57,29 @@ async def tool_create_node(
     pending_gaps = state.get("pending_tool_gaps", [])
     goal = state.get("current_goal")
     tool_results = state.get("tool_results", [])
+
+    # Defense-in-depth: never re-attempt a gap already recorded in
+    # attempted_tool_gaps this run. Upstream paths can re-seed the SAME gap into
+    # pending_tool_gaps even after a failed attempt — notably agent_spawn's
+    # failed-spawn → tool-gap conversion (agent_spawn.py), which writes
+    # pending_tool_gaps directly and so bypasses reflect's tool-gap dedup.
+    # Without this guard each re-seed re-runs the bounded 3-attempt regeneration
+    # loop (_MAX_GENERATION_ATTEMPTS), burning the budget (battery-02 N6: 19
+    # node entries, ~56 generations, 764s). attempted_tool_gaps is an
+    # operator.add accumulator, so a gap recorded once stays recorded for the
+    # whole run — consistent with the "don't retry failed gaps in-run" intent
+    # below. The companion root-cause fix is reflect's agent-gap dedup
+    # (attempted_agent_gaps); this guard is the backstop.
+    already_attempted = state.get("attempted_tool_gaps", [])
+    if already_attempted and pending_gaps:
+        fresh = [g for g in pending_gaps if g not in already_attempted]
+        skipped = len(pending_gaps) - len(fresh)
+        if skipped:
+            logger.info(
+                f"Skipping {skipped} tool gap(s) already attempted this run "
+                f"(defense against spawn→tool_create churn)"
+            )
+        pending_gaps = fresh
 
     if not pending_gaps or gateway is None or tools is None:
         logger.info(
@@ -152,31 +187,60 @@ async def _create_single_tool(
             "existing_tools": registry.list_names(),
         }
 
-        generated = await generator.generate(gap_description, context)
-        if generated is None:
-            return {
-                "success": False,
-                "reason": "LLM generation failed or returned invalid output",
-                "gap": gap_description,
-            }
+        # Bounded regeneration loop: generate → validate → (on failure) feed the
+        # specific validation error back and regenerate. A truncated handler is
+        # recoverable — the model usually emits a complete function once it sees
+        # what broke. ``validate_and_register`` only registers on success, so a
+        # failed attempt never pollutes the registry nor counts toward
+        # ``max_tools_per_run`` (that counter increments inside register only).
+        last_reason = ""
+        for attempt in range(1, _MAX_GENERATION_ATTEMPTS + 1):
+            if last_reason:
+                context["error_details"] = (
+                    f"Previous generation attempt failed validation: "
+                    f"{last_reason}. Regenerate the COMPLETE handler_code as "
+                    f"valid Python defining exactly one async function — do not "
+                    f"truncate or emit a partial function."
+                )
+                logger.info(
+                    f"Retrying tool generation for '{gap_description}' "
+                    f"(attempt {attempt}/{_MAX_GENERATION_ATTEMPTS}) with "
+                    f"validation feedback"
+                )
 
-        result = await generator.validate_and_register(generated, registry)
-        if not result["success"]:
-            return {
-                "success": False,
-                "reason": result.get("reason", "validation failed"),
-                "gap": gap_description,
-            }
+            generated = await generator.generate(gap_description, context)
+            if generated is None:
+                return {
+                    "success": False,
+                    "reason": "LLM generation failed or returned invalid output",
+                    "gap": gap_description,
+                }
 
-        # Best-effort persistence to DB (non-blocking, non-fatal)
-        await _persist_tool(generated)
+            result = await generator.validate_and_register(generated, registry)
+            if result["success"]:
+                # Best-effort persistence to DB (non-blocking, non-fatal)
+                await _persist_tool(generated)
+                return {
+                    "success": True,
+                    "tool_name": generated.tool_name,
+                    "description": generated.description,
+                    "safety_passed": True,
+                    "sandbox_passed": result.get("sandbox_result", {}).get("passed", True),
+                }
+
+            last_reason = result.get("reason", "validation failed")
+            logger.warning(
+                f"Tool generation attempt {attempt}/{_MAX_GENERATION_ATTEMPTS} "
+                f"for '{gap_description}' failed: {last_reason}"
+            )
 
         return {
-            "success": True,
-            "tool_name": generated.tool_name,
-            "description": generated.description,
-            "safety_passed": True,
-            "sandbox_passed": result.get("sandbox_result", {}).get("passed", True),
+            "success": False,
+            "reason": (
+                f"All {_MAX_GENERATION_ATTEMPTS} generation attempts failed: "
+                f"{last_reason}"
+            ),
+            "gap": gap_description,
         }
 
     except Exception as e:

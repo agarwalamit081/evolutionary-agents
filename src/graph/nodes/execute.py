@@ -414,6 +414,21 @@ async def _llm_execute(
                 )
         max_attempts = (MAX_WRITE_NUDGES + 1) if expected_path else 1
 
+        # Front-load the file_writer requirement on turn 1. Without this, cheaper
+        # models narrate the deliverable as prose on the first attempt and only
+        # call file_writer once the post-hoc nudge fires — burning 1-2 extra
+        # turns (~10-20s) per write-step and often an extra verify→plan cycle.
+        # Stating the exact path + tool up front lets the model write the file
+        # on the first attempt; the nudge (below) remains as a bounded fallback.
+        if expected_path:
+            step_label = (
+                f"{step_label}\n\nThis step's deliverable MUST be written to "
+                f"disk: call the file_writer tool with file_path='{expected_path}' "
+                f"and content set to your full deliverable text. A text-only "
+                f"reply does not count as done — verification reads the "
+                f"filesystem, so the file must exist at that path."
+            )
+
         # Every LangChain message produced across this step's attempts. On a
         # nudge path this carries the text-only first turn + the nudge + the
         # tool-calling follow-up, so reflect/folding see the real trace.

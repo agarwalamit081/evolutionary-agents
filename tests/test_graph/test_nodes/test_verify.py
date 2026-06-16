@@ -10,8 +10,13 @@ import pytest
 
 from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.factory import initial_state
-from src.graph.models import Goal, GoalStatus, PlanStep, ReflectionResult
-from src.graph.nodes.verify import verify_node
+from src.graph.models import Goal, GoalStatus, PlanStep, ReflectionResult, ToolResult
+from src.graph.nodes.verify import (
+    _extract_deliverable_paths,
+    _load_deliverable_content,
+    _summarize_data_tool_outputs,
+    verify_node,
+)
 from src.llm.models import LLMResponse
 
 
@@ -649,3 +654,227 @@ class TestVerifyDeliverableEvidence:
         result = await verify_node(state, gateway=None)
         # note.txt is present -> complete; missing_file.txt is an input, ignored.
         assert result["is_complete"] is True
+
+    def test_determiner_captures_are_not_deliverables(self) -> None:
+        """Regression: "create ... in a module" must not yield deliverable "a".
+
+        ``_DIR_OUTPUT_RE`` can capture the determiner after the preposition
+        ("Create the tool in a module" -> "a"; "Produce the report under the
+        results dir" -> "the"). Treated as a deliverable, such a token reads as
+        missing and loops verify->plan until the iteration hard-cap (observed on
+        battery-02 N1: 455s looping on a phantom "a"). ``_add()`` rejects single
+        chars and prose tokens so only real paths survive.
+        """
+        state = initial_state(
+            "Create a tool called char_counter. Save the metrics to "
+            "results/n1_char_counter.md.",
+            "thread-noise",
+        )
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description="Create the char_counter tool in a new Python module.",
+                tool_name=None,
+                tool_input={},
+                status="pending",
+                result="",
+            ),
+            PlanStep(
+                id="s2",
+                description="Produce the report under the results directory.",
+                tool_name=None,
+                tool_input={},
+                status="pending",
+                result="",
+            ),
+            PlanStep(
+                id="s3",
+                description="Save the metrics to results/n1_char_counter.md.",
+                tool_name="file_writer",
+                tool_input={"file_path": "results/n1_char_counter.md", "content": "x"},
+                status="completed",
+                result="wrote",
+            ),
+        ]
+        state["completed_steps"] = [state["plan_steps"][2]]
+        paths = _extract_deliverable_paths(state)
+        assert "results/n1_char_counter.md" in paths
+        assert "a" not in paths
+        assert "the" not in paths
+
+    def test_quantifier_captures_are_not_deliverables(self) -> None:
+        """Regression: "Create ... appears in multiple files" must not yield "multiple".
+
+        ``_DIR_OUTPUT_RE`` matches ``create ... in <token>`` across a full plan
+        step, so an LLM-authored step like "Create the duplicate_finder tool
+        ... tracks which lines appear in multiple files" captures the quantifier
+        "multiple" as a deliverable. That phantom is never on disk, so
+        ``_check_deliverables`` flags it missing and ``_force_complete_on_evidence``
+        bails — looping verify 4+ cycles until the iteration hard-cap (observed on
+        the post-fix N5 re-run). ``_PATH_NOISE_TOKENS`` now rejects these
+        plurality/quantifier adjectives so only the real ``save ... to`` path
+        survives.
+        """
+        state = initial_state(
+            "Create a short tool called duplicate_finder that takes a glob and "
+            "returns duplicate non-empty lines across matched files. Run it on "
+            "results/*.md and save the output to results/n5_dups.md.",
+            "thread-phantom",
+        )
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description=(
+                    "Create the duplicate_finder tool as a Python script that: "
+                    "(1) accepts a glob pattern, (2) finds matching files, "
+                    "(3) reads all non-empty lines from each file, (4) tracks "
+                    "which lines appear in multiple files, (5) returns/outputs "
+                    "duplicates with file locations"
+                ),
+                tool_name=None,
+                tool_input={},
+                status="pending",
+                result="",
+            ),
+            PlanStep(
+                id="s2",
+                description="Save the output to results/n5_dups.md.",
+                tool_name="file_writer",
+                tool_input={"file_path": "results/n5_dups.md", "content": "x"},
+                status="completed",
+                result="wrote",
+            ),
+        ]
+        state["completed_steps"] = [state["plan_steps"][1]]
+        paths = _extract_deliverable_paths(state)
+        assert "results/n5_dups.md" in paths
+        assert "multiple" not in paths
+        assert "several" not in paths
+        assert "various" not in paths
+
+
+def _user_prompt_from(messages: list) -> str:
+    """Extract the user-role message content captured by a mock gateway."""
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return str(msg.get("content", ""))
+    return ""
+
+
+class TestVerifyDeliverableHonesty:
+    """Deliverable-honesty check (battery-02 N6): the verify LLM must receive
+    the deliverable's own content AND the real tool outputs as ground truth so a
+    well-structured but fabricated deliverable (synthesized counts) is detected
+    rather than rubber-stamped."""
+
+    @staticmethod
+    def _state(goal_text: str, file_path: str, content: str) -> dict:
+        state = initial_state(goal_text, "thread-honesty")
+        step = PlanStep(
+            id="fw1",
+            description=f"Save the report to {file_path}",
+            tool_name="file_writer",
+            tool_input={"file_path": file_path, "content": content},
+            status="completed",
+            result="wrote file",
+        )
+        state["plan_steps"] = [step]
+        state["completed_steps"] = [step]
+        state["current_step_index"] = 1
+        state["confidence"] = Confidence.HIGH
+        state["errors"] = []
+        return state
+
+    @pytest.mark.asyncio
+    async def test_prompt_includes_deliverable_content_and_tool_outputs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The verify user prompt must carry the deliverable content, the tool
+        outputs, and the honesty instruction that flags ungrounded claims."""
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        Path(results_root, "log_dups.md").write_text(
+            "Connection timeout error | 24\n", encoding="utf-8"
+        )
+        state = self._state(
+            "Scan logs/*.log for duplicate errors and save to results/log_dups.md",
+            "results/log_dups.md",
+            "Connection timeout error | 24\n",
+        )
+        state["tool_results"] = [
+            ToolResult(
+                tool_name="duplicate_finder",
+                success=True,
+                output="Disk full: 2\nConnection timeout: 5",
+            ),
+        ]
+
+        llm_json = (
+            '{"is_complete": true, "completion_percentage": 100.0, '
+            '"gaps": [], "quality_assessment": "ok", "should_evolve": false}'
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(
+            return_value=LLMResponse(
+                content=llm_json,
+                model="claude-haiku-4-5-20251001",
+                provider="anthropic",
+                input_tokens=10,
+                output_tokens=20,
+                total_tokens=30,
+                cost_usd=0.0001,
+            )
+        )
+        await verify_node(state, gateway=gateway)
+
+        prompt = _user_prompt_from(gateway.acompletion.call_args.kwargs["messages"])
+        # Deliverable content + tool outputs are present as ground truth ...
+        assert "Connection timeout error | 24" in prompt
+        assert "duplicate_finder" in prompt
+        assert "Disk full: 2" in prompt
+        # ... and the honesty instruction that drives the comparison.
+        assert "HONESTY CHECK" in prompt
+        assert "UNGROUND" in prompt.upper()
+
+    def test_load_deliverable_content_reads_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_load_deliverable_content reads a present deliverable's text."""
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        Path(results_root, "report.md").write_text("real content here", encoding="utf-8")
+        text = _load_deliverable_content(["results/report.md"])
+        assert "real content here" in text
+
+    def test_load_deliverable_content_truncates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Content beyond the cap is truncated (prompt stays bounded)."""
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        Path(results_root, "big.md").write_text("X" * 7000, encoding="utf-8")
+        text = _load_deliverable_content(["results/big.md"])
+        assert "…[truncated]" in text
+        assert len(text) < 7000
+
+    def test_summarize_data_tool_outputs_excludes_file_writer(self) -> None:
+        """Only successful data-producing tools are summarized; file_writer
+        confirmations and failed tools are excluded."""
+        tool_results = [
+            ToolResult(
+                tool_name="file_writer",
+                success=True,
+                output="Successfully wrote 100 bytes to results/x.md",
+            ),
+            ToolResult(
+                tool_name="duplicate_finder",
+                success=True,
+                output="timeout: 5\ndisk full: 2",
+            ),
+            ToolResult(
+                tool_name="broken_tool",
+                success=False,
+                output="boom",
+            ),
+        ]
+        summary = _summarize_data_tool_outputs(tool_results)
+        assert "duplicate_finder" in summary
+        assert "file_writer" not in summary
+        assert "broken_tool" not in summary

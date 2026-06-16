@@ -276,3 +276,79 @@ class TestToolGeneratorGenerate:
             {"goal_text": "test", "failed_tools": "none", "existing_tools": []},
         )
         assert tool is None
+
+
+class TestToolGeneratorCodegenModel:
+    """Verify generate() routes code-gen at the configured code-strong model
+    (default deepseek-v4-pro) instead of the CHEAP tier (complexity=SIMPLE →
+    Haiku) that truncates non-trivial handlers (battery-02 N5).
+
+    NOTE: ``AgentSettings`` is a nested model whose default instance is fixed at
+    import time, so ``monkeypatch.setenv`` + ``cache_clear`` does NOT re-read it
+    (a real ``.env``/env set before process start does). We therefore patch the
+    live settings instance attribute directly.
+    """
+
+    @staticmethod
+    def _patch_codegen_model(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        from src.config import get_settings
+
+        monkeypatch.setattr(get_settings().agent, "tool_generation_model", value)
+
+    @pytest.mark.asyncio
+    async def test_generate_pins_codegen_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_codegen_model(monkeypatch, "deepseek-v4-pro")
+        gateway = _make_gateway(_safe_tool_json())
+        gen = ToolGenerator(gateway=gateway, safety_pipeline=SafetyPipeline())
+
+        await gen.generate(
+            "parse JSON",
+            {"goal_text": "test", "failed_tools": "none", "existing_tools": []},
+        )
+
+        kwargs = gateway.acompletion.await_args.kwargs
+        assert kwargs.get("model") == "deepseek-v4-pro"
+        # complexity routing must NOT fire when a model is pinned
+        assert "complexity" not in kwargs
+        # JSON mode is forced so a multi-line handler can't be truncated by
+        # json_repair (the root cause of battery-02 N5's 156-char handlers).
+        assert kwargs.get("response_format") == {"type": "json_object"}
+
+    @pytest.mark.asyncio
+    async def test_generate_respects_model_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_codegen_model(monkeypatch, "gpt-4.1-mini-2025-04-14")
+        gateway = _make_gateway(_safe_tool_json())
+        gen = ToolGenerator(gateway=gateway, safety_pipeline=SafetyPipeline())
+
+        await gen.generate(
+            "parse JSON",
+            {"goal_text": "test", "failed_tools": "none", "existing_tools": []},
+        )
+
+        kwargs = gateway.acompletion.await_args.kwargs
+        assert kwargs.get("model") == "gpt-4.1-mini-2025-04-14"
+        assert "complexity" not in kwargs
+        assert kwargs.get("response_format") == {"type": "json_object"}
+
+    @pytest.mark.asyncio
+    async def test_generate_falls_back_to_complexity_when_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.graph.enums import TaskComplexity
+
+        self._patch_codegen_model(monkeypatch, "")
+        gateway = _make_gateway(_safe_tool_json())
+        gen = ToolGenerator(gateway=gateway, safety_pipeline=SafetyPipeline())
+
+        await gen.generate(
+            "parse JSON",
+            {"goal_text": "test", "failed_tools": "none", "existing_tools": []},
+        )
+
+        kwargs = gateway.acompletion.await_args.kwargs
+        # Empty setting → legacy complexity-based routing (no explicit model pin)
+        assert kwargs.get("complexity") == TaskComplexity.SIMPLE
+        assert "model" not in kwargs
+        assert kwargs.get("response_format") == {"type": "json_object"}

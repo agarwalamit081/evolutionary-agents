@@ -31,6 +31,7 @@ from src.config import get_settings
 from src.graph.enums import Phase
 
 if TYPE_CHECKING:
+    from src.agents.registry import SubAgentRegistry
     from src.tools.registry import ToolRegistry
 
 # ── Intent signals ──────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ async def structure_analysis_node(
     state: dict[str, Any],
     *,
     tools: ToolRegistry | None = None,
+    sub_agent_registry: SubAgentRegistry | None = None,
 ) -> dict[str, Any]:
     """Proactively seed capability gaps from the goal before execution.
 
@@ -72,6 +74,10 @@ async def structure_analysis_node(
             ``structure_analysis_done`` single-shot flag.
         tools: Optional ToolRegistry — detected tool names already present are
             skipped so we never re-request an existing tool.
+        sub_agent_registry: Optional SubAgentRegistry — recalled agent names are
+            checked so a goal that references previously-created agents by name
+            (e.g. "use the doc_outline sub-agent") does not proactively spawn a
+            redundant helper (battery-02 N8 over-spawn).
 
     Returns:
         Partial state update. Always sets ``structure_analysis_done=True`` and
@@ -109,7 +115,8 @@ async def structure_analysis_node(
     attempted_agents = set(state.get("attempted_agent_gaps", []) or [])
 
     tool_gaps = _detect_tool_gaps(goal_text, tools, attempted_tools)
-    agent_gaps = _detect_agent_gaps(goal_text, attempted_agents)
+    recalled_names = _recalled_agent_names(sub_agent_registry)
+    agent_gaps = _detect_agent_gaps(goal_text, attempted_agents, recalled_names)
 
     if tool_gaps:
         result["pending_tool_gaps"] = tool_gaps
@@ -171,7 +178,11 @@ def _existing_tool_names(tools: ToolRegistry | None) -> set[str]:
 # ── Sub-agent / parallel detection ──────────────────────────────────────
 
 
-def _detect_agent_gaps(goal_text: str, attempted: set[str]) -> list[str]:
+def _detect_agent_gaps(
+    goal_text: str,
+    attempted: set[str],
+    recalled_names: set[str] | None = None,
+) -> list[str]:
     """Return proactive sub-agent-gap descriptions, or an empty list."""
     if attempted:
         return []
@@ -197,7 +208,60 @@ def _detect_agent_gaps(goal_text: str, attempted: set[str]) -> list[str]:
         # "do A, B, and C in parallel" without a numbered list.
         units = _extract_list_phrases(goal_text)
 
+    # Suppress the GENERIC proactive spawn when the goal references recalled
+    # sub-agents by name. The generic gap ("an independent subtask...") fires
+    # whenever "sub-agents" appears without explicit roles; if the goal is in
+    # fact naming previously-created agents to REUSE, spawning a new helper is
+    # redundant — delegate reuses the recalled ones at zero spawn cost.
+    # battery-02 N8: "Using the doc_outline and python_file_inventory
+    # sub-agents (created earlier)..." matched the keyword with no explicit
+    # roles, fell back to the generic gap, and needlessly spawned
+    # repo_map_builder though both named agents were already recalled.
+    # Explicit new roles ("sub-agents for X and Y") still spawn as today.
+    if (
+        recalled_names
+        and has_agent_kw
+        and units == ["an independent subtask described in the goal"]
+    ):
+        referenced = _named_existing_agents(goal_text, recalled_names)
+        if referenced:
+            logger.info(
+                "Structure analysis: goal names existing recalled sub-agents "
+                f"{sorted(referenced)}; suppressing generic proactive "
+                "agent_spawn (delegate will reuse them)"
+            )
+            return []
+
     return _format_agent_gaps(units, attempted)
+
+
+# Snake_case identifier with at least one underscore — matches agent names like
+# ``doc_outline`` / ``python_file_inventory`` while ignoring ordinary prose.
+_AGENT_NAME_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+
+
+def _recalled_agent_names(registry: SubAgentRegistry | None) -> set[str]:
+    """Best-effort lowercased set of recalled sub-agent names."""
+    if registry is None:
+        return set()
+    try:
+        return {str(n).lower() for n in registry.list_names()}
+    except Exception:  # noqa: BLE001 — mock registries must not break planning
+        logger.debug("SubAgentRegistry.list_names() failed; skipping reuse check")
+        return set()
+
+
+def _named_existing_agents(goal_text: str, recalled_names: set[str]) -> set[str]:
+    """Recalled agent names that appear as identifiers in ``goal_text``.
+
+    Catches goals that reference previously-created sub-agents by name so
+    structure analysis does not proactively spawn a redundant helper for work an
+    existing agent already covers.
+    """
+    if not recalled_names:
+        return set()
+    found = set(_AGENT_NAME_RE.findall(goal_text.lower()))
+    return found & recalled_names
 
 
 def _format_agent_gaps(units: list[str], attempted: set[str]) -> list[str]:

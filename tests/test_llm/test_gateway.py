@@ -269,6 +269,24 @@ class TestBuildKwargs:
         kwargs = gateway._build_kwargs("gpt-4o-mini-2024-07-18", 0.5, 100, None)
         assert "api_base" not in kwargs
 
+    def test_request_timeout_always_set(self, gateway: LLMGateway) -> None:
+        """A hard timeout is passed to litellm so a dead provider can't stall.
+
+        Regression: without an explicit ``timeout`` kwarg litellm falls back to
+        its ~600s default, and one unresponsive provider hangs the whole run.
+        """
+        kwargs = gateway._build_kwargs("gpt-4o-mini-2024-07-18", 0.5, 100, None)
+        assert "timeout" in kwargs, "timeout must be set on every litellm call"
+        assert kwargs["timeout"] == gateway._settings.llm.request_timeout
+
+    def test_request_timeout_override_honored(self) -> None:
+        """REQUEST_TIMEOUT override flows through to the litellm kwargs."""
+        settings = _make_settings()
+        settings.llm.request_timeout = 15.0
+        gw = _make_gateway(settings)
+        kwargs = gw._build_kwargs("gpt-4o-mini-2024-07-18", 0.5, 100, None)
+        assert kwargs["timeout"] == 15.0
+
 
 # ─── Test _get_cheaper_fallback ──────────────────────────────────────
 
@@ -658,7 +676,6 @@ class TestFallbackChain:
                 result = await gateway._execute_with_fallback(
                     messages=simple_messages,
                     model="claude-sonnet-4-6",
-                    provider="anthropic",
                 )
 
         assert result.content == "fallback success"
@@ -688,7 +705,6 @@ class TestFallbackChain:
                     await gateway._execute_with_fallback(
                         messages=simple_messages,
                         model="claude-sonnet-4-6",
-                        provider="anthropic",
                     )
 
 

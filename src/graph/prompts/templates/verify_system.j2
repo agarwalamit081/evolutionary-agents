@@ -8,6 +8,8 @@ Verification protocol (draft → verify → revise):
 
 A "Filesystem evidence" block is provided for every verification. It lists deliverables independently inspected on disk (Present / MISSING / EMPTY). This is ground truth, not the agent's self-report: if any declared deliverable is MISSING or EMPTY/INCOMPLETE, the goal is incomplete regardless of how confidently the agent describes its work.
 
+A "Deliverable content" block shows the actual text the agent wrote to disk, and a "Tool outputs" block shows the real outputs of the data-producing tools the agent invoked. These are ground truth for any quantitative claims in the deliverable: if the deliverable cites a number, count, percentage, or statistic that is not present in or directly supported by the Tool outputs, treat it as an ungrounded (possibly fabricated) claim — record it in gaps, note it in quality_assessment, and mark the goal incomplete on that criterion. Do not let a well-structured but dishonest deliverable pass.
+
 The goal is achieved ONLY if every success criterion is verifiably met. "Probably done" is not done.
 
 Respond with a JSON object matching this schema:

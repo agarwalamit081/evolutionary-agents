@@ -428,6 +428,43 @@ class TestExecuteReActThread:
         # The seeded goal (a prior HumanMessage) must appear in the history sent.
         assert any(getattr(goal_msg, "content", "") in str(m) for m in sent)
 
+    @pytest.mark.asyncio
+    async def test_write_step_front_loads_file_writer_hint(self) -> None:
+        """A step declaring a deliverable tells the LLM to call file_writer on
+        turn 1 — front-loaded in the step label, not deferred to the post-hoc
+        nudge. Without this, cheaper models narrate the deliverable as prose on
+        the first attempt and burn 1-2 extra turns before writing the file."""
+        from src.graph.enums import Strategy
+
+        state = dict(initial_state("Write a report", "th-write", 10))
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description="Save the analysis to results/report.md",
+                status="pending",
+            ),
+        ]
+        state["current_step_index"] = 0
+        state["strategy"] = Strategy.REACT
+
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(return_value=ToolCallResponse(
+            content="Here is the report", tool_calls=[],
+            model="gpt-4o-mini-2024-07-18", provider="openai",
+            input_tokens=5, output_tokens=5, total_tokens=10, cost_usd=0.0,
+        ))
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[])
+
+        await execute_node(state, gateway=gateway, tools=tools)
+
+        # The FIRST LLM call must already carry the file_writer instruction
+        # (front-loaded), before any nudge turn fires.
+        first_msgs = gateway.acompletion_with_tools.call_args_list[0].kwargs["messages"]
+        blob = " ".join(str(getattr(m, "content", m)) for m in first_msgs)
+        assert "file_writer" in blob
+        assert "results/report.md" in blob
+
 
 class TestWriteStepHelpers:
     """Pure helpers that detect write-step intent and file-output tool calls.

@@ -75,6 +75,12 @@ class LLMProviderSettings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 768
 
+    # Hard timeout (seconds) for each LLM completion call, passed to litellm as
+    # ``timeout``. Without it litellm falls back to its long default (~600s), so
+    # a single unresponsive provider stalls the entire agent run. Bounded by the
+    # tenacity retry layer (_MAX_RETRIES=3): worst case ≈ timeout × retries.
+    request_timeout: float = 60.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -321,6 +327,13 @@ class AgentSettings(BaseSettings):
     # overridable field. Env: MAX_TOOLS_PER_RUN, MAX_SUB_AGENTS_PER_RUN.)
     max_tools_per_run: int = 3
     max_sub_agents_per_run: int = 3
+    # Tool-handler code generation: route to a code-strong model instead of the
+    # CHEAP tier (complexity=SIMPLE → Haiku), which truncates non-trivial
+    # handlers so they fail the AST gate and never persist (battery-02 N5's
+    # duplicate_finder). deepseek-v4-pro is a strong, low-cost coder with a full
+    # FALLBACK_CHAINS entry; alt gpt-4.1-mini-2025-04-14. Empty string → fall
+    # back to the legacy complexity=SIMPLE path. Env: TOOL_GENERATION_MODEL.
+    tool_generation_model: str = "deepseek-v4-pro"
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"

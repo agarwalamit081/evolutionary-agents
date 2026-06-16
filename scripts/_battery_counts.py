@@ -16,10 +16,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
+from pathlib import Path
 
-from sqlalchemy import text
+# Make ``src`` importable when run directly as ``python scripts/_battery_counts.py``
+# (Python puts the script's own dir on the path, not the repo root).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.db.session import get_session
+from sqlalchemy import text  # noqa: E402
+
+from src.db.session import get_session  # noqa: E402
 
 
 _QUERIES: dict[str, str] = {

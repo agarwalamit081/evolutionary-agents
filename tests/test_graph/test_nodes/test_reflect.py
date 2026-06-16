@@ -492,7 +492,9 @@ class TestGroundShouldEvolve:
     it the LLM path returned should_evolve=False even on HIGH-confidence
     deliverable successes (Q7/Q8), so evolution never fired across the battery
     (0 mutations). The helper preserves a model's own should_evolve=True via OR
-    and otherwise requires no errors + ≥3 steps + the deliverable on disk."""
+    and otherwise requires no errors; a deliverable goal fires when the artifact
+    is on disk (regardless of step count — see the N8 delegate case), while a
+    non-deliverable goal needs ≥3 steps AND HIGH+ confidence."""
 
     def _steps(self, n: int = 3) -> list[PlanStep]:
         return [PlanStep(id=f"s{i}", description=f"Step {i}") for i in range(n)]
@@ -526,13 +528,18 @@ class TestGroundShouldEvolve:
             False, "merge into results/x.md", self._steps(), ["boom"], Confidence.HIGH
         ) is False
 
-    def test_false_with_fewer_than_three_steps(
+    def test_deliverable_on_disk_fires_with_few_steps(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """N8 regression: a delegate-style run completes via a sub-agent, leaving
+        the main graph's ``completed_steps`` short (<3), but the artifact on disk
+        + no errors is objective success → evolve. (Previously the <3-step guard
+        suppressed this; battery-02 N8 produced results/n8_repomap.md via
+        repo_map_builder yet evolution never fired.)"""
         monkeypatch.setattr("src.graph.nodes.execute._deliverable_on_disk", lambda _p: True)
         assert _ground_should_evolve(
             False, "merge into results/x.md", self._steps(2), [], Confidence.HIGH
-        ) is False
+        ) is True
 
     def test_true_for_nondeliverable_high_conf(self) -> None:
         """Non-deliverable goal: HIGH confidence + 3 steps + no errors → True."""

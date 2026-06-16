@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from src.graph.enums import Confidence
 from src.graph.models import Goal, GoalStatus, PlanStep, ReflectionResult
-from src.graph.nodes.reflect import _detect_agent_gaps_heuristic, _heuristic_reflect
+from src.graph.nodes.reflect import (
+    _detect_agent_gaps_heuristic,
+    _ground_should_evolve,
+    _heuristic_reflect,
+    _llm_reflect,
+)
 
 
 def _make_state(
@@ -160,3 +169,168 @@ class TestRouterGuard:
         }
         result = route_after_reflect(state)  # type: ignore[arg-type]
         assert result == "agent_spawn"
+
+
+class TestAgentGapAttemptedDedupLLM:
+    """Bug C (battery-02 N6): the LLM reflect path re-detected the same
+    sub-agent gap every cycle because it deduped against ``pending_agent_gaps``
+    (cleared each cycle by agent_spawn) instead of ``attempted_agent_gaps``. A
+    failed spawn then re-converted the gap to a tool gap, re-firing
+    tool_create — 19 node entries / ~56 generations / 764s. The fix dedups the
+    LLM-emitted ``missing_sub_agents`` against ``attempted_agent_gaps`` so a gap
+    whose spawn already failed is never re-flagged.
+    """
+
+    @staticmethod
+    def _gateway_returning(missing_sub_agents: list[str]) -> MagicMock:
+        """Gateway whose acompletion yields a ReflectionAnalysis JSON."""
+        from src.llm.models import LLMResponse
+
+        content = json.dumps(
+            {
+                "progress_assessment": "incomplete",
+                "confidence": 0.2,
+                "should_replan": True,
+                "should_evolve": False,
+                "lessons_learned": [],
+                "memory_observations": [],
+                "next_action": "replan",
+                "missing_tools": [],
+                "missing_sub_agents": missing_sub_agents,
+            }
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(
+            return_value=LLMResponse(
+                content=content,
+                model="claude-haiku-4-5-20251001",
+                provider="anthropic",
+                input_tokens=10,
+                output_tokens=20,
+                total_tokens=30,
+                cost_usd=0.0001,
+            )
+        )
+        return gateway
+
+    @pytest.mark.asyncio
+    async def test_attempted_agent_gap_not_re_emitted(self) -> None:
+        """Gap already in attempted_agent_gaps must not return to pending."""
+        gap = "Log analysis specialist: would handle log parsing and dedup"
+        state = _make_state()
+        state["attempted_agent_gaps"] = [gap]  # spawn already failed for it
+
+        result = await _llm_reflect(
+            self._gateway_returning([gap]), state, None  # type: ignore[arg-type]
+        )
+
+        assert result is not None
+        assert result.get("pending_agent_gaps", []) == []
+
+    @pytest.mark.asyncio
+    async def test_fresh_agent_gap_is_emitted(self) -> None:
+        """Positive control: a gap NOT in attempted is still propagated."""
+        gap = "doc_outline: reads a markdown doc and emits its section outline"
+        state = _make_state()  # attempted_agent_gaps empty
+
+        result = await _llm_reflect(
+            self._gateway_returning([gap]), state, None  # type: ignore[arg-type]
+        )
+
+        assert result is not None
+        assert result.get("pending_agent_gaps", []) == [gap]
+
+
+class TestGroundShouldEvolve:
+    """Cover the evolution-grounding gate (battery-02 N8 root cause).
+
+    N8 root cause: a delegate-style run produces the deliverable via a sub-agent
+    (``repo_map_builder``), leaving the main graph's ``completed_steps`` empty,
+    so the old ``len(completed_steps) < 3`` guard suppressed evolution on a run
+    verify had marked complete. The deliverable-on-disk check must now fire
+    regardless of step count (errors still block; non-deliverable goals keep the
+    step-count + confidence bar).
+    """
+
+    @staticmethod
+    def _patch_deliverables(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        path: str | None,
+        on_disk: bool,
+    ) -> None:
+        """Stub the lazily-imported execute helpers so tests are hermetic.
+
+        ``_ground_should_evolve`` imports ``_extract_goal_deliverable`` /
+        ``_deliverable_on_disk`` from ``execute`` at call time, so patching the
+        module attribute is seen on the next call.
+        """
+        import src.graph.nodes.execute as execute_mod
+
+        monkeypatch.setattr(execute_mod, "_extract_goal_deliverable", lambda _goal: path)
+        monkeypatch.setattr(execute_mod, "_deliverable_on_disk", lambda _p: on_disk)
+
+    def test_proposed_true_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A model-proposed should_evolve wins even with errors + no steps."""
+        self._patch_deliverables(monkeypatch, path=None, on_disk=False)
+        assert _ground_should_evolve(
+            True, "any goal", [], ["boom"], Confidence.LOW
+        ) is True
+
+    def test_errors_block_even_with_deliverable_on_disk(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Errors are the one hard block, even when the artifact exists."""
+        self._patch_deliverables(monkeypatch, path="results/x.md", on_disk=True)
+        assert _ground_should_evolve(
+            False, "save to results/x.md", [], ["boom"], Confidence.HIGH
+        ) is False
+
+    def test_deliverable_on_disk_fires_with_zero_steps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The N8 case: delegate did all work (main steps empty), artifact on disk."""
+        self._patch_deliverables(
+            monkeypatch, path="results/n8_repomap.md", on_disk=True
+        )
+        assert _ground_should_evolve(
+            False,
+            "save the comparison to results/n8_repomap.md",
+            [],  # zero main-graph steps
+            [],
+            Confidence.MEDIUM,  # confidence irrelevant once deliverable is on disk
+        ) is True
+
+    def test_deliverable_missing_blocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Deliverable goal whose artifact is NOT on disk stays un-evolved."""
+        self._patch_deliverables(monkeypatch, path="results/x.md", on_disk=False)
+        assert _ground_should_evolve(
+            False, "save to results/x.md", [], [], Confidence.HIGH
+        ) is False
+
+    def test_non_deliverable_blocks_on_few_steps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-deliverable goal still needs >=3 steps (no artifact to confirm)."""
+        self._patch_deliverables(monkeypatch, path=None, on_disk=False)
+        assert _ground_should_evolve(
+            False, "explain quicksort", ["s1", "s2"], [], Confidence.HIGH
+        ) is False
+
+    def test_non_deliverable_blocks_on_low_confidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-deliverable goal with many steps but low confidence stays False."""
+        self._patch_deliverables(monkeypatch, path=None, on_disk=False)
+        assert _ground_should_evolve(
+            False, "explain quicksort", ["s1", "s2", "s3", "s4"], [], Confidence.LOW
+        ) is False
+
+    def test_non_deliverable_fires_high_confidence_many_steps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-deliverable goal fires only at >=3 steps AND HIGH+ confidence."""
+        self._patch_deliverables(monkeypatch, path=None, on_disk=False)
+        assert _ground_should_evolve(
+            False, "explain quicksort", ["s1", "s2", "s3", "s4"], [], Confidence.HIGH
+        ) is True

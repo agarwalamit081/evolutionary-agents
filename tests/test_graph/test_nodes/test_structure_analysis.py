@@ -6,9 +6,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.agents.registry import SubAgentRegistry
 from src.config import get_settings
 from src.graph.enums import Phase
 from src.graph.factory import initial_state
+from src.graph.models import SubAgentSpec
 from src.graph.nodes.structure_analysis import structure_analysis_node
 
 
@@ -212,6 +214,77 @@ class TestStructureAnalysisE2EGoals:
         )
         result = await structure_analysis_node(initial_state(goal, "thread-q5"))
 
+        gaps = result["pending_agent_gaps"]
+        assert any("data gathering" in g for g in gaps)
+        assert any("report generation" in g for g in gaps)
+
+
+class TestStructureAnalysisSuppressOverSpawn:
+    """battery-02 N8: a goal that references recalled sub-agents by name must NOT
+    proactively spawn a redundant helper — delegate reuses the recalled ones.
+
+    Root cause: "Using the doc_outline and python_file_inventory sub-agents
+    (created earlier)..." matched the "sub-agents" keyword with no explicit
+    roles, fell back to the generic "an independent subtask" gap, and needlessly
+    spawned repo_map_builder though both named agents were already recalled.
+    """
+
+    @staticmethod
+    def _registry_with(*names: str) -> SubAgentRegistry:
+        registry = SubAgentRegistry()
+        for name in names:
+            registry.register(SubAgentSpec(
+                name=name, goal=f"{name} task", parent_thread_id="t",
+            ))
+        return registry
+
+    @pytest.mark.asyncio
+    async def test_n8_goal_suppresses_spawn_when_agents_recalled(self) -> None:
+        """The N8 goal names recalled agents → no proactive agent_spawn gap."""
+        registry = self._registry_with("doc_outline", "python_file_inventory")
+        state = initial_state(
+            "Using the doc_outline and python_file_inventory sub-agents "
+            "(created earlier), build a combined repo map.",
+            "thread-n8",
+        )
+        result = await structure_analysis_node(state, sub_agent_registry=registry)
+        assert result.get("pending_agent_gaps", []) == []
+
+    @pytest.mark.asyncio
+    async def test_same_goal_spawns_without_registry(self) -> None:
+        """Positive control: same goal, no recalled agents → generic gap fires."""
+        state = initial_state(
+            "Using the doc_outline and python_file_inventory sub-agents "
+            "(created earlier), build a combined repo map.",
+            "thread-n8-noreg",
+        )
+        result = await structure_analysis_node(state)  # no registry
+        assert "pending_agent_gaps" in result
+        assert len(result["pending_agent_gaps"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_only_suppresses_when_named_agent_actually_recalled(self) -> None:
+        """A snake_case token that is NOT a recalled agent does not suppress."""
+        # Goal names doc_outline, but the registry holds a different agent.
+        registry = self._registry_with("other_agent")
+        state = initial_state(
+            "Using the doc_outline sub-agents (created earlier), build a map.",
+            "thread-n8-mismatch",
+        )
+        result = await structure_analysis_node(state, sub_agent_registry=registry)
+        assert "pending_agent_gaps" in result
+        assert len(result["pending_agent_gaps"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_explicit_new_roles_still_spawn_despite_recalled_agents(self) -> None:
+        """Explicit 'sub-agents for X and Y' roles spawn even when recalled
+        agents exist — they are genuinely new gaps, not the generic fallback."""
+        registry = self._registry_with("doc_outline")
+        state = initial_state(
+            "Use specialized sub-agents for data gathering and report generation",
+            "thread-roles-with-registry",
+        )
+        result = await structure_analysis_node(state, sub_agent_registry=registry)
         gaps = result["pending_agent_gaps"]
         assert any("data gathering" in g for g in gaps)
         assert any("report generation" in g for g in gaps)

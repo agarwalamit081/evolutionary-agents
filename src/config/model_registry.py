@@ -136,7 +136,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     # ── Z.AI (Zhipu / GLM) ───────────────────────────────────────
     "glm-4.7-flash": ModelSpec(
-        model_id="glm-4.7-flash",
+        model_id="zai/glm-4.7-flash",
         provider="zai",
         tier=ModelTier.VERY_CHEAP,
         max_context=128_000,
@@ -149,7 +149,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         output_cost_per_1k=0.0001,
     ),
     "glm-4.5-air": ModelSpec(
-        model_id="glm-4.5-air",
+        model_id="zai/glm-4.5-air",
         provider="zai",
         tier=ModelTier.VERY_CHEAP,
         max_context=128_000,
@@ -162,7 +162,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         output_cost_per_1k=0.0002,
     ),
     "glm-4.7": ModelSpec(
-        model_id="glm-4.7",
+        model_id="zai/glm-4.7",
         provider="zai",
         tier=ModelTier.MODERATE,
         max_context=128_000,
@@ -175,7 +175,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         output_cost_per_1k=0.001,
     ),
     "glm-5-turbo": ModelSpec(
-        model_id="glm-5-turbo",
+        model_id="zai/glm-5-turbo",
         provider="zai",
         tier=ModelTier.MODERATE,
         max_context=128_000,
@@ -189,7 +189,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     # ── MiniMax ───────────────────────────────────────────────────
     "minimax-m2.5-highspeed": ModelSpec(
-        model_id="minimax-m2.5-highspeed",
+        model_id="minimax/minimax-m2.5-highspeed",
         provider="minimax",
         tier=ModelTier.CHEAP,
         max_context=128_000,
@@ -202,7 +202,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         output_cost_per_1k=0.0002,
     ),
     "minimax-m2.5": ModelSpec(
-        model_id="minimax-m2.5",
+        model_id="minimax/minimax-m2.5",
         provider="minimax",
         tier=ModelTier.MODERATE,
         max_context=128_000,
@@ -243,7 +243,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     # ── Moonshot ──────────────────────────────────────────────────
     "moonshot-v1-32k": ModelSpec(
-        model_id="moonshot-v1-32k",
+        model_id="moonshot/moonshot-v1-32k",
         provider="moonshot",
         tier=ModelTier.CHEAP,
         max_context=32_000,
@@ -256,7 +256,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         output_cost_per_1k=0.0004,
     ),
     "kimi-k2.6": ModelSpec(
-        model_id="kimi-k2.6",
+        model_id="moonshot/kimi-k2.6",
         provider="moonshot",
         tier=ModelTier.MODERATE,
         max_context=128_000,

@@ -86,10 +86,34 @@ class ToolGenerator:
 
             messages = self._build_messages(gap_description, context)
 
-            response = await self._gateway.acompletion(
-                messages=messages,
-                complexity=TaskComplexity.SIMPLE,
-            )
+            # Route code generation at a code-strong model (configurable; default
+            # deepseek-v4-pro) instead of the CHEAP tier (complexity=SIMPLE →
+            # Haiku), which truncates non-trivial handlers → AST failure. An empty
+            # setting preserves the legacy complexity-based routing.
+            codegen_model = get_settings().agent.tool_generation_model
+
+            # Force JSON mode so the model emits properly-escaped JSON. Without
+            # it, a multi-line Python handler embedded as a JSON string value
+            # breaks parsing on an unescaped quote/newline, and json_repair then
+            # salvages a TRUNCATED handler (observed live: 156-char handlers,
+            # "Syntax error at line 6: '(' was never closed") that fails the AST
+            # safety gate and never registers. JSON mode (supported by both
+            # deepseek-v4-pro and Haiku) eliminates that truncation at the
+            # source. The system prompt already contains the token "JSON", which
+            # DeepSeek/OpenAI JSON mode requires.
+            json_mode = {"type": "json_object"}
+            if codegen_model:
+                response = await self._gateway.acompletion(
+                    messages=messages,
+                    model=codegen_model,
+                    response_format=json_mode,
+                )
+            else:
+                response = await self._gateway.acompletion(
+                    messages=messages,
+                    complexity=TaskComplexity.SIMPLE,
+                    response_format=json_mode,
+                )
 
             extractor = StructuredOutputManager()
             tool = await extractor.extract(response.content, GeneratedTool)

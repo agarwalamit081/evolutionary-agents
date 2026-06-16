@@ -190,7 +190,6 @@ class LLMGateway:
         response = await self._execute_with_fallback(
             messages=messages,
             model=model,
-            provider=provider,
             tools=tools,
             response_format=response_format,
             temperature=temperature,
@@ -348,7 +347,6 @@ class LLMGateway:
         self,
         messages: list[dict[str, Any]],
         model: str,
-        provider: str,  # noqa: ARG002 — kept for caller API compat
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
         temperature: float = 0.5,
@@ -483,6 +481,11 @@ class LLMGateway:
         litellm_model = spec.model_id if spec else model
 
         kwargs: dict[str, Any] = {"model": litellm_model, "temperature": temperature}
+
+        # Hard per-call timeout so an unresponsive provider cannot stall the run
+        # on litellm's ~600s default. The tenacity retry layer still handles
+        # litellm.Timeout as a transient error.
+        kwargs["timeout"] = self._settings.llm.request_timeout
 
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens

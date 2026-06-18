@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
+from src.config.settings import get_settings
 from src.graph.enums import Confidence
 from src.graph.models import PlanStep, ReflectionResult, ToolResult
 from src.graph.routers import (
@@ -148,6 +149,33 @@ class TestRouteAfterExecute:
         sample_state["max_iterations"] = 25
         sample_state["messages"] = list(range(3))  # < floor after a fold reset
         sample_state["last_fold_iteration"] = 0
+        assert route_after_execute(sample_state) == "execute"
+
+    def test_route_after_execute_no_force_reflect_when_folds_exhausted(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """Past the fold window AND >=10 messages, but max_folds consumed → execute.
+
+        Regression for the loop amplifier: once ``len(fold_history) >=
+        memory_folding_max_folds`` the fold never executes, so
+        ``last_fold_iteration`` stops advancing. Without the fold-availability
+        gate, ``(iteration - last_fold) >= 6`` stayed permanently true and the
+        checkpoint fired EVERY iteration, churning reflect→verify→replan and
+        starving multi-deliverable plans of the uninterrupted execute steps
+        they need to finish (observed on q4 under deepseek-v4-flash: 3 folds
+        consumed by iter 19, then a checkpoint every iter 25→34).
+        """
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="Step 1", status="pending"),
+            PlanStep(id="s2", description="Step 2", status="pending"),
+        ]
+        sample_state["current_step_index"] = 0
+        sample_state["iteration_count"] = 34
+        sample_state["max_iterations"] = 60
+        sample_state["messages"] = list(range(20))  # well past the floor
+        sample_state["last_fold_iteration"] = 19  # 34 - 19 = 15 >= 6
+        max_folds = get_settings().agent.memory_folding_max_folds
+        sample_state["fold_history"] = [{"iteration": i} for i in range(max_folds)]
         assert route_after_execute(sample_state) == "execute"
 
 

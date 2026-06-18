@@ -68,11 +68,31 @@ def route_after_execute(state: AgentState) -> str:
     # is only reached at plan exhaustion). Conservative: fires at most once
     # per fold window — after a fold, last_fold_iteration advances and the
     # message list resets to ~1 (the summary), so both guards reset.
+    #
+    # CRITICAL: also gate on fold AVAILABILITY (len(fold_history) < max_folds).
+    # Once max_folds is reached the fold never executes, so last_fold_iteration
+    # stops advancing — without this guard the (iteration - last_fold) >= 6
+    # condition stays permanently true and the checkpoint fires EVERY iteration,
+    # churning reflect→verify→replan and starving multi-deliverable plans of the
+    # uninterrupted execute steps they need to finish. (Observed on q4 under
+    # deepseek-v4-flash: 3 folds consumed by iter 19, then the checkpoint fired
+    # every iteration 25→34, and the agent rewrote test_q1_q3.py three times
+    # without ever reaching the test_results.json / executive_summary.md steps.)
     messages = state.get("messages", [])
     last_fold = state.get("last_fold_iteration", 0) or 0
+    fold_history = state.get("fold_history", [])
+    try:
+        max_folds = get_settings().agent.memory_folding_max_folds
+    except AttributeError:
+        # Defensive: a partial/mock settings object (e.g. unit tests) may omit
+        # the knob. Fall back to the AgentSettings default rather than crash
+        # routing — folding is a context-compression optimization, not
+        # correctness-critical.
+        max_folds = 3
     has_remaining_steps = bool(plan_steps) and step_index < len(plan_steps)
     if (
         has_remaining_steps
+        and len(fold_history) < max_folds
         and len(messages) >= 10
         and (iteration_count - last_fold) >= 6
     ):

@@ -337,6 +337,26 @@ async def _run_agent(
     spec_id = _resolve_eval_spec_id(run_id)
     if spec_id is not None:
         state["eval_goal_spec_id"] = spec_id
+        # A battery run (``--run-id qNN`` resolves to a golden GoalSpec) opts
+        # into the Phase-3 correctness layer: enable eval + enforce so the
+        # verify node's golden/structural/execution checks actually run and a
+        # present-but-wrong deliverable is caught and retried (within the
+        # iteration budget) instead of being force-completed as "done". This is
+        # the correctness safety net the F-h.3 goal-satisfied force-complete
+        # relies on — without it, a shallow/fabricated deliverable slips through
+        # (battery-04 q4: a {"status":"failed"} test_results.json stub).
+        # eval_enforce is bounded by _run_correctness_checks: it only downgrades
+        # complete→incomplete while iterations remain, so a strict check can
+        # never loop a run past its iteration hard-cap.
+        if not settings.eval.eval_enabled:
+            settings.eval.eval_enabled = True
+            logger.info(f"Battery spec {spec_id!r} resolved — EVAL enabled for this run")
+        if not settings.eval.eval_enforce:
+            settings.eval.eval_enforce = True
+            logger.info(
+                f"Battery spec {spec_id!r} resolved — EVAL_ENFORCE on "
+                "(failing checks downgrade complete→incomplete, retried within budget)"
+            )
 
     # Instantiate dependencies
     gateway = _create_gateway(settings, pinned_model=model)

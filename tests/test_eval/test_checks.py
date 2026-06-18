@@ -362,6 +362,123 @@ class TestQ01UtcConformanceProbe:
         assert res.passed is True
 
 
+class TestQ04TestResultsCountsProbe:
+    """The q04 test_results.json counts check — regression for the failure-stub slip.
+
+    The q4 orchestrator sub-agent wrote ``{"status": "failed", "reason": ...}``
+    when it could not import a test module (it invoked the wrong filename —
+    ``pytest test_retention_csv`` for a file named ``test_suite.py``). The OLD
+    probe tested ``'pass' not in blob and 'fail' not in blob``; ``"failed"``
+    contains ``"fail"``, so the stub passed verification and the run declared
+    success on a fabricated result. The strengthened probe must reject any
+    status=failed/error stub and require concrete INTEGER pass/fail counts.
+    Run against the REAL golden-spec config so a weakening is caught here.
+    """
+
+    def _probe_config(self) -> CheckConfig:
+        from src.eval.golden import lookup_goal_spec
+
+        spec = lookup_goal_spec("battery04_q04")
+        assert spec is not None
+        cfg = next((c for c in spec.checks if c.name == "q04_test_results_has_counts"), None)
+        assert cfg is not None, "q04_test_results_has_counts must exist in the golden spec"
+        return cfg
+
+    @pytest.mark.asyncio
+    async def test_failure_stub_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _patch_roots(monkeypatch, tmp_path)
+        q04 = Path(root, "q04")
+        q04.mkdir(parents=True, exist_ok=True)
+        # The exact stub the q4 orchestrator produced.
+        Path(q04, "test_results.json").write_text(
+            json.dumps({"status": "failed", "reason": "No module named 'test_retention_csv'"}),
+            encoding="utf-8",
+        )
+        res = await ExecutionCheck().check(
+            self._probe_config(), ["results/q04/test_results.json"], {}
+        )
+        assert res.passed is False
+        assert "stub" in res.evidence["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_error_status_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _patch_roots(monkeypatch, tmp_path)
+        q04 = Path(root, "q04", "test_results.json")
+        q04.parent.mkdir(parents=True, exist_ok=True)
+        q04.write_text(json.dumps({"status": "error", "reason": "boom"}), encoding="utf-8")
+        res = await ExecutionCheck().check(
+            self._probe_config(), ["results/q04/test_results.json"], {}
+        )
+        assert res.passed is False
+
+    @pytest.mark.asyncio
+    async def test_real_counts_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _patch_roots(monkeypatch, tmp_path)
+        q04 = Path(root, "q04", "test_results.json")
+        q04.parent.mkdir(parents=True, exist_ok=True)
+        q04.write_text(json.dumps({"passed": 2, "failed": 2}), encoding="utf-8")
+        res = await ExecutionCheck().check(
+            self._probe_config(), ["results/q04/test_results.json"], {}
+        )
+        assert res.passed is True
+
+    @pytest.mark.asyncio
+    async def test_nested_summary_counts_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _patch_roots(monkeypatch, tmp_path)
+        q04 = Path(root, "q04", "test_results.json")
+        q04.parent.mkdir(parents=True, exist_ok=True)
+        # pytest-json-report style nesting under "summary".
+        q04.write_text(
+            json.dumps({"summary": {"passed": 4, "failed": 0, "total": 4}}),
+            encoding="utf-8",
+        )
+        res = await ExecutionCheck().check(
+            self._probe_config(), ["results/q04/test_results.json"], {}
+        )
+        assert res.passed is True
+
+    @pytest.mark.asyncio
+    async def test_only_total_without_pass_fail_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _patch_roots(monkeypatch, tmp_path)
+        q04 = Path(root, "q04", "test_results.json")
+        q04.parent.mkdir(parents=True, exist_ok=True)
+        q04.write_text(json.dumps({"total": 4}), encoding="utf-8")
+        res = await ExecutionCheck().check(
+            self._probe_config(), ["results/q04/test_results.json"], {}
+        )
+        assert res.passed is False
+
+    @pytest.mark.asyncio
+    async def test_all_zero_counts_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """battery-04 q4 run2: the orchestrator wrote {"passed":0,"failed":0}
+        because its test file had a pandas bug so pytest collected nothing. The
+        counts are well-formed integers (so the format gate passes), but a suite
+        that executed zero tests validated nothing — the probe must reject it so
+        eval_enforce downgrades and the agent retries with a runnable suite."""
+        root = _patch_roots(monkeypatch, tmp_path)
+        q04 = Path(root, "q04", "test_results.json")
+        q04.parent.mkdir(parents=True, exist_ok=True)
+        q04.write_text(json.dumps({"passed": 0, "failed": 0}), encoding="utf-8")
+        res = await ExecutionCheck().check(
+            self._probe_config(), ["results/q04/test_results.json"], {}
+        )
+        assert res.passed is False
+        assert "no tests executed" in res.evidence["stdout"]
+
+
+
 def _spec_check(name: str) -> CheckConfig:
     """Fetch a named check from the REAL golden spec (not a copy)."""
     from src.eval.golden import lookup_goal_spec

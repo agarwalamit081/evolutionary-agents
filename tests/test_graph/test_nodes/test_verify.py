@@ -14,6 +14,7 @@ from src.graph.models import Goal, GoalStatus, PlanStep, ReflectionResult, ToolR
 from src.graph.nodes.verify import (
     _extract_deliverable_paths,
     _extract_goal_deliverables,
+    _failure_reason,
     _force_complete_on_evidence,
     _load_deliverable_content,
     _spot_check_cited_paths,
@@ -1225,3 +1226,135 @@ class TestForceCompleteGoalCrossCheck:
         )
         assert result["is_complete"] is True
         assert result["phase"] == Phase.COMPLETE
+
+
+class TestForceCompleteGoalSatisfied:
+    """F-h.3 regression: a run whose GOAL deliverables are satisfied must
+    force-complete even when plan steps remain — the all_steps_done gate
+    re-looped battery-04 q3 (~19 wasted iterations).
+
+    ``_force_complete_on_evidence``'s ``goal_satisfied`` branch previously
+    required ``all_steps_done``; a reflect replan or verify-retry churn kept
+    ``step_index < len(plan_steps)`` forever, so an objectively-complete goal
+    looped verify→execute until the iteration hard-cap. The fix drops the step
+    gate (goal deliverables present = success) and keeps only a small iteration
+    floor to rule out stale-prior-run deliverables.
+    """
+
+    @staticmethod
+    def _state(goal_text: str, *, step_index: int, iteration: int) -> dict:
+        """State with a 5-step plan; ``step_index``/``iteration`` are tunable so
+        all_steps_done and the iteration floor can be exercised independently."""
+        state = initial_state(goal_text, "thread-fh3-force")
+        state["plan_steps"] = [
+            PlanStep(id=f"s{i}", description=f"Step {i}.", status="pending")
+            for i in range(5)
+        ]
+        state["current_step_index"] = step_index
+        state["iteration_count"] = iteration
+        state["errors"] = []
+        return state
+
+    @staticmethod
+    def _incomplete_result() -> dict:
+        return {
+            "is_complete": False,
+            "phase": Phase.VERIFY,
+            "final_output": "LLM judge: 75% complete, data gaps remain.",
+        }
+
+    def test_goal_satisfied_forces_complete_with_steps_remaining(self) -> None:
+        """The q3 loop's exact shape: goal satisfied, steps remaining, LLM
+        pessimistic → must STILL force-complete once past the iteration floor."""
+        state = self._state(
+            "Create a cohort retention tool, writing results/q03/retention.csv "
+            "and results/q03/churn_flags.csv.",
+            step_index=3,  # 3 < 5 → all_steps_done is False (the old blocker)
+            iteration=38,  # well past the floor; deliverables were written this run
+        )
+        result = _force_complete_on_evidence(
+            self._incomplete_result(),
+            state,
+            deliverable_paths=["results/q03/retention.csv", "results/q03/churn_flags.csv"],
+            deliverable_problems=["normalized.csv (malformed)"],  # advisory intermediate
+            goal_satisfied=True,
+        )
+        assert result["is_complete"] is True
+        assert result["phase"] == Phase.COMPLETE
+
+    def test_goal_satisfied_below_iter_floor_declines(self) -> None:
+        """Stale-deliverable guard: goal satisfied on the first verify of a fresh
+        run (iteration below floor) must NOT force-complete — those deliverables
+        may be leftovers from a prior, uncleaned run."""
+        state = self._state(
+            "Write results/q/retention.csv.",
+            step_index=0,
+            iteration=1,  # below _GOAL_COMPLETE_MIN_ITER
+        )
+        result = _force_complete_on_evidence(
+            self._incomplete_result(),
+            state,
+            deliverable_paths=["results/q/retention.csv"],
+            deliverable_problems=[],
+            goal_satisfied=True,
+        )
+        assert result["is_complete"] is False
+        assert result["phase"] == Phase.VERIFY
+
+    def test_goal_satisfied_all_steps_done_completes(self) -> None:
+        """Positive control: all steps done + goal satisfied still completes."""
+        state = self._state(
+            "Write results/q/retention.csv.",
+            step_index=5,  # 5 >= 5 → all_steps_done True
+            iteration=20,
+        )
+        result = _force_complete_on_evidence(
+            self._incomplete_result(),
+            state,
+            deliverable_paths=["results/q/retention.csv"],
+            deliverable_problems=[],
+            goal_satisfied=True,
+        )
+        assert result["is_complete"] is True
+        assert result["phase"] == Phase.COMPLETE
+
+
+class TestCorrectnessFailureReason:
+    """``_failure_reason`` extracts an actionable verdict from a failing check so
+    eval_enforce can tell the agent *what* to fix (battery-04 q4: a
+    {"passed":0,"failed":0} deliverable must surface "no tests executed", not a
+    bare "failed"). Duck-typed over the CheckResult evidence/error shape.
+    """
+
+    def _check(self, **kw: object) -> SimpleNamespace:
+        # Defaults mimic a failing, non-skipped CheckResult; kw overrides.
+        defaults: dict[str, object] = {
+            "passed": False,
+            "skipped": False,
+            "evidence": {},
+            "error": None,
+        }
+        defaults.update(kw)
+        return SimpleNamespace(**defaults)
+
+    def test_prefers_execution_probe_stdout_last_line(self) -> None:
+        check = self._check(
+            evidence={"stdout": "running probe...\nno tests executed (all counts zero)"}
+        )
+        assert _failure_reason(check) == "no tests executed (all counts zero)"
+
+    def test_falls_back_to_evidence_reason(self) -> None:
+        check = self._check(evidence={"reason": "target deliverable not on disk"})
+        assert _failure_reason(check) == "target deliverable not on disk"
+
+    def test_falls_back_to_error_field(self) -> None:
+        check = self._check(error="parse failed: invalid JSON: ...")
+        assert _failure_reason(check).startswith("parse failed")
+
+    def test_truncates_long_stdout(self) -> None:
+        check = self._check(evidence={"stdout": "x" * 500})
+        assert len(_failure_reason(check)) <= 200
+
+    def test_empty_evidence_yields_default(self) -> None:
+        assert _failure_reason(self._check()) == "failed"
+

@@ -99,3 +99,47 @@ class TestBuildMessages:
         assert "Reasoning techniques to apply:" in messages[0]["content"]
         # User content untouched.
         assert messages[1]["content"] == "u"
+
+
+class TestExecuteSystemRunFilesGuidance:
+    """battery-04 q4 (Part C): the execute system prompt must instruct the agent
+    to invoke a file it wrote by its EXACT written path and to record REAL
+    pass/fail counts — never a status=failed placeholder.
+
+    The q4 orchestrator wrote ``test_suite.py`` but ran ``pytest
+    test_retention_csv`` (filename mismatch), then shipped a
+    ``{"status": "failed"}`` stub. This guidance (shared by the main agent and
+    every sub-agent, which reuse ``execute_node``) is the prompt-level fix;
+    the eval golden check (Part B) is the hard backstop. Guards against
+    accidental removal of the guidance.
+    """
+
+    def _rendered(self) -> str:
+        from src.graph.prompts import EXECUTE_SYSTEM
+
+        return EXECUTE_SYSTEM.format(
+            goal_text="g",
+            completed_count=0,
+            total_steps=1,
+            step_description="s",
+            memory_context="",
+            tool_results_context="",
+        )
+
+    def test_requires_exact_written_path(self) -> None:
+        rendered = self._rendered()
+        assert "EXACT written path" in rendered
+        # The "No module named" symptom must be called out as a filename error.
+        assert "No module named" in rendered
+
+    def test_forbids_failure_status_placeholder(self) -> None:
+        rendered = self._rendered()
+        assert "real pass/fail counts" in rendered
+        assert "placeholder" in rendered
+        assert '"status": "failed"' in rendered or "status\": \"failed" in rendered
+
+    def test_states_project_root_default_cwd(self) -> None:
+        rendered = self._rendered()
+        # Relative results/ paths resolve because the tools run from project root.
+        assert "project root" in rendered
+

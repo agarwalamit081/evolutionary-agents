@@ -448,14 +448,20 @@ def _battery04_q04() -> GoalSpec:
             "outputs (schema invariants, retention sums within tolerance, no nulls in required "
             "fields, UTC conformance) in the sandbox, writing results/q04/test_results.json, then "
             "writes an executive Markdown synthesizing q1-q3 into business KPIs to "
-            "results/q04/executive_summary.md."
+            "results/q04/executive_summary.md. Write the test file to results/q04/ and invoke "
+            "pytest by its EXACT written path (e.g. pytest results/q04/test_q1_q3.py) — the "
+            "filename passed to pytest must match the file you wrote. results/q04/test_results.json "
+            "MUST record concrete integer pass/fail counts parsed from pytest's summary line "
+            "(e.g. {\"passed\": N, \"failed\": M}); a {\"status\": \"failed\"} or {\"status\": "
+            "\"error\"} placeholder is INVALID — if a test module fails to import, the filename "
+            "or path is wrong: fix it and re-run so the recorded file always carries real counts."
         ),
         category="multi_agent",
         max_iterations=60,
         timeout_seconds=1200,
         expected_deliverables=["results/q04/test_results.json", "results/q04/executive_summary.md"],
         success_criteria=[
-            "results/q04/test_results.json exists and records pass/fail counts",
+            "results/q04/test_results.json exists and records concrete integer pass/fail counts",
             "results/q04/executive_summary.md exists and is non-empty",
         ],
         checks=[
@@ -478,16 +484,59 @@ def _battery04_q04() -> GoalSpec:
                 check_type="execution",
                 name="q04_test_results_has_counts",
                 params={
+                    # Reject failure/error STUBS (e.g. {"status": "failed", ...}) —
+                    # the previous 'pass'/'fail' substring test passed such stubs
+                    # because "failed" contains "fail". Require concrete INTEGER
+                    # pass/fail counts at the top level OR under a summary/totals
+                    # node (pytest-json-report shape), so a run that never actually
+                    # executed its suite cannot pass verification.
                     "code": (
                         "import json as _j, sys\n"
                         "path = next((p for p in _DELIVERABLES if p.endswith('test_results.json')), '')\n"
                         "if not path:\n"
                         "    print('no test_results.json'); sys.exit(1)\n"
-                        "data = _j.load(open(path))\n"
-                        "blob = _j.dumps(data).lower()\n"
-                        "if 'pass' not in blob and 'fail' not in blob:\n"
-                        "    print('no pass/fail counts recorded'); sys.exit(1)\n"
-                        "print('ok: test results record pass/fail')\n"
+                        "try:\n"
+                        "    data = _j.load(open(path))\n"
+                        "except Exception as _e:\n"
+                        "    print('unparseable test_results.json:', _e); sys.exit(1)\n"
+                        "_STUB = {'failed', 'error', 'fail', 'errored', 'crashed', 'aborted'}\n"
+                        "_status = str(data.get('status', '')).lower().strip() if isinstance(data, dict) else ''\n"
+                        "if _status in _STUB:\n"
+                        "    print('rejected: test_results.json is a failure stub (status=' + _status + ')'); sys.exit(1)\n"
+                        "_COUNT_KEYS = ('passed', 'failed', 'errors', 'skipped', 'total', 'collected', 'pass', 'fail')\n"
+                        "def _ints(d):\n"
+                        "    out = {}\n"
+                        "    if isinstance(d, dict):\n"
+                        "        for k, v in d.items():\n"
+                        "            if k in _COUNT_KEYS:\n"
+                        "                try:\n"
+                        "                    f = float(v)\n"
+                        "                except (TypeError, ValueError):\n"
+                        "                    continue\n"
+                        "                if f == int(f):\n"
+                        "                    out[k] = int(f)\n"
+                        "    return out\n"
+                        "counts = _ints(data)\n"
+                        "if not counts and isinstance(data, dict):\n"
+                        "    for _sub in (data.get('summary'), data.get('totals'), data.get('stats')):\n"
+                        "        counts = _ints(_sub)\n"
+                        "        if counts:\n"
+                        "            break\n"
+                        "if not counts:\n"
+                        "    print('no integer pass/fail counts recorded'); sys.exit(1)\n"
+                        "_pass = any(k in counts for k in ('passed', 'pass'))\n"
+                        "_fail = any(k in counts for k in ('failed', 'fail', 'errors'))\n"
+                        "if not (_pass or _fail):\n"
+                        "    print('counts present but neither pass nor fail recorded'); sys.exit(1)\n"
+                        "# battery-04 q4 run2: the orchestrator wrote {\"passed\":0,\"failed\":0}\n"
+                        "# because its test file had a pandas bug (.dt.tz) so pytest collected\n"
+                        "# nothing. Counts of all zero mean no test actually executed — the\n"
+                        "# suite validated nothing. Require at least one outcome (or a nonzero\n"
+                        "# total/collected) so a hollow 0/0 result cannot pass verification.\n"
+                        "_ran = (counts.get('passed',0)+counts.get('pass',0)+counts.get('failed',0)+counts.get('fail',0)+counts.get('errors',0)) > 0 or counts.get('total',0) > 0 or counts.get('collected',0) > 0\n"
+                        "if not _ran:\n"
+                        "    print('no tests executed (all counts zero — suite collected/ran nothing)'); sys.exit(1)\n"
+                        "print('ok: test results record counts ' + _j.dumps(counts))\n"
                     ),
                     "timeout": 20,
                 },

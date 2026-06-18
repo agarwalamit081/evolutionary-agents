@@ -92,6 +92,15 @@ _PATH_NOISE_TOKENS = frozenset({
     "e.g", "eg", "i.e", "ie", "etc", "mixed", "human",
 })
 
+# Minimum iterations before a goal-satisfied run force-completes. Guards against
+# force-completing on stale deliverables (left from a prior, uncleaned run) that
+# happen to satisfy the goal on the very first verify of a fresh run. See
+# ``_force_complete_on_evidence`` (goal_satisfied branch). By the time the goal's
+# own deliverables are all present + non-empty + well-formed, the agent has
+# necessarily executed real work this run, so this floor rarely binds.
+_GOAL_COMPLETE_MIN_ITER = 3
+
+
 
 async def verify_node(
     state: AgentState,
@@ -462,22 +471,26 @@ def _force_complete_on_evidence(
     all_steps_done = step_index >= len(plan_steps) if plan_steps else True
 
     if goal_satisfied:
-        # F-h.2: the GOAL's own named deliverables are present + non-empty +
-        # well-formed on disk AND every plan step executed → the run reached its
-        # goal. ``state.errors`` accumulates via operator.add and is NEVER
-        # cleared, so it still holds stale entries from EARLIER verify cycles —
-        # recorded before the agent wrote the deliverable ("verify: deliverable
-        # not present") or a write-nudge gap on a plan-intermediate INPUT file —
-        # that no longer reflect reality. Honoring those here would loop an
-        # objectively-complete goal verify→replan until the iteration hard-cap
-        # (battery-04 q2). The Phase-3 eval_enforce layer independently validates
-        # CORRECTNESS, so a present-but-wrong goal artifact is still caught; this
-        # path only asserts PRESENCE. Require only that all steps executed.
-        if not all_steps_done:
+        # F-h.3: the GOAL's own named deliverables are all present + non-empty +
+        # well-formed on disk → the run reached its goal. That is the definition
+        # of success, so a clean run (all_steps_done) force-completes
+        # immediately. The escape hatch: a run whose plan CAN'T cleanly finish
+        # — a reflect replan lengthens the plan, or verify-retry churns chasing
+        # an advisory intermediate gap so step_index never reaches
+        # len(plan_steps) — also force-completes once it is past the iteration
+        # floor, instead of looping to the hard-cap. Requiring all_steps_done
+        # alone (F-h.2) re-looped battery-04 q3: it satisfied retention.csv +
+        # churn_flags.csv by ~iter 38 but looped verify→execute→reflect→verify
+        # until iter 57 (~19 wasted iterations). The iteration floor also rules
+        # out force-completing on stale deliverables detected on the first
+        # verify of a fresh run. The Phase-3 eval_enforce layer independently
+        # validates CORRECTNESS, so a present-but-wrong goal artifact is still
+        # caught; this path only asserts PRESENCE.
+        if not all_steps_done and state.get("iteration_count", 0) < _GOAL_COMPLETE_MIN_ITER:
             return result
         reason = (
             "goal deliverables present and non-empty on disk; "
-            "plan-intermediate gaps + stale errors advisory (battery-04 q2 F-h)"
+            "plan-intermediate gaps + stale errors advisory (battery-04 F-h.3)"
         )
     else:
         # No goal-sufficiency: require EVERY declared deliverable present (no
@@ -526,6 +539,30 @@ def _force_complete_on_evidence(
     }
 
 
+def _failure_reason(check: Any) -> str:
+    """Concise, actionable reason a correctness check failed.
+
+    Prefer the execution probe's stdout (it prints a specific verdict, e.g.
+    "no tests executed (all counts zero)"), then a stored ``reason``, then the
+    check's ``error``. Used by eval_enforce so a downgrade tells the agent
+    *what* to fix, not merely that something failed.
+    """
+    evidence = getattr(check, "evidence", None)
+    reason = ""
+    if isinstance(evidence, dict):
+        stdout = str(evidence.get("stdout") or "").strip()
+        if stdout:
+            # The probe prints its verdict on the last stdout line.
+            reason = stdout.splitlines()[-1].strip()
+        if not reason:
+            reason = str(evidence.get("reason") or "").strip()
+    if not reason:
+        err = getattr(check, "error", None)
+        if err:
+            reason = str(err).strip()
+    return (reason[:200]).strip() or "failed"
+
+
 async def _run_correctness_checks(
     result: dict[str, Any],
     state: AgentState,
@@ -556,6 +593,24 @@ async def _run_correctness_checks(
         return result
 
     correctness = await run_checks(spec, deliverable_paths, state, gateway=gateway)
+    # Observability: the eval layer previously ran silently on its happy path,
+    # making it impossible to tell from a log whether correctness checks engaged
+    # at all (battery-04 q4 slipped a {"status":"failed"} stub through because
+    # eval_goal_spec_id was never threaded, so this branch never executed). Log
+    # every engagement — spec, aggregate pass/score, and a per-check breakdown —
+    # so a run's eval outcome is always visible.
+    _check_summary = ", ".join(
+        f"{c.check_name}={'pass' if c.passed else 'fail'}({c.score:.2f})"
+        for c in correctness.checks
+        if not c.skipped
+    ) or "(no scored checks)"
+    logger.info(
+        "Eval correctness engaged: spec={} passed={} score={:.2f} [{}]",
+        spec.spec_id,
+        correctness.passed,
+        correctness.overall_score,
+        _check_summary,
+    )
     result = {
         **result,
         "eval_correctness_score": correctness.overall_score,
@@ -577,23 +632,32 @@ async def _run_correctness_checks(
         iteration = state.get("iteration_count", 0)
         max_iter = state.get("max_iterations", 60)
         if iteration < max_iter - 1:
+            # Surface WHY each check failed so the re-plan is actionable, not a
+            # blind retry. battery-04 q4: a {"passed":0,"failed":0} deliverable
+            # scored 0.50 with only "correctness checks failed" feedback — the
+            # agent never learned the suite ran zero tests. Include each failing
+            # check's specific reason so the agent fixes the right thing.
+            _failed = [c for c in correctness.checks if not c.passed and not c.skipped]
+            _detail = "; ".join(_failure_reason(c) for c in _failed) or "no specific reason"
             final_output = (result.get("final_output") or "").strip()
             logger.info(
                 "Correctness enforcement: downgrading complete→incomplete "
-                "(score={:.2f}, iter={}/{})",
+                "(score={:.2f}, iter={}/{}) — {}",
                 correctness.overall_score,
                 iteration,
                 max_iter,
+                _detail,
+            )
+            _msg = (
+                f"verify: correctness checks failed (score={correctness.overall_score:.2f}) "
+                f"— {_detail}"
             )
             return {
                 **result,
                 "is_complete": False,
                 "phase": Phase.EXECUTE,
-                "final_output": f"{final_output} Correctness checks failed (score={correctness.overall_score:.2f}).".strip(),
-                "errors": [
-                    *result.get("errors", []),
-                    f"verify: correctness checks failed (score={correctness.overall_score:.2f})",
-                ],
+                "final_output": f"{final_output} {_msg}.".strip(),
+                "errors": [*result.get("errors", []), _msg],
             }
     return result
 

@@ -47,5 +47,23 @@ DELIVERABLE RULE (critical):
   does not parse as its declared format, forcing the run to retry — so a
   clobbered deliverable only wastes iterations.
 
+RUNNING A FILE YOU WROTE (scripts, test suites):
+- When you write a file with file_writer (e.g. results/q04/test_q1_q3.py) and
+  then execute it, invoke it by its EXACT written path: `pytest
+  results/q04/test_q1_q3.py`, NOT a guessed name like `pytest
+  test_retention_csv`. The target you pass to the runner (pytest / terminal /
+  code_executor) MUST match the file you actually wrote — a "No module named"
+  or "No such file" error always means the filename or path is wrong: fix the
+  invocation and re-run.
+- The execution tools run from the project root by default, so relative paths
+  inside the file (e.g. results/q01/normalized.csv, results/q03/retention.csv)
+  resolve as written — do NOT cd into a subdirectory to run it.
+- When a deliverable records run/test results (e.g. results/q04/test_results.json),
+  parse the runner's ACTUAL summary line (pytest: "N passed, M failed") and write
+  concrete integer counts like {"passed": N, "failed": M}. NEVER write a
+  placeholder such as {"status": "failed"} or {"status": "error"} — if a run
+  fails to import or a test errors, fix the invocation/test and re-run so the
+  recorded file always carries real pass/fail counts.
+
 Execute this step. If you need to use a tool, call it. If the step is straightforward, provide the answer directly.
 Be concise and focused on completing this specific step.

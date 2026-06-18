@@ -289,10 +289,23 @@ def _write_nudge(path: str) -> str:
         "Your previous turn described the deliverable in text but did not "
         "write it to disk. This step requires producing the file deliverable "
         f"at '{path}'. Call the file_writer tool now with file_path set to "
-        "that path and content set to your full deliverable text. Do not "
+        "that path, create_dirs set to true (so nested output folders are "
+        "auto-created), and content set to your full deliverable text. Use "
+        "file_writer for the deliverable file — NOT code_executor. Do not "
         "respond with text only — verification reads the filesystem, so the "
         "deliverable must be written via file_writer to count as done."
     )
+
+
+def _offers_tool(tool_defs: list[dict[str, Any]], name: str) -> bool:
+    """True if ``name`` is among the offered function-calling tool schemas."""
+    for td in tool_defs:
+        fn = td.get("function") if isinstance(td, dict) else None
+        if isinstance(fn, dict) and fn.get("name") == name:
+            return True
+        if isinstance(td, dict) and td.get("name") == name:
+            return True
+    return False
 
 
 async def execute_node(
@@ -472,8 +485,10 @@ async def _llm_execute(
         if expected_path:
             step_label = (
                 f"{step_label}\n\nThis step's deliverable MUST be written to "
-                f"disk: call the file_writer tool with file_path='{expected_path}' "
-                f"and content set to your full deliverable text. A text-only "
+                f"disk: call the file_writer tool with file_path='{expected_path}', "
+                f"create_dirs=true (so nested output folders are auto-created), "
+                f"and content set to your full deliverable text. Use file_writer "
+                f"for the deliverable file — NOT code_executor. A text-only "
                 f"reply does not count as done — verification reads the "
                 f"filesystem, so the file must exist at that path."
             )
@@ -500,9 +515,24 @@ async def _llm_execute(
             if nudge_text is not None:
                 payload.append({"role": "user", "content": nudge_text})
 
+            # On a nudge turn (the model narrated instead of writing), force the
+            # file_writer tool call structurally via a named tool_choice that
+            # even narration-prone models cannot ignore. Only when file_writer is
+            # actually offered (always true for write-steps). Turn 1 stays free
+            # so a step that must compute (call code_executor, etc.) before
+            # writing still can. Cures the q3/q4 "narrates through all nudges"
+            # loop. OpenAI / DashScope-compat / NVIDIA-NIM all honor this.
+            forced_tool_choice: dict[str, Any] | None = None
+            if nudge_text is not None and _offers_tool(tool_defs, "file_writer"):
+                forced_tool_choice = {
+                    "type": "function",
+                    "function": {"name": "file_writer"},
+                }
+
             response = await gateway.acompletion_with_tools(
                 messages=payload,
                 tools=tool_defs,
+                tool_choice=forced_tool_choice,
             )
 
             # Process tool calls if present. gather preserves order, so each

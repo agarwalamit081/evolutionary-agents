@@ -237,6 +237,30 @@ class TestBuildKwargs:
         kwargs = gateway._build_kwargs("gpt-4o-mini-2024-07-18", 0.5, 100, None)
         assert "metadata" not in kwargs
 
+    def test_nvidia_shims_to_openai_with_nim_base(self, gateway: LLMGateway) -> None:
+        """litellm in this build rejects the bare ``nvidia/`` provider prefix
+        ("LLM Provider NOT provided"). The NVIDIA NIM endpoint is
+        OpenAI-compatible, so a registered nvidia model_id is rewritten to the
+        ``openai/`` shim against the pinned NIM api_base (verified live for all
+        16 registered NVIDIA models)."""
+        kwargs = gateway._build_kwargs("nvidia-llama-3.3-70b", 0.5, 100, None)
+        assert kwargs["model"] == "openai/meta/llama-3.3-70b-instruct"
+        assert kwargs["api_base"] == "https://integrate.api.nvidia.com/v1"
+
+    def test_nvidia_nested_model_path_is_shimmed(self, gateway: LLMGateway) -> None:
+        """The shim handles nested ``nvidia/<org>/<model>`` ids, not just
+        ``nvidia/<model>`` — the org segment is preserved under openai/."""
+        kwargs = gateway._build_kwargs("nvidia-qwen3-next-80b", 0.5, 100, None)
+        assert kwargs["model"] == "openai/qwen/qwen3-next-80b-a3b-instruct"
+        assert kwargs["api_base"] == "https://integrate.api.nvidia.com/v1"
+
+    def test_non_nvidia_model_is_not_shimmed(self, gateway: LLMGateway) -> None:
+        """A plain OpenAI model is left untouched — no openai/ prefix injected
+        and no NIM base pinned."""
+        kwargs = gateway._build_kwargs("gpt-4o-mini-2024-07-18", 0.5, 100, None)
+        assert kwargs["model"] == "gpt-4o-mini-2024-07-18"
+        assert kwargs.get("api_base") != "https://integrate.api.nvidia.com/v1"
+
     def test_alibaba_qwen_pins_dashscope_api_base(self) -> None:
         """Qwen (alibaba provider) calls pin api_base to the DashScope endpoint.
 

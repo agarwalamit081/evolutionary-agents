@@ -138,6 +138,7 @@ class LLMGateway:
         complexity: TaskComplexity | None = None,
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
+        tool_choice: dict[str, Any] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
         cache_key: str | None = None,
@@ -215,6 +216,7 @@ class LLMGateway:
             model=model,
             tools=tools,
             response_format=response_format,
+            tool_choice=tool_choice,
             temperature=temperature,
             max_tokens=max_tokens,
             metadata=metadata,
@@ -330,6 +332,7 @@ class LLMGateway:
         tools: list[dict[str, Any]],
         model: str | None = None,
         complexity: TaskComplexity | None = None,
+        tool_choice: dict[str, Any] | None = None,
         temperature: float | None = None,
         metadata: dict[str, Any] | None = None,
         timeout: float | None = None,
@@ -352,6 +355,7 @@ class LLMGateway:
             model=model,
             complexity=complexity,
             tools=tools,
+            tool_choice=tool_choice,
             temperature=temperature,
             metadata=metadata,
             timeout=timeout,
@@ -387,6 +391,7 @@ class LLMGateway:
         model: str,
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
+        tool_choice: dict[str, Any] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
         metadata: dict[str, Any] | None = None,
@@ -437,6 +442,8 @@ class LLMGateway:
                     kwargs["tools"] = tools
                 if response_format:
                     kwargs["response_format"] = response_format
+                if tool_choice:
+                    kwargs["tool_choice"] = tool_choice
 
                 response = await self._retry_call(messages, **kwargs)
                 await self._circuit_breaker.record_success(attempt_provider)
@@ -591,7 +598,14 @@ class LLMGateway:
 
         # NVIDIA API requires explicit base URL
         if provider == "nvidia":
+            # litellm in this build rejects the bare ``nvidia/`` provider prefix
+            # ("LLM Provider NOT provided"). The NVIDIA NIM endpoint is
+            # OpenAI-compatible, so pin the base and route via the ``openai/``
+            # shim — verified live for all 16 registered NVIDIA models.
             kwargs["api_base"] = "https://integrate.api.nvidia.com/v1"
+            if litellm_model.startswith("nvidia/"):
+                litellm_model = "openai/" + litellm_model[len("nvidia/") :]
+                kwargs["model"] = litellm_model
 
         # Pin the Anthropic endpoint so an ambient ANTHROPIC_BASE_URL inherited
         # from the environment (e.g. a Claude-Code→Z.AI gateway) cannot misroute

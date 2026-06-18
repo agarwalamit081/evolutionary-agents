@@ -19,6 +19,11 @@ from src.config.model_registry import MODEL_REGISTRY
 # Providers whose litellm prefix routing is known-broken in the installed
 # litellm version (every model_id format unmapped via get_llm_provider). These
 # are fallback-only; tracked for a litellm-upgrade / endpoint fix separately.
+# NOTE: ``nvidia`` is *callable* despite being natively unroutable — the gateway
+# (``LLMGateway._build_kwargs``) rewrites the ``nvidia/<id>`` model_id to the
+# OpenAI-compatible ``openai/<id>`` shim against the NIM api_base at call time.
+# That shim is covered by tests/test_llm/test_gateway.py::TestBuildKwargs; this
+# test only asserts native litellm routability, which the bare prefix still lacks.
 _KNOWN_UNROUTABLE_PROVIDERS: set[str] = {"nvidia"}
 
 # Providers reached via an OpenAI-compatible gateway with a custom api_base

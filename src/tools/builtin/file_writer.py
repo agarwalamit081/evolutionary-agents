@@ -14,7 +14,7 @@ async def file_writer(
     file_path: str,
     content: str,
     sandbox_root: Optional[str] = None,
-    create_dirs: bool = False,
+    create_dirs: bool = True,
     encoding: str = "utf-8",
 ) -> str:
     """Write content to a file within the sandboxed directory.
@@ -24,7 +24,10 @@ async def file_writer(
         content: Content to write.
         sandbox_root: Root directory for sandboxing. Defaults to
             ``settings.agent.results_root`` (``results``).
-        create_dirs: Create parent directories if they don't exist.
+        create_dirs: Create parent directories if they don't exist. Defaults
+            to ``True`` so deliverables land under nested run subfolders
+            (e.g. ``results/q03/retention.csv``) without a prior mkdir — a
+            ``False`` default silently failed writes to missing parents.
         encoding: File encoding.
 
     Returns:
@@ -84,8 +87,8 @@ TOOL_DEFINITION = {
             },
             "create_dirs": {
                 "type": "boolean",
-                "description": "Create parent directories if they don't exist (default: false).",
-                "default": False,
+                "description": "Create parent directories if they don't exist (default: true).",
+                "default": True,
             },
         },
         "required": ["file_path", "content"],

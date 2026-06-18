@@ -117,6 +117,34 @@ class TestFileWriter:
         assert "success" in result.lower() or "written" in result.lower()
         assert test_file.read_text() == "written content"
 
+    @pytest.mark.asyncio
+    async def test_creates_nested_parents_by_default(self, tmp_path: Path) -> None:
+        """create_dirs defaults to True — nested writes land without a prior mkdir.
+
+        Regression for battery-04 q3: with create_dirs defaulting to False, a
+        write to a nested run subfolder that didn't exist (e.g.
+        results/q03/retention.csv right after --clean) hit the parent-exists
+        guard and silently returned ``ERROR: Parent directory does not exist``
+        — no log, so the agent believed nothing was wrong and never converged.
+        The default is now True so deliverables under per-run subfolders land.
+        """
+        nested = tmp_path / "q03" / "retention.csv"
+        # Omit create_dirs entirely — the default must create the parent.
+        result = await file_writer(str(nested), "cohort,week0,week1\n", sandbox_root=str(tmp_path))
+        assert "success" in result.lower() or "written" in result.lower(), result
+        assert nested.exists()
+        assert nested.read_text() == "cohort,week0,week1\n"
+        # Parent directory was auto-created.
+        assert nested.parent.exists()
+
+    @pytest.mark.asyncio
+    async def test_explicit_create_dirs_false_still_blocks_missing_parent(self, tmp_path: Path) -> None:
+        """create_dirs=False keeps the original guard behavior."""
+        nested = tmp_path / "missing" / "x.txt"
+        result = await file_writer(str(nested), "x", sandbox_root=str(tmp_path), create_dirs=False)
+        assert "error" in result.lower()
+        assert not nested.exists()
+
 
 class TestSelfInspect:
     """Tests for the self_inspect tool."""

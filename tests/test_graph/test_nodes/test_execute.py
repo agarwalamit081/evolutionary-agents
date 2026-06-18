@@ -160,6 +160,114 @@ class TestExecuteNodeLLM:
         assert result["current_step_index"] == 1
 
     @pytest.mark.asyncio
+    async def test_write_step_forces_file_writer_tool_choice_on_nudge(
+        self, state_with_plan: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A write step that the model narrates (instead of calling file_writer)
+        is re-prompted with a forced named tool_choice so narration-prone models
+        cannot reply with prose on the nudge turn. Turn 1 stays free; the nudge
+        turn pins file_writer. Regression for the q3/q4 loop where the cheap
+        model narrated through every nudge and the deliverable was never written.
+        """
+        # Deterministic nudge budget independent of ambient .env MAX_WRITE_NUDGES
+        monkeypatch.setattr(get_settings().agent, "max_write_nudges", 2)
+
+        # Step 0 is a write-step → expected_path derived from the description
+        state_with_plan["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description="Write the report to results/q/test_report.md",
+                status="pending",
+            ),
+        ]
+
+        narration = ToolCallResponse(
+            content="I will write the report now.",
+            tool_calls=[],
+            model="gpt-4o-mini-2024-07-18",
+            provider="openai",
+            input_tokens=10,
+            output_tokens=10,
+            total_tokens=20,
+            cost_usd=0.0001,
+        )
+        write_call = ToolCallResponse(
+            content="",
+            tool_calls=[{
+                "id": "tc_fw",
+                "type": "function",
+                "function": {
+                    "name": "file_writer",
+                    "arguments": '{"file_path": "results/q/test_report.md", "content": "# Report"}',
+                },
+            }],
+            model="gpt-4o-mini-2024-07-18",
+            provider="openai",
+            input_tokens=10,
+            output_tokens=20,
+            total_tokens=30,
+            cost_usd=0.0002,
+        )
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(side_effect=[narration, write_call])
+
+        async_handler = AsyncMock(return_value="wrote results/q/test_report.md")
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[{
+            "type": "function",
+            "function": {
+                "name": "file_writer",
+                "description": "Write a file to disk",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        }])
+        tools.get_handler = MagicMock(return_value=async_handler)
+
+        result = await execute_node(state_with_plan, gateway=gateway, tools=tools)
+
+        calls = gateway.acompletion_with_tools.call_args_list
+        assert len(calls) == 2
+        # Turn 1: no nudge yet → free choice
+        assert calls[0].kwargs.get("tool_choice") is None
+        # Turn 1's front-loaded step label directs create_dirs + file_writer
+        turn1_messages = calls[0].kwargs.get("messages", [])
+        step_labels = " ".join(
+            str(m.get("content", "")) for m in turn1_messages if m.get("role") == "user"
+        ).lower()
+        assert "create_dirs" in step_labels, step_labels
+        assert "file_writer" in step_labels, step_labels
+        # Turn 2 (nudge): forced file_writer so prose cannot win
+        assert calls[1].kwargs.get("tool_choice") == {
+            "type": "function",
+            "function": {"name": "file_writer"},
+        }
+        # Step completed and advanced after the write
+        assert result["phase"] == Phase.REFLECT
+        assert result["current_step_index"] == 1
+
+    def test_write_nudge_directs_create_dirs_and_file_writer(self) -> None:
+        """The write nudge must tell the model to set create_dirs=true and use
+        file_writer (not code_executor) for the deliverable file.
+
+        Regression for battery-04 q3: even when file_writer was forced via
+        tool_choice, some models omitted create_dirs (defaulting then to False)
+        so nested writes silently failed on a missing parent. The nudge now
+        spells out create_dirs=true and names file_writer over code_executor.
+        """
+        text = _write_nudge("results/q03/retention.csv")
+        low = text.lower()
+        assert "create_dirs" in low, text
+        assert "file_writer" in low, text
+        assert "code_executor" in low, text
+        assert "results/q03/retention.csv" in text
+
+    @pytest.mark.asyncio
     async def test_llm_execute_with_unknown_tool(self, state_with_plan: dict[str, Any]) -> None:
         """LLM returns tool call for unknown tool — error ToolResult created."""
         gateway = MagicMock()

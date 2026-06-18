@@ -533,6 +533,65 @@ class TestAcompletion:
         assert mock_litellm.acompletion.call_args.kwargs["timeout"] == 200.0
 
     @pytest.mark.asyncio
+    async def test_tool_choice_conflict_retries_same_model_without_tool_choice(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """A thinking-mode model that rejects a *forced* tool_choice is retried
+        on the SAME model with tool_choice dropped — not bounced down the
+        fallback chain.
+
+        Regression for the execute-node write-nudge fix (which forces
+        ``tool_choice=file_writer``): deepseek-v4-flash answers a forced
+        tool_choice with ``400 "Thinking mode does not support this
+        tool_choice"``. Before the gateway fix, every write-nudge turn burned
+        the whole chain (deepseek -> haiku-capped -> nvidia -> qwen -> glm).
+        The gateway must detect this recoverable 400 and retry the primary
+        once without the hard constraint, relying on the system-prompt nudge.
+        """
+
+        class _FakeBadRequest(Exception):
+            pass
+
+        mock_resp = _make_litellm_response(content="ok")
+        seen: list[Any] = []
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            seen.append(kwargs.get("tool_choice"))
+            if len(seen) == 1:
+                raise _FakeBadRequest(
+                    'DeepseekException - {"error":{"message":'
+                    '"Thinking mode does not support this tool_choice"}}'
+                )
+            return mock_resp
+
+        # Make sure the deepseek primary is attempted first (not pre-filtered
+        # out of the chain for a missing test-env API key).
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            # Under the patch, the except clause resolves these from the mock;
+            # map them to the fake so the raised error is caught as BadRequest.
+            mock_litellm.AuthenticationError = _FakeBadRequest
+            mock_litellm.BadRequestError = _FakeBadRequest
+
+            result = await gateway.acompletion(
+                messages=simple_messages,
+                model="deepseek-v4-flash",
+                tool_choice={"type": "function", "function": {"name": "file_writer"}},
+            )
+
+        # Exactly two calls on the same model: forced, then tool_choice-less.
+        assert result.content == "ok"
+        assert len(seen) == 2
+        assert seen[0] is not None
+        assert seen[1] is None
+
+    @pytest.mark.asyncio
     async def test_uses_complexity_routing_when_no_model(
         self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
     ) -> None:

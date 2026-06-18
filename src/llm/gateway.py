@@ -464,7 +464,34 @@ class LLMGateway:
                 await self._circuit_breaker.record_failure(
                     attempt_provider, transient=False
                 )
-                logger.error(f"Non-retryable error for {attempt_model}: {exc}")
+                # Recoverable tool_choice incompatibility: thinking-mode models
+                # (e.g. deepseek-v4-flash) reject a *forced* tool_choice with a
+                # 400 "Thinking mode does not support this tool_choice". That is
+                # not a provider outage — retry the SAME model once with
+                # tool_choice dropped. The execute-node write-nudge already adds
+                # a strong system-prompt instruction to call the file tool, so
+                # dropping the hard constraint preserves intent without burning
+                # the whole fallback chain on every write-nudge turn.
+                if tool_choice and "tool_choice" in str(exc).lower():
+                    logger.warning(
+                        f"{attempt_model} rejects forced tool_choice "
+                        f"(thinking-mode); retrying same model without it"
+                    )
+                    kwargs.pop("tool_choice", None)
+                    try:
+                        response = await self._retry_call(messages, **kwargs)
+                        await self._circuit_breaker.record_success(attempt_provider)
+                        return self._parse_response(
+                            response, attempt_model, attempt_provider
+                        )
+                    except Exception as retry_exc:
+                        logger.warning(
+                            f"tool_choice-less retry for {attempt_model} also "
+                            f"failed: {retry_exc.__class__.__name__}: {retry_exc}"
+                        )
+                        last_error = retry_exc
+                else:
+                    logger.error(f"Non-retryable error for {attempt_model}: {exc}")
                 continue
             except Exception as exc:
                 last_error = exc

@@ -9,12 +9,20 @@ from src.config.settings import Settings
 from src.graph.enums import TaskComplexity
 
 
-# Mapping from TaskComplexity to model tier and fallback chain key
+# Mapping from TaskComplexity to model tier and fallback chain key.
+# SIMPLE/COMPLEX primary is deepseek-v4-flash (Cheap) — swapped off
+# claude-haiku-4-5-20251001 after that Anthropic key hit an account usage cap
+# (blocked until 2026-07-01): the key stayed present so route() kept returning
+# Haiku as primary, and every SIMPLE/COMPLEX call failed before falling through
+# the chain (89 wasted attempts in one run). deepseek-v4-flash is the registered
+# CHEAP-tier peer and was already Haiku's first fallback, so this removes the
+# dead attempt with no behavior change on a funded key. Haiku stays registered
+# + as deepseek-v4-flash's first chain fallback.
 COMPLEXITY_TIER_MAP: dict[TaskComplexity, tuple[ModelTier, str]] = {
     TaskComplexity.TRIVIAL: (ModelTier.VERY_CHEAP, "qwen3.5-flash"),
-    TaskComplexity.SIMPLE: (ModelTier.CHEAP, "claude-haiku-4-5-20251001"),
-    TaskComplexity.COMPLEX: (ModelTier.CHEAP, "claude-haiku-4-5-20251001"),
-    TaskComplexity.CRITICAL: (ModelTier.MODERATE, "claude-sonnet-4-6"),
+    TaskComplexity.SIMPLE: (ModelTier.CHEAP, "deepseek-v4-flash"),
+    TaskComplexity.COMPLEX: (ModelTier.CHEAP, "deepseek-v4-flash"),
+    TaskComplexity.CRITICAL: (ModelTier.MODERATE, "glm-4.7"),
 }
 
 
@@ -47,11 +55,11 @@ class ModelRouter:
         # The complexity's primary model (the chain_key itself) is the intended
         # default for this tier. Try it FIRST. Previously ``_route_from_chain``
         # only walked ``FALLBACK_CHAINS[chain_key]``, which deliberately
-        # excludes the primary — so e.g. COMPLEX→"claude-haiku-4-5-20251001"
-        # silently resolved to its first fallback (deepseek-v4-flash) and the
+        # excludes the primary — so e.g. COMPLEX→"deepseek-v4-flash" silently
+        # resolved to its first fallback (claude-haiku-4-5-20251001) and the
         # named default was never selected even when its provider key was
-        # present. (F15: this made the "Very Cheap" deepseek model the de-facto
-        # default for nearly every task, starving the battery of tool-calling
+        # present. (F15: this made a different Cheap model the de-facto default
+        # for nearly every task, starving the battery of tool-calling
         # reliability.)
         primary_provider = self._extract_provider(chain_key)
         if primary_provider not in excluded and self._has_provider_key(primary_provider):

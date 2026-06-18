@@ -614,6 +614,37 @@ over a fresh gateway (non-streaming runs are unchanged). The stream handler
 absorbs `asyncio.CancelledError` and falls back to the static `final_output`
 if the stream is empty.
 
+### Battery-04 Production Hardening
+
+The production-robustness pass (see [`docs/validation-battery-04.md`](validation-battery-04.md))
+added a correctness + robustness layer over the existing process metrics:
+
+- **Typed correctness eval harness** (`src/eval/{checks,golden,store}.py`) — Structural
+  (schema/keys/row-count/required-fields), Execution (sandbox probe asserting invariants such as
+  UTC conformance / no-null-required), Golden (exact/regex/numeric-tolerance vs a golden spec), and
+  Oracle (LLM-judge via lazy `deepeval`/`ragas`) checks. Wired into the verify node behind
+  `EVAL_ENABLED`; results persist to the `eval_results` table; `main.py --eval` runs the golden suite.
+  Battery-04 live result: **q1 9/9, q2 13/14 checks pass**. *(Known gap F-e: checks fire only at
+  `is_complete=True`, so a never-converging run is not eval-rescued.)*
+- **Verify completion discipline** — the verify node refuses to force-complete unless the goal's
+  *expected* deliverable is present, non-empty, and well-formed: `.md`/`.txt` are placeholder-leak-scanned,
+  `.csv`/`.json`/`.jsonl` are parse-checked, and goal-deliverable extraction skips input-context paths and
+  requires ≥2-char extensions. A missing deliverable triggers a re-plan, never a false success.
+- **Per-tool metrics + performance retirement** — `src/tools/metrics.py` records each invocation's
+  success/empty/latency to the `tool_call_metrics` table; governance retires tools below a success-rate
+  floor once they have enough runs (alongside semantic-dedup/cap/redundancy retirement).
+- **Semantic/fact memory tier** (`src/memory/facts.py`) — durable `memory_type="fact"` rows, extracted
+  during folding and recalled alongside skills/episodes (de-conflating durable facts from episodic memory).
+- **Cross-process `--resume`** — a killed/interrupted run resumes from its last `AsyncPostgresSaver`
+  checkpoint (`thread_id = f"cli-{run_id}"`) via `main.py --resume <run-id>`.
+- **Per-run results subfolders** — writes organize under `results/<run-id>/` (reads fall back to the flat
+  root for backward recall); `--results-dir` / `--clean` CLI flags.
+- **Evolution→live promotion gate** (`src/evolution/promote.py`) — a PROMPT mutation that passes
+  post-deploy verify promotes to a versioned, canary-gated pointer (auto-rollback on regression); opt-in
+  via `EVOLUTION_PROMOTE_TO_LIVE`.
+- **Centralized config** — every resilience/circuit-breaker/rate-limiter/tool-limit/concurrency value is a
+  `pydantic-settings` env var (no hardcoded timeouts/caps in source).
+
 ---
 
 ## Technology Stack

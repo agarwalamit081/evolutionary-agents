@@ -8,6 +8,7 @@ reads — ``src.config.settings.get_settings`` — so these stay hermetic.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -15,11 +16,15 @@ import pytest
 from src.tools import _paths
 
 
-def _install_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _install_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, subdir: bool = True
+) -> None:
     """Point the resolver at tmp_path/results + tmp_path/workspace.
 
     project_root then resolves to tmp_path (parent of results_root), matching
-    the cwd alignment every file tool relies on.
+    the cwd alignment every file tool relies on. ``subdir`` toggles the Phase-7
+    ``results_per_run_subdir`` flag on the fake agent (subfoldering only takes
+    effect when a run_id is ALSO bound via ``set_active_run_id``).
     """
     results = tmp_path / "results"
     workspace = tmp_path / "workspace"
@@ -33,11 +38,22 @@ def _install_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
                 {
                     "results_root": str(results),
                     "workspace_root": str(workspace),
+                    "results_per_run_subdir": subdir,
                 },
             )()
         },
     )()
     monkeypatch.setattr("src.config.settings.get_settings", lambda: fake)
+
+
+@pytest.fixture(autouse=True)
+def _reset_active_run_id() -> Iterator[None]:
+    """Isolate the module-global run_id between tests (Phase 7)."""
+    from src.tools._paths import set_active_run_id
+
+    set_active_run_id(None)
+    yield
+    set_active_run_id(None)
 
 
 class TestStripResultsPrefix:
@@ -189,3 +205,153 @@ class TestRoots:
         _install_roots(monkeypatch, tmp_path)
         assert _paths.project_root() == _paths.results_root().parent
         assert _paths.project_root() == tmp_path
+
+
+class TestPerRunSubdir:
+    """``normalize`` routes writes under ``results_root/<run_id>/`` when bound.
+
+    This is the Phase-7 write path: a run_id (set by main.py via
+    ``set_active_run_id``) isolates each run's deliverables on disk. Only the
+    results base is subfoldered; workspace/project are not. A goal that already
+    names ``results/<run_id>/x`` is de-duplicated (never double-nested).
+    """
+
+    def test_set_and_get_active_run_id(self) -> None:
+        _paths.set_active_run_id("q07")
+        assert _paths.get_active_run_id() == "q07"
+        _paths.set_active_run_id(None)
+        assert _paths.get_active_run_id() is None
+
+    def test_write_routes_under_run_subdir(self, monkeypatch, tmp_path) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        assert _paths.normalize("foo.md", base="results") == (
+            tmp_path / "results" / "q01" / "foo.md"
+        )
+
+    def test_goal_named_subdir_not_double_nested(self, monkeypatch, tmp_path) -> None:
+        """A goal that says results/q01/x must NOT become results/q01/q01/x."""
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        assert _paths.normalize("results/q01/x.md", base="results") == (
+            tmp_path / "results" / "q01" / "x.md"
+        )
+
+    def test_nested_path_keeps_subdir_prefix(self, monkeypatch, tmp_path) -> None:
+        """A nested relative path keeps the run subdir as its first component."""
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        assert _paths.normalize("sub/deep/x.md", base="results") == (
+            tmp_path / "results" / "q01" / "sub" / "deep" / "x.md"
+        )
+
+    def test_subdir_not_applied_to_workspace(self, monkeypatch, tmp_path) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        ws = _paths.workspace_root()
+        ws.mkdir(parents=True)
+        (ws / "fixture.csv").write_text("d")  # workspace never subfoldered
+        assert _paths.normalize("foo.md", base="workspace") == (
+            tmp_path / "workspace" / "foo.md"
+        )
+
+    def test_no_run_id_resolves_flat(self, monkeypatch, tmp_path) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id(None)
+        assert _paths.normalize("foo.md", base="results") == (
+            tmp_path / "results" / "foo.md"
+        )
+
+    def test_setting_disabled_stays_flat(self, monkeypatch, tmp_path) -> None:
+        """results_per_run_subdir=False → flat even with a run_id bound."""
+        _install_roots(monkeypatch, tmp_path, subdir=False)
+        _paths.set_active_run_id("q01")
+        assert _paths.normalize("foo.md", base="results") == (
+            tmp_path / "results" / "foo.md"
+        )
+
+    def test_traversal_blocked_with_run_id(self, monkeypatch, tmp_path) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        with pytest.raises(ValueError, match="Path traversal blocked"):
+            _paths.normalize("../../etc/passwd", base="results")
+
+    def test_absolute_outside_root_blocked_with_run_id(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        with pytest.raises(ValueError):
+            _paths.normalize("/etc/passwd", base="results")
+
+
+class TestResolveExisting:
+    """``resolve_existing`` reads: run subdir first, flat fallback for legacy recall.
+
+    The read path so older flat deliverables (battery-03) and cross-run reads
+    still resolve after Phase-7 subfoldering. Returns the subdir primary when
+    nothing exists (canonical "where it would be").
+    """
+
+    def test_subdir_file_found(self, monkeypatch, tmp_path) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        root = _paths.results_root()
+        (root / "q01").mkdir(parents=True)
+        (root / "q01" / "x.md").write_text("d")
+        assert _paths.resolve_existing("x.md") == (root / "q01" / "x.md").resolve()
+
+    def test_flat_fallback_for_legacy_deliverable(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A flat (non-subdir) deliverable is found via the flat fallback."""
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        root = _paths.results_root()
+        root.mkdir(parents=True)
+        (root / "legacy.md").write_text("d")  # flat, NOT under q01/
+        assert _paths.resolve_existing("legacy.md") == (root / "legacy.md").resolve()
+
+    def test_subdir_preferred_over_flat_when_both_exist(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """When both exist, the run subdir wins (current run's version)."""
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        root = _paths.results_root()
+        root.mkdir(parents=True)
+        (root / "dup.md").write_text("flat")
+        (root / "q01").mkdir(parents=True)
+        (root / "q01" / "dup.md").write_text("subdir")
+        assert _paths.resolve_existing("dup.md") == (root / "q01" / "dup.md").resolve()
+
+    def test_returns_subdir_primary_when_nothing_exists(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        root = _paths.results_root()
+        resolved = _paths.resolve_existing("new.md")
+        assert resolved == (root / "q01" / "new.md").resolve()
+        assert not resolved.exists()  # canonical "where it would be", absent
+
+    def test_no_run_id_reads_flat(self, monkeypatch, tmp_path) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id(None)
+        root = _paths.results_root()
+        root.mkdir(parents=True)
+        (root / "f.md").write_text("d")
+        assert _paths.resolve_existing("f.md") == (root / "f.md").resolve()
+
+    def test_workspace_base_unaffected_by_subdir(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Workspace reads are never subfoldered; resolve_existing honors that."""
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("q01")
+        ws = _paths.workspace_root()
+        ws.mkdir(parents=True)
+        (ws / "fixture.csv").write_text("d")
+        assert _paths.resolve_existing("fixture.csv", base="workspace") == (
+            ws / "fixture.csv"
+        ).resolve()

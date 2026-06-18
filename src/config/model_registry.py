@@ -642,6 +642,15 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
         "mistral-medium-3-5",
         "gemini-3-flash-preview",
     ],
+    # glm-4.7 is the CRITICAL/reasoning primary (zai) — same Moderate-tier peer
+    # set as Sonnet's chain, minus the (quota-blocked) Anthropic entry. Verified
+    # live: zai/glm-4.7 returns completions with the funded ZAI_API_KEY.
+    "glm-4.7": [
+        "deepseek-v4-pro",
+        "glm-5-turbo",
+        "mistral-medium-3-5",
+        "gemini-3-flash-preview",
+    ],
     "deepseek-v4-pro": [
         "claude-sonnet-4-6",
         "nvidia-deepseek-v4-pro",

@@ -134,7 +134,7 @@ async def _llm_plan(
         techniques = select_techniques_for_node(
             complexity=plan_complexity, node=NODE_PLAN, goal_text=goal.text,
         )
-        messages = build_messages(system_prompt, user_prompt, techniques)
+        messages = build_messages(system_prompt, user_prompt, techniques, node=NODE_PLAN)
 
         response = await gateway.acompletion(
             messages=messages,

@@ -7,11 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.config.settings import get_settings
 from src.graph.enums import GoalStatus, Phase
 from src.graph.factory import initial_state
 from src.graph.models import PlanStep, ToolResult
 from src.graph.nodes.execute import (
-    MAX_WRITE_NUDGES,
     _called_file_output_tool,
     _deliverable_on_disk,
     _extract_expected_file_path,
@@ -490,6 +490,30 @@ class TestWriteStepHelpers:
     def test_extract_path_none_for_empty(self) -> None:
         assert _extract_expected_file_path("") is None
 
+    def test_extract_path_rejects_e_g_abbreviation(self) -> None:
+        """F-k: 'e.g' (a 1-char 'extension') must not be captured as a
+        deliverable. q3 narrated 'write the evolved tool script ... e.g. at a
+        threshold' and the old regex grabbed 'e.g', feeding a bogus missing-
+        deliverable verify loop."""
+        step = (
+            "Generate the mutation: write the evolved tool script (v2) that "
+            "emits churn flags e.g. at a configurable threshold"
+        )
+        assert _extract_expected_file_path(step) is None
+
+    def test_extract_path_rejects_numeric_version_fragment(self) -> None:
+        """F-k: a version/section fragment like '1.0' or '3.2' (1-char tail)
+        is not a file deliverable."""
+        assert _extract_expected_file_path("Write version 1.0 to the notes") is None
+        assert _extract_expected_file_path("Export see section 3.2 for details") is None
+
+    def test_extract_path_still_finds_real_extension(self) -> None:
+        """F-k regression guard: real >=2-char extensions are still captured."""
+        assert (
+            _extract_expected_file_path("Write the matrix to results/q03/retention.csv")
+            == "results/q03/retention.csv"
+        )
+
     def test_called_file_output_true_for_file_writer(self) -> None:
         tcs = [{"id": "1", "type": "function", "function": {"name": "file_writer", "arguments": "{}"}}]
         assert _called_file_output_tool(tcs) is True
@@ -529,6 +553,138 @@ class TestWriteStepHelpers:
         assert "file_writer" in nudge
 
 
+class TestCodeExecutorWriteSatisfiesWriteStep:
+    """battery-04 q1+q3 fix: a write-step whose deliverable lands on disk via
+    ``code_executor`` (not ``file_writer``) must NOT trigger the file_writer
+    nudge. ``code_executor`` is not in FILE_OUTPUT_TOOLS (no ``file_path`` arg to
+    record), but when the agent's generated code writes the deliverable the step
+    is genuinely done. Previously the nudge false-fired 3x, execute marked the
+    step complete-with-gap, verify flagged the (present) deliverable missing, and
+    the run looped to MAX_ITERATIONS. The disk check
+    (``_deliverable_on_disk``) recognizes the code_executor-mediated write by its
+    outcome — the file now exists — rather than by the tool name."""
+
+    @staticmethod
+    def _settings(tmp_path: Any, *, deliverable_on_disk: bool) -> Any:
+        from types import SimpleNamespace
+
+        if deliverable_on_disk:
+            (tmp_path / "report.md").write_text("# real deliverable\n", encoding="utf-8")
+        return SimpleNamespace(
+            agent=SimpleNamespace(
+                results_root=str(tmp_path),
+                workspace_root=str(tmp_path / "workspace"),
+                results_per_run_subdir=False,
+                max_write_nudges=2,
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_nudge_when_code_executor_wrote_deliverable(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deliverable present on disk + code_executor called (not file_writer)
+        → nudge suppressed, step completes on the first attempt (1 gateway call).
+        """
+        from src.graph.enums import Strategy
+
+        fake = self._settings(tmp_path, deliverable_on_disk=True)
+        # execute.py binds get_settings at module level → patch its binding; and
+        # _deliverable_on_disk → normalize → _paths reads the source-module
+        # binding. Both must point at the fake so the disk check resolves under
+        # tmp_path and max_attempts reads max_write_nudges=2.
+        monkeypatch.setattr("src.graph.nodes.execute.get_settings", lambda: fake)
+        monkeypatch.setattr("src.config.settings.get_settings", lambda: fake)
+
+        state = dict(initial_state("Write a report to results/report.md", "th-ce", 10))
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description="Save the analysis to results/report.md",
+                status="pending",
+            )
+        ]
+        state["current_step_index"] = 0
+        state["strategy"] = Strategy.REACT
+
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(return_value=ToolCallResponse(
+            content="Wrote the report via code_executor",
+            tool_calls=[{
+                "id": "tc_ce",
+                "type": "function",
+                "function": {
+                    "name": "code_executor",
+                    "arguments": '{"code": "open(\'results/report.md\',\'w\').write(\'# real deliverable\')"}',
+                },
+            }],
+            model="deepseek-v4-flash", provider="deepseek",
+            input_tokens=10, output_tokens=20, total_tokens=30, cost_usd=0.0,
+        ))
+        handler = AsyncMock(return_value="wrote report")
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[])
+        tools.get_handler = MagicMock(return_value=handler)
+
+        result = await execute_node(state, gateway=gateway, tools=tools)
+
+        # Nudge did NOT fire: exactly ONE gateway call, then break → step done.
+        assert gateway.acompletion_with_tools.call_count == 1
+        assert result["phase"] == Phase.REFLECT
+        assert result["completed_steps"][0].status == GoalStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_nudge_still_fires_when_deliverable_absent(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deliverable genuinely absent + code_executor (no file_writer) → nudge
+        still fires on repeated attempts (behavior preserved). The disk check
+        only SUPPRESSES the nudge for real writes; it never removes the safety
+        net for a step that produced nothing."""
+        from src.graph.enums import Strategy
+
+        fake = self._settings(tmp_path, deliverable_on_disk=False)
+        monkeypatch.setattr("src.graph.nodes.execute.get_settings", lambda: fake)
+        monkeypatch.setattr("src.config.settings.get_settings", lambda: fake)
+
+        state = dict(initial_state("Write a report to results/report.md", "th-ce2", 10))
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description="Save the analysis to results/report.md",
+                status="pending",
+            )
+        ]
+        state["current_step_index"] = 0
+        state["strategy"] = Strategy.REACT
+
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(return_value=ToolCallResponse(
+            content="I will write it",
+            tool_calls=[{
+                "id": "tc_ce2",
+                "type": "function",
+                "function": {
+                    "name": "code_executor",
+                    "arguments": '{"code": "print(1)"}',
+                },
+            }],
+            model="deepseek-v4-flash", provider="deepseek",
+            input_tokens=10, output_tokens=20, total_tokens=30, cost_usd=0.0,
+        ))
+        handler = AsyncMock(return_value="1")
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[])
+        tools.get_handler = MagicMock(return_value=handler)
+
+        result = await execute_node(state, gateway=gateway, tools=tools)
+
+        # Nudge fired on repeated attempts (>1 gateway call) then budget-spent
+        # break. The step still completes; verify flags the gap downstream.
+        assert gateway.acompletion_with_tools.call_count > 1
+        assert result["completed_steps"][0].status == GoalStatus.COMPLETED
+
+
 class TestGoalDeliverableFallback:
     """A producing step that names no file of its own (e.g. "merge the results
     into a cohesive overview") falls back to the goal's canonical deliverable
@@ -550,6 +706,30 @@ class TestGoalDeliverableFallback:
 
     def test_extract_goal_deliverable_none_for_empty(self) -> None:
         assert _extract_goal_deliverable("") is None
+
+    def test_extract_goal_deliverable_skips_input_path(self) -> None:
+        """F-k: a goal names its INPUT first ('Reuse q01's normalizer output at
+        results/q01/normalized.csv'). The input path must NOT be returned as the
+        deliverable; the LAST output path is (churn_flags.csv)."""
+        goal = (
+            "Reuse q01's normalizer output at results/q01/normalized.csv. Create a "
+            "cohort-retention tool, writing it to results/q03/retention.csv; then "
+            "evolve that tool, writing results/q03/churn_flags.csv."
+        )
+        assert _extract_goal_deliverable(goal) == "results/q03/churn_flags.csv"
+
+    def test_extract_goal_deliverable_returns_last_output(self) -> None:
+        """With multiple outputs and no input, the last is the primary output."""
+        goal = (
+            "write the matrix to results/q03/retention.csv and "
+            "results/q03/churn_flags.csv"
+        )
+        assert _extract_goal_deliverable(goal) == "results/q03/churn_flags.csv"
+
+    def test_extract_goal_deliverable_skips_from_context(self) -> None:
+        """An input phrased with 'from' is skipped in favour of the output."""
+        goal = "Build a report from results/input.csv, saving results/output.md"
+        assert _extract_goal_deliverable(goal) == "results/output.md"
 
     def test_is_producing_step_true_for_merge(self) -> None:
         assert _is_producing_step(
@@ -844,7 +1024,7 @@ class TestWriteStepNudge:
 
     @pytest.mark.asyncio
     async def test_write_step_bounded_when_llm_never_calls_file_writer(self) -> None:
-        """LLM never calls file_writer → bounded to MAX_WRITE_NUDGES+1 calls (no
+        """LLM never calls file_writer → bounded to max_write_nudges+1 calls (no
         infinite loop). Step still marked complete (graceful degrade); a later
         verify pass will flag the missing deliverable rather than hanging."""
         gateway = MagicMock()
@@ -853,7 +1033,8 @@ class TestWriteStepNudge:
 
         result = await execute_node(self._write_step_state(), gateway=gateway, tools=tools)
 
-        assert gateway.acompletion_with_tools.await_count == MAX_WRITE_NUDGES + 1
+        max_nudges = get_settings().agent.max_write_nudges
+        assert gateway.acompletion_with_tools.await_count == max_nudges + 1
         # Degrades gracefully: step completes (no hang), but no writer recorded.
         assert result["phase"] == Phase.REFLECT
         assert result["current_step_index"] == 1

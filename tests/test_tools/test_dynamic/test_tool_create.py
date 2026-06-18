@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -145,7 +147,7 @@ class TestCreateSingleToolRegeneration:
 
     @pytest.mark.asyncio
     async def test_persistent_failure_exhausts_attempts_and_reports(self) -> None:
-        from src.graph.nodes.tool_create import _MAX_GENERATION_ATTEMPTS
+        from src.config.settings import get_settings
         from src.graph.nodes.tool_create import _create_single_tool
 
         gen_instance = MagicMock()
@@ -176,7 +178,7 @@ class TestCreateSingleToolRegeneration:
             )
 
         assert result["success"] is False
-        assert gen_instance.generate.await_count == _MAX_GENERATION_ATTEMPTS
+        assert gen_instance.generate.await_count == get_settings().agent.tool_gen_max_attempts
         assert "All" in result["reason"]
         # Persistence must never run when every attempt failed
         assert persist_mock.await_count == 0
@@ -283,3 +285,126 @@ class TestRouteAfterReflect:
         }
         result = route_after_reflect(state)
         assert result == "verify"
+
+
+class TestPersistToolResilience:
+    """F2 regression: a validated tool must reach the DB even when the first
+    persist hits a transient error.
+
+    Previously ``_persist_tool`` swallowed every failure at DEBUG and returned
+    ``None`` — the run recorded the tool "created" yet a single DB blip left it
+    in-memory only, silently breaking cross-run recall. The fix makes persist
+    framework-mandated + resilient: a bounded retry opens a fresh session each
+    attempt (a poisoned session recovers on the next call) and returns a bool so
+    the outcome is observable downstream.
+    """
+
+    @staticmethod
+    def _generated(name: str = "csv_normalizer") -> MagicMock:
+        return MagicMock(
+            tool_name=name,
+            description="Normalize a CSV",
+            input_schema={},
+            handler_code="async def csv_normalizer(): ...",
+            test_code="",
+        )
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_is_retried_to_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """First persist returns None (transient blip); retry writes the row."""
+        from src.graph.nodes.tool_create import _persist_tool
+
+        monkeypatch.setattr(
+            "src.config.get_settings",
+            lambda: SimpleNamespace(
+                agent=SimpleNamespace(tool_persist_max_attempts=3)
+            ),
+        )
+        calls: list[str] = []
+
+        async def _flaky_persist(*args: Any, **kwargs: Any) -> uuid.UUID | None:
+            calls.append(kwargs["tool_name"])
+            if len(calls) == 1:
+                return None  # transient DB error → persister returns None
+            return uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+        with patch(
+            "src.tools.dynamic.persister.ToolPersister.persist", new=_flaky_persist
+        ):
+            ok = await _persist_tool(self._generated())
+
+        assert ok is True
+        assert len(calls) == 2  # retried exactly once after the first None
+
+    @pytest.mark.asyncio
+    async def test_persistent_failure_is_bounded_and_returns_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every persist fails → False, and the retry count is bounded."""
+        from src.graph.nodes.tool_create import _persist_tool
+
+        monkeypatch.setattr(
+            "src.config.get_settings",
+            lambda: SimpleNamespace(
+                agent=SimpleNamespace(tool_persist_max_attempts=2)
+            ),
+        )
+        count = {"n": 0}
+
+        async def _always_none(*args: Any, **kwargs: Any) -> None:
+            count["n"] += 1
+            return None
+
+        with patch(
+            "src.tools.dynamic.persister.ToolPersister.persist", new=_always_none
+        ):
+            ok = await _persist_tool(self._generated("doomed"))
+
+        assert ok is False
+        assert count["n"] == 2  # bounded by tool_persist_max_attempts, not infinite
+
+    @pytest.mark.asyncio
+    async def test_success_record_carries_persisted_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_create_single_tool`` exposes the persist outcome in its record."""
+        from src.graph.nodes.tool_create import _create_single_tool
+
+        generated = MagicMock(
+            tool_name="dup_finder",
+            description="d",
+            input_schema={},
+            handler_code="async def dup(): ...",
+            test_code="",
+        )
+        gen_instance = MagicMock()
+        gen_instance.generate = AsyncMock(return_value=generated)
+        gen_instance.validate_and_register = AsyncMock(
+            return_value={"success": True, "sandbox_result": {"passed": True}}
+        )
+        # Embeddings hash-fallback in tests → dedup skipped; force it so the
+        # generation path is reached deterministically.
+        monkeypatch.setattr(
+            "src.memory.embeddings.embed_capability",
+            AsyncMock(return_value=(None, "hash")),
+        )
+
+        with patch(
+            "src.tools.dynamic.generator.ToolGenerator", return_value=gen_instance
+        ), patch(
+            "src.graph.nodes.tool_create._persist_tool",
+            new=AsyncMock(return_value=True),
+        ) as persist_mock:
+            result = await _create_single_tool(
+                gateway=MagicMock(),
+                registry=MagicMock(),
+                gap_description="duplicate finder",
+                goal_text="g",
+                tool_results=[],
+            )
+
+        assert result["success"] is True
+        assert result["persisted"] is True
+        assert persist_mock.await_count == 1

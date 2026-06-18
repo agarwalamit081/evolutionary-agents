@@ -5,10 +5,22 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 from loguru import logger
 
+from src.config.settings import get_settings
 from src.tools._paths import project_root
+
+# Execution timeout is operator-configurable via ToolLimitsSettings
+# (CODE_EXECUTOR_TIMEOUT). The schema display default below mirrors the settings
+# default; enforcement reads settings at call-time via _tool_limits().
+_SCHEMA_DEFAULT_TIMEOUT = 30  # mirrors ToolLimitsSettings.code_executor_timeout
+
+
+def _tool_limits():
+    """Call-time accessor — never capture get_settings() at module import."""
+    return get_settings().tools
 
 
 # Prepended to every executed script. The subprocess CWD is already the results
@@ -30,7 +42,7 @@ _WRITE_BOOTSTRAP = (
 )
 
 
-async def code_executor(code: str, timeout: int = 30) -> str:
+async def code_executor(code: str, timeout: Optional[int] = None) -> str:
     """Execute Python code in a subprocess and return the output.
 
     The subprocess working directory is the **project root** (parent of
@@ -44,11 +56,14 @@ async def code_executor(code: str, timeout: int = 30) -> str:
 
     Args:
         code: Python source code to execute.
-        timeout: Maximum execution time in seconds.
+        timeout: Maximum execution time in seconds. ``None`` resolves to
+            ``CODE_EXECUTOR_TIMEOUT`` (ToolLimitsSettings, default 30).
 
     Returns:
         Stdout + stderr from the execution.
     """
+    if timeout is None:
+        timeout = _tool_limits().code_executor_timeout
     logger.info(f"Executing code ({len(code)} chars, timeout={timeout}s)")
 
     # Subprocess CWD = project root (parent of results_root), shared with
@@ -115,8 +130,8 @@ TOOL_DEFINITION = {
             },
             "timeout": {
                 "type": "integer",
-                "description": "Maximum execution time in seconds (default: 30).",
-                "default": 30,
+                "description": "Maximum execution time in seconds (default: 30, configurable via CODE_EXECUTOR_TIMEOUT).",
+                "default": _SCHEMA_DEFAULT_TIMEOUT,
             },
         },
         "required": ["code"],

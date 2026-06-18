@@ -43,11 +43,16 @@ class ConsolidationReport:
 
     tools: list[MergePlan] = field(default_factory=list)
     agents: list[MergePlan] = field(default_factory=list)
+    # M4: tools retired for chronic low performance (no surviving twin — these
+    # are not redundancy merges, so they are tracked separately from ``tools``).
+    performance_retired: list[str] = field(default_factory=list)
     dry_run: bool = True
 
     @property
     def total_retired(self) -> int:
-        return sum(len(p.retired) for p in (*self.tools, *self.agents))
+        return sum(len(p.retired) for p in (*self.tools, *self.agents)) + len(
+            self.performance_retired
+        )
 
 
 def _cosine(u: list[float], v: list[float]) -> float:
@@ -180,15 +185,73 @@ async def consolidate_sub_agents(
     return report
 
 
+async def consolidate_performance(
+    min_runs: int = 20,
+    success_floor: float = 0.25,
+    dry_run: bool = True,
+    persister: Any | None = None,
+) -> ConsolidationReport:
+    """Retire (or report) chronic low-performing active tools (M4).
+
+    Distinct from :func:`consolidate_tools`: that removes *redundant*
+    capabilities (a semantic duplicate of a better twin); this removes tools
+    that succeed too rarely after enough calls — there is no survivor to keep,
+    so the retiree list is reported via ``performance_retired`` (not a
+    :class:`MergePlan`).
+
+    Args:
+        min_runs: Minimum ``calls`` before a tool is eligible.
+        success_floor: Retire tools with ``success_rate`` below this.
+        dry_run: When True (default), only report.
+        persister: Optional ``ToolPersister`` (dependency injection for tests).
+
+    Returns:
+        A :class:`ConsolidationReport` whose ``performance_retired`` lists names.
+    """
+    from src.tools.dynamic.persister import ToolPersister
+
+    p = persister or ToolPersister()
+    try:
+        names = await p.underperforming_tools(min_runs, success_floor)
+    except Exception as e:
+        logger.error(f"consolidate_performance: underperformer scan failed: {e}")
+        return ConsolidationReport(dry_run=dry_run)
+
+    if not dry_run and names:
+        await p.retire(names)
+
+    report = ConsolidationReport(performance_retired=list(names), dry_run=dry_run)
+    verb = "would retire" if dry_run else "retired"
+    for n in names:
+        logger.info(
+            f"[consolidate/perf] {verb} '{n}' "
+            f"(success_rate < {success_floor} over >= {min_runs} calls)"
+        )
+    if names:
+        logger.info(
+            f"[consolidate/perf] {len(names)} underperformer(s) "
+            f"({'dry-run' if dry_run else 'applied'})"
+        )
+    return report
+
+
 async def consolidate_all(
     threshold: float = 0.92,
     dry_run: bool = True,
+    min_runs: int = 20,
+    success_floor: float = 0.25,
 ) -> ConsolidationReport:
-    """Consolidate redundant tools then sub-agents in one pass."""
+    """Consolidate redundant tools + sub-agents, then retire underperformers."""
     tools = await consolidate_tools(threshold=threshold, dry_run=dry_run)
     agents = await consolidate_sub_agents(threshold=threshold, dry_run=dry_run)
+    perf = await consolidate_performance(
+        min_runs=min_runs, success_floor=success_floor, dry_run=dry_run
+    )
     return ConsolidationReport(
-        tools=tools.tools, agents=agents.agents, dry_run=dry_run
+        tools=tools.tools,
+        agents=agents.agents,
+        performance_retired=perf.performance_retired,
+        dry_run=dry_run,
     )
 
 
@@ -216,6 +279,10 @@ def _format_report(report: ConsolidationReport) -> str:
         lines.append(
             f"  keep '{plan.target}' <- retire {plan.retired} "
             f"(sim {plan.similarity:.3f})"
+        )
+    if report.performance_retired:
+        lines.append(
+            f"  retire (performance) {report.performance_retired}"
         )
     return "\n".join(lines)
 

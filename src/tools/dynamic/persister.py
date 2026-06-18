@@ -283,9 +283,11 @@ class ToolPersister:
     async def _active_tool_capability_rows(self) -> list[dict[str, Any]]:
         """Fetch active generated tools' embeddings + scoring signals.
 
-        Tools lack per-tool success metrics today (those arrive in M4), so the
-        ranking signal is ``(max_version, created_at)`` — a more-evolved
-        (higher-version) and newer tool wins a redundancy tie. Each row:
+        Per-tool success metrics now exist (M4 — ``calls``/``success_rate`` on
+        ``ToolRegistration``), but the redundancy tie-break deliberately still
+        uses ``(max_version, created_at)``: redundancy retirement is about
+        duplicate *capability*, while chronic low *performance* is a separate
+        signal handled by :meth:`retire_underperforming`. Each row:
         ``{"name", "embedding" (list|None), "version", "created_ts"}``.
         """
         from sqlalchemy import func, select
@@ -378,8 +380,10 @@ class ToolPersister:
     async def _retire_excess_tools(self, max_active: int) -> int:
         """Retire the oldest active generated tools down to ``max_active``.
 
-        Tools have no success metrics yet (M4), so over-cap retirement is
-        age-based (oldest by ``created_at`` first). Returns the count retired.
+        Over-cap retirement stays age-based (oldest by ``created_at`` first):
+        it is a hard population cap, distinct from the metrics-driven
+        :meth:`retire_underperforming` which removes chronic low performers
+        regardless of age. Returns the count retired.
         """
         try:
             from sqlalchemy import select, update
@@ -415,6 +419,65 @@ class ToolPersister:
         except Exception as e:
             logger.debug(f"Tool cap enforcement failed: {e}")
             return 0
+
+    async def underperforming_tools(
+        self, min_runs: int, success_floor: float
+    ) -> list[str]:
+        """Active generated tools that are chronic low performers (M4).
+
+        A tool qualifies when it has been exercised enough to judge
+        (``calls >= min_runs``) yet succeeds too rarely
+        (``success_rate < success_floor``). Untried tools (``calls`` 0,
+        ``success_rate`` seeded 1.0) are deliberately spared — a tool is never
+        retired for performance before it has had a fair chance. Best-effort:
+        any DB error degrades to an empty list (no retirement).
+
+        Returns:
+            Names of qualifying tools (sorted).
+        """
+        try:
+            from sqlalchemy import select
+
+            from src.db.models import ToolRegistration
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                stmt = (
+                    select(ToolRegistration.tool_name)
+                    .where(
+                        ToolRegistration.is_active.is_(True),
+                        ToolRegistration.tool_type == "generated",
+                        ToolRegistration.calls >= min_runs,
+                        ToolRegistration.success_rate < success_floor,
+                    )
+                )
+                result = await session.execute(stmt)
+                return sorted(row[0] for row in result.all())
+        except Exception as e:
+            logger.debug(f"Underperformer scan failed: {e}")
+            return []
+
+    async def retire_underperforming(self, min_runs: int, success_floor: float) -> int:
+        """Retire chronic low-performing generated tools (M4 performance path).
+
+        Delegates selection to :meth:`underperforming_tools` and retirement to
+        :meth:`retire`. Returns the count retired (0 when none qualify).
+
+        Args:
+            min_runs: Minimum ``calls`` before a tool is eligible (``RETIRE_MIN_RUNS``).
+            success_floor: Retire tools with ``success_rate`` below this
+                (``RETIRE_SUCCESS_FLOOR``).
+        """
+        names = await self.underperforming_tools(min_runs, success_floor)
+        if not names:
+            return 0
+        retired = await self.retire(names)
+        if retired:
+            logger.info(
+                f"Retired {retired} underperforming tools "
+                f"(min_runs={min_runs}, floor={success_floor}): {', '.join(names)}"
+            )
+        return retired
 
     async def load_active_tools(
         self,
@@ -453,6 +516,15 @@ class ToolPersister:
                 await self._retire_excess_tools(settings.max_active_tools)
             except Exception as e:
                 logger.debug(f"Tool cap enforcement skipped: {e}")
+            # M4 performance retirement: retire chronic low performers that have
+            # been exercised enough to judge. Runs after redundancy/cap so the
+            # metrics-driven decision sees the already-debloated population.
+            try:
+                await self.retire_underperforming(
+                    settings.retire_min_runs, settings.retire_success_floor
+                )
+            except Exception as e:
+                logger.debug(f"Tool performance retirement skipped: {e}")
 
         loaded: list[str] = []
 

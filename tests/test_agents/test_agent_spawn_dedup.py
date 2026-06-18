@@ -9,8 +9,10 @@ identical (cosine >= capability_dedup_threshold) and already registered. Covers:
   * skip-on-hash-fallback -> hash vectors are not deduped; persistence gets None
   * failure-degrades      -> a dedup error never blocks spawning
 
-The dedup block runs AFTER proposal validation, so each test wires a valid
-SubAgentProposal through the gateway + StructuredOutputManager (mirroring
+The dedup block runs BEFORE proposal validation (battery-04 q2 F-c: reuse
+MUST precede the name-uniqueness reject, or a persisted-and-active agent is
+rejected as a duplicate and recall+reuse is dead code), so each test wires a
+valid SubAgentProposal through the gateway + StructuredOutputManager (mirroring
 ``tests/test_graph/test_nodes/test_agent_spawn.py``).
 """
 
@@ -240,3 +242,76 @@ class TestAgentSpawnDedup:
         spawned = result["sub_agents_spawned"][0]
         assert spawned["name"] == "new_analyzer"
         mock_registry.register.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reuses_despite_name_collision_fc(
+        self,
+        sample_state: dict[str, Any],
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+    ) -> None:
+        """battery-04 q2 F-c regression: reuse wins over name-uniqueness reject.
+
+        A sub-agent persisted in a prior run is ACTIVE → loaded into the
+        registry at startup → ``registry.has(name)`` is True. The LLM re-running
+        the same goal proposes the SAME name. Before the dedup-before-validate
+        reorder, ``_validate_proposal`` fired first, appended "already exists",
+        returned None, and the recall+reuse path was dead code — so the re-run
+        rejected the spawn and rerouted to tool_create (which failed). With the
+        reorder, the semantically-identical active agent is REUSED instead.
+        """
+        from src.graph.schemas import SubAgentProposal
+
+        existing_spec = SubAgentSpec(
+            name="data_quality_auditor",
+            description="Audits data quality",
+            goal="Compute a quality scorecard",
+            parent_thread_id="t",
+        )
+        # Prior-run agent is active: name-collision TRUE (would reject in old
+        # order) AND present in the registry so get() can return it.
+        mock_registry.has = MagicMock(return_value=True)
+        mock_registry.list_names = MagicMock(return_value=["data_quality_auditor"])
+        mock_registry.get = MagicMock(return_value=existing_spec)
+
+        # Proposal deliberately collides on name with the persisted agent.
+        colliding = SubAgentProposal(
+            name="data_quality_auditor",
+            description="Audits data quality of a normalized event log",
+            goal_description="Compute a quality scorecard with evidence",
+            template_type="custom",
+            tool_scope="inherit_all",
+            tool_subset=[],
+            model_tier="complex",
+            rationale="Need a dedicated auditor",
+        )
+        extractor = MagicMock()
+        extractor.extract = AsyncMock(return_value=colliding)
+
+        embed_mock = AsyncMock(return_value=([0.1] * 768, "api"))
+        persister_inst = MagicMock()
+        persister_inst.find_similar = AsyncMock(
+            return_value=[{"name": "data_quality_auditor", "description": "d", "similarity": 0.95}]
+        )
+
+        persist_mock = AsyncMock()
+        with (
+            patch("src.llm.structured_output.StructuredOutputManager", return_value=extractor),
+            patch("src.memory.embeddings.embed_capability", embed_mock),
+            patch("src.agents.persister.SubAgentPersister", return_value=persister_inst),
+            patch("src.graph.nodes.agent_spawn._persist_agent", new=persist_mock),
+        ):
+            result = await agent_spawn_node(
+                sample_state,
+                gateway=mock_gateway,
+                tools=mock_tools,
+                sub_agent_registry=mock_registry,
+            )
+
+        # Reused despite the name collision — NOT rejected, NOT re-spawned.
+        spawned = result["sub_agents_spawned"][0]
+        assert spawned["reused"] is True
+        assert spawned["name"] == "data_quality_auditor"
+        mock_registry.register.assert_not_called()
+        persist_mock.assert_not_awaited()

@@ -529,6 +529,20 @@ class ToolRegistration(Base):
     capability_embedding: Mapped[Vector] = mapped_column(Vector(768), nullable=True)
     capability_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Per-tool success metrics (M4) — running aggregates maintained
+    # incrementally by ``ToolMetricsRecorder`` on every invocation, so
+    # performance-based retirement can score a tool without re-aggregating the
+    # ``tool_call_metrics`` detail table. ``calls`` is the running mean count;
+    # ``success_rate``/``empty_output_rate`` are incremental means in [0, 1]
+    # (seeded 1.0/0.0 so an untried tool is never retired for performance).
+    # ``last_run_at`` is NULL until the tool's first invocation.
+    calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success_rate: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    empty_output_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    last_run_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Relationships
     source_mutation: Mapped[Mutation | None] = relationship(back_populates="tool_registrations")
     tool_versions: Mapped[list[ToolVersion]] = relationship(
@@ -547,6 +561,30 @@ class ToolRegistration(Base):
             postgresql_ops={"capability_embedding": "vector_cosine_ops"},
         ),
     )
+
+
+class ToolCallMetric(Base):
+    """Append-only per-invocation tool metric (M4).
+
+    One row per executed tool call — the source-of-truth audit trail behind the
+    running aggregates on :class:`ToolRegistration` (``calls``/``success_rate``/
+    ``empty_output_rate``/``last_run_at``). Nullable ``run_id``: the execute
+    chokepoint records with the run's thread id when available.
+    """
+
+    __tablename__ = "tool_call_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    empty_output: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (Index("idx_tool_call_metrics_tool", "tool_name", "created_at"),)
 
 
 class ToolVersion(Base):
@@ -932,4 +970,42 @@ class ConfigSnapshot(Base):
     __table_args__ = (
         Index("idx_config_snapshots_version", "config_version_id"),
         Index("idx_config_snapshots_key", "key_path", "created_at"),
+    )
+
+
+# =============================================================================
+# Evaluation Domain (Phase 3 correctness harness)
+# =============================================================================
+
+
+class EvalResult(Base):
+    """Per-check correctness result row for the evaluation harness.
+
+    One row per (run, goal, check) so the eval store is queryable by goal or
+    run for regression tracking and the Phase-8 evolution canary. The full
+    per-run aggregate lives in ``BenchmarkResult`` (in-memory/JSON export); this
+    table is the durable, queryable projection.
+    """
+
+    __tablename__ = "eval_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
+    goal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    spec_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    check_name: Mapped[str] = mapped_column(Text, nullable=False)
+    check_type: Mapped[str] = mapped_column(Text, nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    score: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False, default=0.0)
+    skipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0.0)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_eval_results_goal", "goal_id", "created_at"),
+        Index("idx_eval_results_run", "run_id", "check_name"),
     )

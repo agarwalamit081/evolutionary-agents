@@ -13,6 +13,8 @@ from src.graph.factory import initial_state
 from src.graph.models import Goal, GoalStatus, PlanStep, ReflectionResult, ToolResult
 from src.graph.nodes.verify import (
     _extract_deliverable_paths,
+    _extract_goal_deliverables,
+    _force_complete_on_evidence,
     _load_deliverable_content,
     _spot_check_cited_paths,
     _summarize_data_tool_outputs,
@@ -567,11 +569,17 @@ class TestVerifyDeliverableEvidence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Errors block the optimistic override — evidence of success is not
-        enough when the run also has unresolved errors."""
+        enough when the run also has unresolved errors AND the goal did not name
+        a specific deliverable that is now satisfied. (battery-04 q2 F-h.2: when
+        the GOAL's own named deliverable is present + non-empty, stale errors are
+        advisory and force-complete fires — that case is covered separately in
+        ``test_verify_grounding.py::TestGoalDeliverableSufficiencyFH``. Here the
+        goal is generic, so the deliverable is file_writer-declared only and the
+        unresolved error must still prevent completion.)"""
         results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
         Path(results_root, "final_report.md").write_text("content", encoding="utf-8")
         state = self._state_with_file_writer(
-            "Save the answer to results/final_report.md",
+            "Analyze the data and produce a concise final report.",
             "results/final_report.md",
         )
         state["errors"] = ["something went wrong mid-run"]
@@ -1061,3 +1069,159 @@ class TestSpotCheckCitedPaths:
         warning = _spot_check_cited_paths("Wrote 3 files.", "matched 50 duplicates")
         assert "~50" in warning
         assert "fabricated" in warning
+
+
+class TestExtractGoalDeliverables:
+    """F4: extract deliverable cues named by the GOAL only (text + criteria).
+
+    Distinct from ``_extract_deliverable_paths``: the goal helper builds its
+    input-exclusion set over a goal-only blob, so a deliverable the goal says to
+    "write" survives even when a later plan step *reads* the same path as input.
+    That is exactly the F4 false-positive — the agent writes an intermediate and
+    the real goal file is excluded from the deliverable list, so the missing-file
+    clamp never fires and force-complete marks a half-finished run done.
+    """
+
+    def test_extracts_named_file_from_goal_text(self) -> None:
+        state = initial_state(
+            "Normalize e-commerce events and save the output to "
+            "results/q01/normalized.csv",
+            "thread-f4-text",
+        )
+        assert _extract_goal_deliverables(state) == ["results/q01/normalized.csv"]
+
+    def test_extracts_named_file_from_success_criteria(self) -> None:
+        state = initial_state("Produce a normalized dataset.", "thread-f4-criteria")
+        state["current_goal"] = Goal(
+            text="Produce a normalized dataset.",
+            status=GoalStatus.ACTIVE,
+            success_criteria=[
+                "Write the normalized rows to results/q01/normalized.csv",
+            ],
+        )
+        assert _extract_goal_deliverables(state) == ["results/q01/normalized.csv"]
+
+    def test_survives_when_a_plan_step_reads_the_same_path(self) -> None:
+        """The goal-only blob means a plan-step *read* never excludes the goal file.
+
+        ``_extract_deliverable_paths`` computes its input-exclusion set over the
+        whole goal+plan blob, so "read results/q01/normalized.csv to summarize"
+        in a plan step would drop ``normalized.csv`` from the deliverable list.
+        The goal helper is blind to plan steps, so the goal deliverable survives.
+        """
+        state = initial_state(
+            "Normalize events and save the output to results/q01/normalized.csv",
+            "thread-f4-read",
+        )
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description="Read results/q01/normalized.csv and summarize it.",
+                tool_name=None,
+                tool_input={},
+                status="completed",
+                result="",
+            ),
+        ]
+        # Goal helper still sees the deliverable the goal asks for...
+        assert _extract_goal_deliverables(state) == ["results/q01/normalized.csv"]
+        # ...whereas the whole-blob deliverable extractor excludes it as an input.
+        assert "results/q01/normalized.csv" not in _extract_deliverable_paths(state)
+
+    def test_no_goal_returns_empty(self) -> None:
+        state = initial_state("A goal with no named output file.", "thread-f4-none")
+        assert _extract_goal_deliverables(state) == []
+
+
+class TestForceCompleteGoalCrossCheck:
+    """F4 regression: force-complete must decline when the agent produced only
+    intermediates.
+
+    Before the fix, ``_force_complete_on_evidence`` trusted any declared
+    deliverable: if the agent wrote an intermediate file, all steps were done,
+    and no errors remained, the run was marked COMPLETE even though the GOAL's
+    expected deliverable was never produced. The cross-check now requires at
+    least one declared deliverable to match the goal's expected basename.
+    """
+
+    @staticmethod
+    def _state(goal_text: str) -> dict:
+        """All-steps-done, error-free state whose goal names a specific file."""
+        state = initial_state(goal_text, "thread-f4-force")
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1", description="Do the work.", status="completed", result="ok"
+            )
+        ]
+        state["completed_steps"] = list(state["plan_steps"])
+        state["current_step_index"] = 1
+        state["confidence"] = Confidence.HIGH
+        state["errors"] = []
+        return state
+
+    @staticmethod
+    def _incomplete_result() -> dict:
+        return {
+            "is_complete": False,
+            "phase": Phase.VERIFY,
+            "final_output": "Cannot confirm completion yet.",
+        }
+
+    def test_intermediate_only_declines_force_complete(self) -> None:
+        """Goal wants ``normalized.csv``; agent declared only ``raw_dump.csv``.
+
+        Both are present on disk (deliverable_problems is empty), but the goal
+        deliverable basename is absent from the declared set → decline.
+        """
+        state = self._state(
+            "Normalize events and save the output to results/q01/normalized.csv"
+        )
+        result = _force_complete_on_evidence(
+            self._incomplete_result(),
+            state,
+            deliverable_paths=["results/q01/raw_dump.csv"],
+            deliverable_problems=[],
+        )
+        assert result["is_complete"] is False
+        assert result["phase"] == Phase.VERIFY
+
+    def test_goal_deliverable_present_forces_complete(self) -> None:
+        """Positive control: declared deliverable matches the goal basename → complete."""
+        state = self._state(
+            "Normalize events and save the output to results/q01/normalized.csv"
+        )
+        result = _force_complete_on_evidence(
+            self._incomplete_result(),
+            state,
+            deliverable_paths=["results/q01/normalized.csv"],
+            deliverable_problems=[],
+        )
+        assert result["is_complete"] is True
+        assert result["phase"] == Phase.COMPLETE
+
+    def test_no_goal_expectation_still_forces_complete(self) -> None:
+        """Backward-compat: a goal that names no specific file skips the cross-check."""
+        state = self._state("Summarize the dataset in a report.")
+        result = _force_complete_on_evidence(
+            self._incomplete_result(),
+            state,
+            deliverable_paths=["results/summary.md"],
+            deliverable_problems=[],
+        )
+        assert result["is_complete"] is True
+        assert result["phase"] == Phase.COMPLETE
+
+    def test_basename_match_across_subdir_forces_complete(self) -> None:
+        """The cross-check matches on basename, so ``results/<run>/normalized.csv``
+        satisfies a goal that named ``results/q01/normalized.csv`` (per-run paths)."""
+        state = self._state(
+            "Normalize events and save the output to results/q01/normalized.csv"
+        )
+        result = _force_complete_on_evidence(
+            self._incomplete_result(),
+            state,
+            deliverable_paths=["results/q01_run_a/normalized.csv"],
+            deliverable_problems=[],
+        )
+        assert result["is_complete"] is True
+        assert result["phase"] == Phase.COMPLETE

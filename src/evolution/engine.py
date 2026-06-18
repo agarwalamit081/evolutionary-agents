@@ -140,6 +140,14 @@ class SelfEvolutionEngine:
                     "target_sub_agent": name,
                 })
 
+        # Memory-retrieval effectiveness: when recall is consistently low or
+        # retrieval is noisy, propose a MEMORY mutation. Its deploy handler
+        # (generate_memory_config) maps the description keywords to a
+        # recall/precision/balanced strategy.
+        memory_opps = self._memory_opportunities(execution_history)
+        if memory_opps:
+            opportunities.extend(memory_opps)
+
         return {
             "opportunities": opportunities,
             "performance_metrics": {
@@ -198,6 +206,81 @@ class SelfEvolutionEngine:
                         "empty_output_rate": empty_rate,
                     },
                 })
+        return opportunities
+
+    @staticmethod
+    def _memory_opportunities(
+        execution_history: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Derive memory-retrieval tuning opportunities from execution metrics.
+
+        Scans ``execution_history`` for records carrying a ``memory_retrieval``
+        dict (``{"retrieved": int, "used": int}`` — where ``used`` counts how
+        many retrieved memories were actually cited/applied in that step). When
+        memory is consistently ineffective it emits a ``MutationType.MEMORY``
+        opportunity whose description keywords (precision/recall/miss/noise)
+        steer the deploy handler (:func:`generate_memory_config`) to the matching
+        strategy. Two failure modes:
+
+        * **Low recall** — most retrieval steps return nothing → broaden
+          retrieval (the deploy handler lowers ``min_fitness`` / raises
+          ``max_results``).
+        * **Noisy retrieval** — much is retrieved but little is used → tighten
+          precision (raise ``min_fitness``).
+
+        Returns ``[]`` when there is no ``memory_retrieval`` data so existing
+        callers (and tests) are unaffected. Derived metric, no new table.
+        """
+        total_retrieved = 0
+        total_used = 0
+        runs = 0
+        misses = 0
+        for record in execution_history:
+            if not isinstance(record, dict):
+                continue
+            mr = record.get("memory_retrieval")
+            if not isinstance(mr, dict):
+                continue
+            retrieved = int(mr.get("retrieved", 0) or 0)
+            used = int(mr.get("used", 0) or 0)
+            runs += 1
+            total_retrieved += retrieved
+            # ``used`` cannot exceed what was retrieved.
+            total_used += min(used, retrieved)
+            if retrieved == 0:
+                misses += 1
+
+        if runs < 3:
+            return []  # need a few samples before proposing a memory change
+
+        opportunities: list[dict[str, Any]] = []
+        miss_rate = misses / runs
+        useful_rate = (total_used / total_retrieved) if total_retrieved > 0 else 0.0
+
+        if miss_rate > 0.5:
+            opportunities.append({
+                "type": MutationType.MEMORY,
+                "description": (
+                    f"Memory recall is low — {miss_rate:.0%} of retrieval steps "
+                    f"missed ({misses}/{runs}). Broaden retrieval (recall-focused)."
+                ),
+                "priority": "medium",
+                "memory_signal": {"miss_rate": miss_rate, "runs": runs},
+            })
+        elif total_retrieved > 0 and useful_rate < 0.3:
+            opportunities.append({
+                "type": MutationType.MEMORY,
+                "description": (
+                    f"Memory retrieval is noisy — only {useful_rate:.0%} of "
+                    f"retrieved memories were used. Tighten relevance "
+                    f"(precision-focused)."
+                ),
+                "priority": "medium",
+                "memory_signal": {
+                    "useful_rate": useful_rate,
+                    "total_retrieved": total_retrieved,
+                },
+            })
         return opportunities
 
     async def generate(
@@ -293,6 +376,7 @@ class SelfEvolutionEngine:
                     messages=messages,
                     model=codegen_model,
                     response_format={"type": "json_object"},
+                    timeout=get_settings().llm.codegen_timeout,
                 )
             else:
                 response = await self._gateway.acompletion(  # type: ignore[union-attr]
@@ -762,11 +846,12 @@ class SelfEvolutionEngine:
         reflection: Any | None = None,
         sandbox: Any | None = None,
         git_tracker: Any | None = None,
+        promotion_gate: Any | None = None,
     ) -> dict[str, Any]:
         """Run a complete evolution cycle.
 
         Pipeline: analyze → generate → validate (layers 1-5) → sandbox_test (layer 6)
-                  → ab_test → deploy|reject
+                  → ab_test → deploy|reject → [promote PROMPT mutation to live]
 
         Args:
             execution_history: Recent execution records.
@@ -774,6 +859,11 @@ class SelfEvolutionEngine:
             reflection: ReflectionResult from the reflect node.
             sandbox: Optional SandboxExecutor for sandbox and A/B testing.
             git_tracker: Optional GitTracker for recording mutations.
+            promotion_gate: Optional ``PromotionGate`` (Phase 8). When the cycle
+                deploys a PROMPT mutation and live promotion is opted in, the gate
+                runs the eval canary and (on a passing score) promotes the mutation
+                so the live agent loads it via the prompt builder. ``None`` → no
+                promotion (the default; safe).
 
         Returns:
             Evolution cycle result with full context.
@@ -942,6 +1032,27 @@ class SelfEvolutionEngine:
 
         effective_deploy = deployed and not smoke_failed
 
+        # Phase 8: promote a deployed PROMPT mutation to the live agent via the
+        # canary gate. Only when a gate is wired AND the operator opted in. The
+        # gate itself is a no-op (returns {promoted: False}) for non-PROMPT
+        # mutations, so a CODE/TOOL deploy is unaffected. A failing/inconclusive
+        # canary leaves the prior pointer untouched. Promotion never aborts the
+        # cycle — its result is recorded for telemetry.
+        promotion: dict[str, Any] = {}
+        if effective_deploy and promotion_gate is not None:
+            try:
+                from src.config import get_settings
+
+                promote_on = get_settings().evolution.evolution_promote_to_live
+            except Exception:
+                promote_on = False
+            if promote_on:
+                try:
+                    promotion = await promotion_gate.promote(proposal)
+                except Exception as e:
+                    logger.warning(f"Promotion gate errored: {e}")
+                    promotion = {"promoted": False, "reason": f"gate error: {e}"}
+
         # Persist the final mutation + terminal outcome.
         if self._persister is not None:
             mutation_id = await self._persister.record_mutation(
@@ -998,6 +1109,7 @@ class SelfEvolutionEngine:
             "deployment": deployment,
             "smoke_result": smoke_result,
             "rollback": rollback_info,
+            "promotion": promotion,
             "mutations_proposed": 1,
             "mutations_deployed": 1 if effective_deploy else 0,
             "chain_id": chain_id,

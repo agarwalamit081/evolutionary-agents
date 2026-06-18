@@ -269,6 +269,91 @@ class TestEvolutionEngine:
         assert len(tool_opps) == 1
         assert tool_opps[0]["tool_metrics"]["calls"] == 3
 
+    # ── Memory analyzer (2c) ─────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_low_recall_history_proposes_memory_mutation(self) -> None:
+        """Most retrieval steps return nothing → MEMORY opp (recall-focused)."""
+        engine = SelfEvolutionEngine()
+        # 4 of 5 retrieval steps missed (retrieved 0) → miss_rate 0.8 > 0.5.
+        history = [
+            {"memory_retrieval": {"retrieved": 0, "used": 0}},
+            {"memory_retrieval": {"retrieved": 2, "used": 1}},
+            {"memory_retrieval": {"retrieved": 0, "used": 0}},
+            {"memory_retrieval": {"retrieved": 0, "used": 0}},
+            {"memory_retrieval": {"retrieved": 0, "used": 0}},
+        ]
+        result = await engine.analyze(execution_history=history, failure_patterns=[])
+
+        memory_opps = [
+            o for o in result["opportunities"] if o["type"] == MutationType.MEMORY
+        ]
+        assert len(memory_opps) == 1
+        assert "recall" in memory_opps[0]["description"].lower()
+        assert memory_opps[0]["memory_signal"]["miss_rate"] > 0.5
+
+    @pytest.mark.asyncio
+    async def test_noisy_retrieval_proposes_precision_mutation(self) -> None:
+        """Much retrieved, little used → MEMORY opp (precision-focused)."""
+        engine = SelfEvolutionEngine()
+        # Every step retrieves 10, uses 1 → useful_rate 0.1 < 0.3 (no misses).
+        history = [
+            {"memory_retrieval": {"retrieved": 10, "used": 1}},
+        ] * 4
+        result = await engine.analyze(execution_history=history, failure_patterns=[])
+
+        memory_opps = [
+            o for o in result["opportunities"] if o["type"] == MutationType.MEMORY
+        ]
+        assert len(memory_opps) == 1
+        assert "precision" in memory_opps[0]["description"].lower()
+        assert memory_opps[0]["memory_signal"]["useful_rate"] < 0.3
+
+    @pytest.mark.asyncio
+    async def test_no_memory_data_proposes_nothing(self) -> None:
+        """No memory_retrieval records → no MEMORY opp (backward compat)."""
+        engine = SelfEvolutionEngine()
+        history = [{"duration_ms": 100}, {"tool_results": []}]
+        result = await engine.analyze(execution_history=history, failure_patterns=[])
+
+        assert not any(
+            o["type"] == MutationType.MEMORY for o in result["opportunities"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_too_few_memory_samples_proposes_nothing(self) -> None:
+        """Under the 3-sample floor, no MEMORY opp is emitted."""
+        engine = SelfEvolutionEngine()
+        history = [{"memory_retrieval": {"retrieved": 0, "used": 0}}] * 2
+        result = await engine.analyze(execution_history=history, failure_patterns=[])
+
+        assert not any(
+            o["type"] == MutationType.MEMORY for o in result["opportunities"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_memory_opportunity_deploys_to_config(self) -> None:
+        """A MEMORY opp flows through generate() (heuristic) to a strategy config."""
+        import json
+
+        engine = SelfEvolutionEngine()  # no gateway → heuristic template
+        # Low-recall description → generate_memory_config picks recall_focused.
+        opportunity = {
+            "type": MutationType.MEMORY,
+            "description": (
+                "Memory recall is low — 80% of retrieval steps missed (4/5). "
+                "Broaden retrieval (recall-focused)."
+            ),
+            "priority": "medium",
+        }
+        result = await engine.generate(opportunity)
+
+        assert result["mutation_type"] == MutationType.MEMORY
+        config = json.loads(result["mutated_content"])
+        assert config["strategy"] == "recall_focused"
+        assert "min_fitness" in config and "max_results" in config
+        assert result["target_path"] == "evolution/memory_config.json"
+
     # ── Generate tests ───────────────────────────────────────────────
 
     @pytest.mark.asyncio

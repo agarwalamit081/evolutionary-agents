@@ -31,7 +31,8 @@ if TYPE_CHECKING:
 # handler fails validation and the tool is never registered — breaking
 # cross-run persistence+recall for tool-create goals (observed: N5's
 # duplicate_finder handler came back at 156 chars, "'(' was never closed").
-_MAX_GENERATION_ATTEMPTS = 3
+# Operator-configurable via AgentSettings (TOOL_GEN_MAX_ATTEMPTS); read at
+# call-time below.
 
 
 async def tool_create_node(
@@ -200,7 +201,7 @@ async def _create_single_tool(
             from src.config import get_settings
             from src.sandbox.executor import SandboxExecutor
 
-            sandbox = SandboxExecutor(get_settings())
+            sandbox = SandboxExecutor(get_settings().evolution)
         except Exception:
             logger.debug("SandboxExecutor not available for tool creation")
 
@@ -233,7 +234,8 @@ async def _create_single_tool(
         # failed attempt never pollutes the registry nor counts toward
         # ``max_tools_per_run`` (that counter increments inside register only).
         last_reason = ""
-        for attempt in range(1, _MAX_GENERATION_ATTEMPTS + 1):
+        max_attempts = get_settings().agent.tool_gen_max_attempts
+        for attempt in range(1, max_attempts + 1):
             if last_reason:
                 context["error_details"] = (
                     f"Previous generation attempt failed validation: "
@@ -243,7 +245,7 @@ async def _create_single_tool(
                 )
                 logger.info(
                     f"Retrying tool generation for '{gap_description}' "
-                    f"(attempt {attempt}/{_MAX_GENERATION_ATTEMPTS}) with "
+                    f"(attempt {attempt}/{max_attempts}) with "
                     f"validation feedback"
                 )
 
@@ -257,11 +259,13 @@ async def _create_single_tool(
 
             result = await generator.validate_and_register(generated, registry)
             if result["success"]:
-                # Best-effort persistence to DB (non-blocking, non-fatal). Store
+                # F2: framework-mandated DB persistence (resilient retry). Store
                 # the capability embedding (only when a real "api" vector was
                 # produced) so future semantically-identical gaps reuse this
-                # tool instead of generating a duplicate (B3).
-                await _persist_tool(
+                # tool instead of generating a duplicate (B3). ``persisted``
+                # flows into tools_created so a silent DB failure is observable
+                # downstream rather than masked.
+                persisted = await _persist_tool(
                     generated,
                     capability_embedding=gap_embedding
                     if emb_source == "api"
@@ -274,18 +278,19 @@ async def _create_single_tool(
                     "description": generated.description,
                     "safety_passed": True,
                     "sandbox_passed": result.get("sandbox_result", {}).get("passed", True),
+                    "persisted": persisted,
                 }
 
             last_reason = result.get("reason", "validation failed")
             logger.warning(
-                f"Tool generation attempt {attempt}/{_MAX_GENERATION_ATTEMPTS} "
+                f"Tool generation attempt {attempt}/{max_attempts} "
                 f"for '{gap_description}' failed: {last_reason}"
             )
 
         return {
             "success": False,
             "reason": (
-                f"All {_MAX_GENERATION_ATTEMPTS} generation attempts failed: "
+                f"All {max_attempts} generation attempts failed: "
                 f"{last_reason}"
             ),
             "gap": gap_description,
@@ -304,30 +309,69 @@ async def _persist_tool(
     generated: Any,
     capability_embedding: list[float] | None = None,
     capability_text: str | None = None,
-) -> None:
-    """Best-effort persistence of a validated tool to the database.
+) -> bool:
+    """Framework-mandated DB persistence of a validated tool (F2).
 
-    Non-fatal — if the DB is unavailable, the tool is still registered
-    in-memory for the current run.
+    A successful ``validate_and_register`` must ALWAYS reach the database — a
+    tool is only useful this run if it persists for cross-run recall. Persist is
+    retried with a fresh session each attempt: ``ToolPersister.persist`` opens
+    its own session, so a transient connection error / poisoned session recovers
+    on the next call (CostTracker-resilience pattern). Without this a single DB
+    blip silently dropped the tool — the run recorded it "created" yet it was
+    gone next run, breaking the tool-create persistence+recall contract.
 
     Args:
         generated: GeneratedTool with handler_code and test_code.
         capability_embedding: Optional capability vector to store (B3 dedup).
         capability_text: The text the embedding was derived from.
-    """
-    try:
-        from src.tools.dynamic.persister import ToolPersister
 
-        persister = ToolPersister()
-        await persister.persist(
-            tool_name=generated.tool_name,
-            description=generated.description,
-            input_schema=generated.input_schema,
-            handler_code=generated.handler_code,
-            test_code=generated.test_code,
-            capability_embedding=capability_embedding,
-            capability_text=capability_text,
-        )
-        logger.info(f"Persisted tool '{generated.tool_name}' to database")
-    except Exception as e:
-        logger.debug(f"Tool persistence skipped (non-critical): {e}")
+    Returns:
+        True once a row is written (or already present); False only if every
+        attempt fails — in which case the tool stays in-memory for this run and
+        a WARNING is logged (observable, never fatal).
+    """
+    from src.config import get_settings
+    from src.tools.dynamic.persister import ToolPersister
+
+    attempts = max(get_settings().agent.tool_persist_max_attempts, 1)
+    persister = ToolPersister()
+    for attempt in range(1, attempts + 1):
+        try:
+            row_id = await persister.persist(
+                tool_name=generated.tool_name,
+                description=generated.description,
+                input_schema=generated.input_schema,
+                handler_code=generated.handler_code,
+                test_code=generated.test_code,
+                capability_embedding=capability_embedding,
+                capability_text=capability_text,
+            )
+            if row_id is not None:
+                if attempt > 1:
+                    logger.info(
+                        f"Persisted tool '{generated.tool_name}' to database "
+                        f"(on retry attempt {attempt}/{attempts})"
+                    )
+                else:
+                    logger.info(
+                        f"Persisted tool '{generated.tool_name}' to database"
+                    )
+                return True
+        except Exception as e:
+            # persist() swallows its own errors → None; this covers a raise
+            # before its try/except (e.g. an import / wiring fault).
+            logger.warning(
+                f"Tool persistence attempt {attempt}/{attempts} for "
+                f"'{generated.tool_name}' raised: {e}"
+            )
+        if attempt < attempts:
+            logger.warning(
+                f"Tool persistence for '{generated.tool_name}' returned no row — "
+                f"retrying (attempt {attempt + 1}/{attempts})"
+            )
+
+    logger.warning(
+        f"Could not persist tool '{generated.tool_name}' after {attempts} "
+        f"attempt(s) — tool is in-memory only this run (F2 self-heal exhausted)"
+    )
+    return False

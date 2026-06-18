@@ -21,6 +21,7 @@ from src.governance.consolidate import (
     ConsolidationReport,
     MergePlan,
     _plan_clusters,
+    consolidate_performance,
     consolidate_sub_agents,
     consolidate_tools,
 )
@@ -212,3 +213,56 @@ class TestReportShape:
             dry_run=True,
         )
         assert report.total_retired == 3
+
+    def test_total_retired_counts_performance(self) -> None:
+        report = ConsolidationReport(performance_retired=["p1", "p2"])
+        assert report.total_retired == 2
+
+
+class _FakePerfPersister:
+    """Persister double exposing the M4 performance surface."""
+
+    def __init__(self, names: list[str], *, raise_on_scan: bool = False) -> None:
+        self._names = names
+        self._raise = raise_on_scan
+        self.retire = AsyncMock(return_value=len(names))
+
+    async def underperforming_tools(self, _min_runs: int, _floor: float) -> list[str]:
+        if self._raise:
+            raise RuntimeError("scan failed")
+        return list(self._names)
+
+
+class TestConsolidatePerformance:
+    @pytest.mark.asyncio
+    async def test_dry_run_reports_without_retiring(self) -> None:
+        fp = _FakePerfPersister(["bad"])
+        report = await consolidate_performance(
+            min_runs=20, success_floor=0.25, dry_run=True, persister=fp
+        )
+        assert report.dry_run is True
+        assert report.performance_retired == ["bad"]
+        fp.retire.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_apply_retires_qualifiers(self) -> None:
+        fp = _FakePerfPersister(["bad_a", "bad_b"])
+        report = await consolidate_performance(
+            min_runs=20, success_floor=0.25, dry_run=False, persister=fp
+        )
+        assert report.performance_retired == ["bad_a", "bad_b"]
+        fp.retire.assert_awaited_once_with(["bad_a", "bad_b"])
+
+    @pytest.mark.asyncio
+    async def test_empty_qualifiers_noop(self) -> None:
+        fp = _FakePerfPersister([])
+        report = await consolidate_performance(persister=fp)
+        assert report.performance_retired == []
+        fp.retire.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scan_failure_returns_empty_report(self) -> None:
+        fp = _FakePerfPersister(["bad"], raise_on_scan=True)
+        report = await consolidate_performance(persister=fp)
+        assert report.performance_retired == []
+        fp.retire.assert_not_awaited()

@@ -287,6 +287,33 @@ class TestBuildKwargs:
         kwargs = gw._build_kwargs("gpt-4o-mini-2024-07-18", 0.5, 100, None)
         assert kwargs["timeout"] == 15.0
 
+    def test_per_call_timeout_override_wins_over_default(self) -> None:
+        """A per-call ``timeout`` (e.g. codegen) overrides REQUEST_TIMEOUT.
+
+        Code-gen calls (tool_create + evolution) legitimately exceed the reasoning
+        default (observed live: a 58s deepseek-v4-pro codegen cut at 60s). They
+        pass a longer timeout that must reach litellm unchanged.
+        """
+        settings = _make_settings()
+        settings.llm.request_timeout = 45.0
+        gw = _make_gateway(settings)
+        kwargs = gw._build_kwargs(
+            "gpt-4o-mini-2024-07-18", 0.5, 100, None, timeout=200.0
+        )
+        assert kwargs["timeout"] == 200.0
+
+    def test_timeout_defaults_declared(self) -> None:
+        """request_timeout defaults to 90s; codegen_timeout to 180s.
+
+        Asserted against the declared field defaults (not a constructed instance)
+        so the test is immune to ambient REQUEST_TIMEOUT/CODEGEN_TIMEOUT env.
+        """
+        from src.config.settings import LLMProviderSettings
+
+        fields = LLMProviderSettings.model_fields
+        assert fields["request_timeout"].default == 90.0
+        assert fields["codegen_timeout"].default == 180.0
+
     def test_qwen_default_max_tokens_within_api_cap(self, gateway: LLMGateway) -> None:
         """qwen3.5-flash's registry max_output must stay within the DashScope
         max_tokens API cap.
@@ -450,6 +477,36 @@ class TestAcompletion:
         assert result.content == "Hi there!"
         assert result.model == "gpt-4o-mini-2024-07-18"
         assert result.provider == "openai"
+
+    @pytest.mark.asyncio
+    async def test_per_call_timeout_threads_to_litellm(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """acompletion(timeout=...) threads through to the litellm call kwargs.
+
+        End-to-end regression: the codegen per-call override (e.g. 180s) must reach
+        the actual ``litellm.acompletion`` invocation, not just ``_build_kwargs``.
+        """
+        mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model="gpt-4o-mini-2024-07-18",
+                timeout=200.0,
+            )
+
+        mock_litellm.acompletion.assert_awaited_once()
+        assert mock_litellm.acompletion.call_args.kwargs["timeout"] == 200.0
 
     @pytest.mark.asyncio
     async def test_uses_complexity_routing_when_no_model(

@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from loguru import logger
 
+from src.config.settings import get_settings
 from src.graph.enums import GoalStatus, Phase
 from src.graph.models import ToolResult
 from src.graph.state import AgentState
@@ -19,8 +21,8 @@ if TYPE_CHECKING:
     from src.tools.registry import ToolRegistry
     from src.tools.result_cache import ToolResultCache
 
-# Maximum concurrent tool calls per execute step
-MAX_CONCURRENT_TOOLS = 5
+# Maximum concurrent tool calls per execute step — operator-configurable via
+# AgentSettings (MAX_CONCURRENT_TOOLS). Read at call-time in _execute_tool_calls.
 
 # Tools whose output produces an on-disk deliverable. Only ``file_writer``
 # writes under ``results_root`` — verify treats its ``file_path`` as the
@@ -32,15 +34,20 @@ FILE_OUTPUT_TOOLS: frozenset[str] = frozenset({"file_writer"})
 # an explicit nudge. Cheaper models (haiku) frequently narrate the deliverable
 # as prose on turn 1 and only call file_writer once told to. Bounded so a
 # stubborn refusal degrades gracefully (mark complete) instead of looping;
-# MAX_WRITE_NUDGES + 1 total attempts per step.
-MAX_WRITE_NUDGES = 2
+# max_write_nudges + 1 total attempts per step. Operator-configurable via
+# AgentSettings (MAX_WRITE_NUDGES). Read at call-time in _run_step.
 
 # Detects a declared output path in a step description: "save/write/export …
 # <file>". Mirrors verify._SAVE_TO_RE so the path we nudge toward is the same
 # one verification will later check on disk.
 _WRITE_INTENT_RE = re.compile(
     r"\b(?:save|write|export|store|dump|output)\b[^.]*?"
-    r"\b([A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+)\b",
+    # Require a >=2-char extension: real file extensions are always >=2 letters
+    # (py/md/csv/json/txt/jsonl). A 1-char tail matches abbreviations ("e.g",
+    # "i.e") and version/section fragments ("1.0", "3.2"), which were captured
+    # as bogus deliverable paths and fed false missing-deliverable verify loops
+    # (F-k).
+    r"\b([A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]{2,})\b",
     re.IGNORECASE,
 )
 
@@ -52,6 +59,16 @@ _WRITE_INTENT_RE = re.compile(
 # never calls file_writer (Q3 never produced q3_overview.md).
 _GOAL_DELIVERABLE_RE = re.compile(
     r"\b(results/[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+)\b",
+    re.IGNORECASE,
+)
+
+# Marks a ``results/`` path as an INPUT the goal reads from, not an output it
+# writes. A goal commonly names its input first ("Reuse q01's normalizer output
+# at results/q01/normalized.csv"), so the first match is the input; without this
+# guard _extract_goal_deliverable returned that input as the deliverable (F-k).
+# The signal is the word immediately before "results/".
+_GOAL_INPUT_CONTEXT_RE = re.compile(
+    r"\b(?:at|from|using|against|reuse|input|source|read)\s*$",
     re.IGNORECASE,
 )
 
@@ -174,16 +191,29 @@ def _extract_expected_file_path(step_description: str) -> str | None:
 
 
 def _extract_goal_deliverable(goal_text: str) -> str | None:
-    """Return the canonical deliverable path named in the goal, or None.
+    """Return the canonical OUTPUT deliverable path named in the goal, or None.
 
-    Goals consistently embed their output as ``results/<name>.<ext>`` ("save/
-    merge/combine ... to/into results/x.md"). This broader regex catches
-    phrasings ``_WRITE_INTENT_RE`` misses — e.g. "merge the results into
-    results/q3_overview.md" has no save/write verb — so a producing step can
-    still be nudged toward the goal's deliverable.
+    Goals embed paths as ``results/<name>.<ext>``. A goal often names its INPUT
+    first ("process results/q01/x.csv -> write results/q03/y.csv"), so returning
+    the first match grabs the input (F-k). Instead skip any path whose
+    immediately-preceding word marks it as an input (at/from/using/against/reuse/
+    input/source/read) and return the LAST remaining match — outputs are stated
+    last, after "writing ... to". If every path is input-context, fall back to
+    the last path overall.
     """
-    match = _GOAL_DELIVERABLE_RE.search(goal_text or "")
-    return match.group(1) if match else None
+    text = goal_text or ""
+    matches = list(_GOAL_DELIVERABLE_RE.finditer(text))
+    if not matches:
+        return None
+    outputs: list[str] = []
+    for match in matches:
+        window = text[max(0, match.start() - 24): match.start()].lower()
+        if _GOAL_INPUT_CONTEXT_RE.search(window):
+            continue
+        outputs.append(match.group(1))
+    if outputs:
+        return outputs[-1]
+    return matches[-1].group(1)
 
 
 def _is_producing_step(
@@ -341,6 +371,7 @@ async def _llm_execute(
             EXECUTE_SYSTEM,
             NODE_EXECUTE,
             select_techniques_for_node,
+            splice_evolved,
             splice_techniques,
         )
 
@@ -385,6 +416,10 @@ async def _llm_execute(
             complexity=execute_complexity, node=NODE_EXECUTE, goal_text=goal_text,
         )
         system_prompt = splice_techniques(system_prompt, techniques)
+        # Phase 8: prepend any promoted [evolved] guidance for this node (no-op
+        # unless evolution→live promotion is opted in AND a PROMPT mutation was
+        # promoted for the execute node).
+        system_prompt = splice_evolved(system_prompt, NODE_EXECUTE)
 
         # ── Stateful ReAct thread ─────────────────────────────────────────
         # state["messages"] is the canonical conversation history (seeded with
@@ -426,7 +461,7 @@ async def _llm_execute(
                     f"Step has no declared output path; falling back to goal "
                     f"deliverable '{expected_path}' (producing step, not on disk)"
                 )
-        max_attempts = (MAX_WRITE_NUDGES + 1) if expected_path else 1
+        max_attempts = (get_settings().agent.max_write_nudges + 1) if expected_path else 1
 
         # Front-load the file_writer requirement on turn 1. Without this, cheaper
         # models narrate the deliverable as prose on the first attempt and only
@@ -521,10 +556,25 @@ async def _llm_execute(
                     "tool_results": new_tool_results,
                 }
 
-            # Write-step that did not call a file-output tool → nudge and retry
-            # if attempts remain; otherwise fall through to mark complete
-            # (verify will then flag the missing deliverable).
-            if expected_path and not _called_file_output_tool(raw_tool_calls):
+            # Write-step that did not call a file-output tool AND whose declared
+            # deliverable is NOT already on disk → nudge and retry if attempts
+            # remain; otherwise fall through to mark complete (verify then flags
+            # the missing deliverable). The disk check is what lets a
+            # code_executor-mediated write satisfy a write-step: code_executor is
+            # not in FILE_OUTPUT_TOOLS (it has no file_path arg to record), but
+            # when the agent's generated code DOES write the deliverable to disk
+            # the step is genuinely done — nudging anyway false-fires and burns
+            # max_attempts turns re-prompting for a file_writer call that isn't
+            # needed (battery-04 q1+q3: the agent wrote results/<run>/*.csv via
+            # code_executor, the nudge looped 3x → "marking complete (verify
+            # will flag the gap)", verify flagged missing, run looped to
+            # MAX_ITERATIONS). Resolves via the same normalize() the goal-
+            # deliverable fall-back uses, so it sees exactly where the file lands.
+            if (
+                expected_path
+                and not _called_file_output_tool(raw_tool_calls)
+                and not _deliverable_on_disk(expected_path)
+            ):
                 if attempt < max_attempts - 1:
                     nudge_text = _write_nudge(expected_path)
                     logger.info(
@@ -657,12 +707,20 @@ async def _execute_tool_call(
                 metadata={"cached": True},
             )
 
+    start = time.perf_counter()
     try:
         result = await handler(**args)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        out = str(result)
         tr = ToolResult(
             tool_name=tool_name,
             success=True,
-            output=str(result)[:2000],
+            output=out[:2000],
+        )
+        # Record the invocation outcome (non-fatal; gated by TOOL_METRICS_ENABLED).
+        # A blank success is an empty-output signal; latency is captured for both.
+        await _record_tool_metric(
+            tool_name, success=True, empty_output=not out.strip(), latency_ms=latency_ms
         )
         # Cache only successful results of cacheable tools (never errors).
         if cache is not None and tools.is_cacheable(tool_name):
@@ -677,12 +735,39 @@ async def _execute_tool_call(
             )
         return tr
     except Exception as e:
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        await _record_tool_metric(
+            tool_name, success=False, empty_output=False, latency_ms=latency_ms
+        )
         return ToolResult(
             tool_name=tool_name,
             success=False,
             output="",
             error=str(e)[:500],
         )
+
+
+async def _record_tool_metric(
+    tool_name: str, *, success: bool, empty_output: bool, latency_ms: int
+) -> None:
+    """Record a tool-invocation outcome (M4 success metrics).
+
+    Thin, non-fatal wrapper around :meth:`ToolMetricsRecorder.record` so the
+    execute chokepoint stays decoupled from the recorder/DB. A failure here (e.g.
+    DB unavailable) is logged inside the recorder and never propagates — metrics
+    are observability-only and must never break a tool call.
+    """
+    try:
+        from src.tools.metrics import ToolMetricsRecorder
+
+        await ToolMetricsRecorder().record(
+            tool_name,
+            success=success,
+            empty_output=empty_output,
+            latency_ms=latency_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 — metrics must never break a tool call
+        logger.debug("Tool metric recording skipped for '{}': {}", tool_name, exc)
 
 
 async def _execute_tool_calls_parallel(
@@ -711,7 +796,7 @@ async def _execute_tool_calls_parallel(
         # Single call — skip gather overhead
         return [await _execute_tool_call(tool_calls[0], tools, cache)]
 
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TOOLS)
+    semaphore = asyncio.Semaphore(get_settings().agent.max_concurrent_tools)
 
     async def _limited(tc: dict[str, Any]) -> ToolResult:
         async with semaphore:

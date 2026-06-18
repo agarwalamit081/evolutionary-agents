@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from src.eval.models import BenchmarkGoal, BenchmarkResult
+from src.eval.models import BenchmarkGoal, BenchmarkResult, CheckResult, GoalSpec
 
 if TYPE_CHECKING:
     from src.agents.registry import SubAgentRegistry
@@ -39,14 +39,20 @@ class BenchmarkHarness:
         self._tools = tools
         self._registry = sub_agent_registry
 
-    async def run_benchmark(self, goal: BenchmarkGoal) -> BenchmarkResult:
+    async def run_benchmark(
+        self, goal: BenchmarkGoal, spec: GoalSpec | None = None
+    ) -> BenchmarkResult:
         """Run a single benchmark goal and collect metrics.
 
         Args:
             goal: Benchmark scenario to execute.
+            spec: Optional GoalSpec whose correctness checks the verify node
+                runs (when ``EVAL_ENABLED``); its ``spec_id`` is threaded into
+                state so verify can look it up.
 
         Returns:
-            BenchmarkResult with latency, tokens, cost, and quality metrics.
+            BenchmarkResult with latency, tokens, cost, quality, and
+            (when a spec scored) correctness metrics.
         """
         from src.config import get_settings
         from src.graph.factory import initial_state
@@ -62,6 +68,10 @@ class BenchmarkHarness:
                 thread_id=thread_id,
                 max_iterations=goal.max_iterations,
             )
+            if spec is not None:
+                # Thread the spec id so verify runs its correctness checks when
+                # EVAL_ENABLED. A plain key set on the TypedDict (total=False).
+                state["eval_goal_spec_id"] = spec.spec_id
 
             compiled = compile_task_graph(
                 gateway=self._gateway,
@@ -214,6 +224,19 @@ class BenchmarkHarness:
         elif final_output:
             quality_score = 0.5
 
+        # Correctness layer (Phase 3): the verify node writes the aggregate
+        # score + per-check breakdown to state when a GoalSpec ran. None when no
+        # spec was registered or the goal didn't reach a completion verify.
+        correctness_score = state.get("eval_correctness_score")
+        checks_raw = state.get("eval_checks") or []
+        checks: list[CheckResult] = []
+        for raw in checks_raw:
+            if isinstance(raw, dict):
+                try:
+                    checks.append(CheckResult(**raw))
+                except Exception:  # noqa: BLE001 — never let one bad row drop the result
+                    logger.debug("Skipping malformed eval check row: {}", raw)
+
         return BenchmarkResult(
             goal_name=goal.name,
             category=goal.category,
@@ -228,4 +251,6 @@ class BenchmarkHarness:
             quality_score=quality_score,
             errors=[str(e)[:500] for e in errors] if errors else [],
             final_output=str(final_output)[:1000],
+            correctness_score=correctness_score,
+            checks=checks,
         )

@@ -19,7 +19,7 @@ from typing import Any
 import litellm
 from loguru import logger
 from tenacity import (
-    retry,
+    AsyncRetrying,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
@@ -45,9 +45,6 @@ _TRANSIENT_ERRORS = (
     litellm.ServiceUnavailableError,  # type: ignore[attr-defined]
     litellm.APIConnectionError,  # type: ignore[attr-defined]
 )
-
-# Max retries for transient errors
-_MAX_RETRIES = 3
 
 # Tier ordering for cheaper fallback selection
 _TIER_ORDER: dict[ModelTier, int] = {
@@ -75,7 +72,11 @@ class LLMGateway:
         # Per-provider circuit breaker (sits ABOVE per-call tenacity retry):
         # decides whether a provider should be attempted at all. When open for
         # a provider, the fallback loop skips to the next provider in the chain.
-        self._circuit_breaker = CircuitBreaker()
+        self._circuit_breaker = CircuitBreaker(
+            failure_threshold=settings.circuit_breaker.cb_failure_threshold,
+            recovery_timeout=settings.circuit_breaker.cb_recovery_timeout,
+            half_open_max_calls=settings.circuit_breaker.cb_half_open_max_calls,
+        )
         self._structured_output = StructuredOutputManager()
         self._cost_tracker: CostTracker | None = None
         self._cache: PromptCache | None = None
@@ -137,12 +138,13 @@ class LLMGateway:
         complexity: TaskComplexity | None = None,
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
-        temperature: float = 0.5,
+        temperature: float | None = None,
         max_tokens: int | None = None,
         cache_key: str | None = None,
         metadata: dict[str, Any] | None = None,
         thinking: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
+        timeout: float | None = None,
     ) -> LLMResponse:
         """Send a completion request with full resilience pipeline.
 
@@ -158,6 +160,8 @@ class LLMGateway:
             max_tokens: Maximum tokens in the response.
             cache_key: Optional cache key override.
             metadata: Optional metadata for logging.
+            timeout: Optional hard per-call timeout (seconds) overriding the
+                ``request_timeout`` default; used by long code-generation calls.
 
         Returns:
             LLMResponse with content, usage stats, and cost.
@@ -174,6 +178,8 @@ class LLMGateway:
         assert model is not None  # guaranteed by routing logic
 
         provider = self._extract_provider(model)
+
+        temperature = self._resolve_temperature(temperature)
 
         # Compress older messages to reduce token consumption
         messages = self._history_compressor.compress(messages)
@@ -214,6 +220,7 @@ class LLMGateway:
             metadata=metadata,
             thinking=thinking,
             reasoning_effort=reasoning_effort,
+            timeout=timeout,
         )
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -253,7 +260,7 @@ class LLMGateway:
         messages: list[dict[str, Any]],
         model: str | None = None,
         complexity: TaskComplexity | None = None,
-        temperature: float = 0.5,
+        temperature: float | None = None,
         max_tokens: int | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[str]:
@@ -281,6 +288,7 @@ class LLMGateway:
         assert model is not None  # guaranteed by routing logic
 
         provider = self._extract_provider(model)
+        temperature = self._resolve_temperature(temperature)
         await self._rate_limiter.acquire(provider, self._estimate_tokens(messages))
 
         kwargs = self._build_kwargs(model, temperature, max_tokens, metadata)
@@ -322,8 +330,9 @@ class LLMGateway:
         tools: list[dict[str, Any]],
         model: str | None = None,
         complexity: TaskComplexity | None = None,
-        temperature: float = 0.5,
+        temperature: float | None = None,
         metadata: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> ToolCallResponse:
         """Send a completion request with tool definitions.
 
@@ -345,6 +354,7 @@ class LLMGateway:
             tools=tools,
             temperature=temperature,
             metadata=metadata,
+            timeout=timeout,
         )
 
         return ToolCallResponse(
@@ -360,19 +370,36 @@ class LLMGateway:
 
     # ─── Internal Methods ────────────────────────────────────────────────
 
+    def _resolve_temperature(self, temperature: float | None) -> float:
+        """Resolve a sentinel ``None`` temperature to the configured default.
+
+        Centralizes the sampling-temperature default so callers can override it
+        via ``LLM_DEFAULT_TEMPERATURE`` (ResilienceSettings) without touching
+        every call site. Explicit values pass through unchanged.
+        """
+        if temperature is None:
+            return self._settings.resilience.llm_default_temperature
+        return temperature
+
     async def _execute_with_fallback(
         self,
         messages: list[dict[str, Any]],
         model: str,
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
-        temperature: float = 0.5,
+        temperature: float | None = None,
         max_tokens: int | None = None,
         metadata: dict[str, Any] | None = None,
         thinking: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
+        timeout: float | None = None,
     ) -> LLMResponse:
         """Execute an LLM call with automatic fallback on failure."""
+        # Resolve the sentinel default once into a fresh local. A plain
+        # reassignment of the `temperature` parameter would be widened back to
+        # float | None at the fallback loop's join point; a non-parameter local
+        # keeps the inferred float type throughout the function.
+        resolved_temperature: float = self._resolve_temperature(temperature)
         fallback_chain = [model] + FALLBACK_CHAINS.get(model, [])
 
         # Pre-filter: skip providers without API keys to reduce log noise.
@@ -402,8 +429,9 @@ class LLMGateway:
                 continue
             try:
                 kwargs = self._build_kwargs(
-                    attempt_model, temperature, max_tokens, metadata,
+                    attempt_model, resolved_temperature, max_tokens, metadata,
                     thinking=thinking, reasoning_effort=reasoning_effort,
+                    timeout=timeout,
                 )
                 if tools:
                     kwargs["tools"] = tools
@@ -443,17 +471,31 @@ class LLMGateway:
             f"All fallbacks exhausted for {model}. Last error: {last_error}"
         )
 
-    @retry(
-        retry=retry_if_exception_type(_TRANSIENT_ERRORS),
-        stop=stop_after_attempt(_MAX_RETRIES),
-        wait=wait_exponential_jitter(initial=1, max=30, jitter=2),
-        before_sleep=lambda state: logger.warning(
-            f"Retrying LLM call (attempt {state.attempt_number}): {state.outcome.exception()}"  # type: ignore[union-attr]
-        ),
-    )
     async def _retry_call(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
-        """Execute a litellm call with tenacity retry."""
-        return await litellm.acompletion(messages=messages, **kwargs)
+        """Execute a litellm call with tenacity retry.
+
+        Retry params (attempts, backoff) are read from ``ResilienceSettings`` at
+        call time so they're tunable via ``.env`` (LLM_MAX_RETRIES,
+        LLM_RETRY_INITIAL_DELAY/MAX_DELAY/JITTER) without redecorating at import.
+        """
+        resilience = self._settings.resilience
+        async for attempt in AsyncRetrying(
+            retry=retry_if_exception_type(_TRANSIENT_ERRORS),
+            stop=stop_after_attempt(resilience.llm_max_retries),
+            wait=wait_exponential_jitter(
+                initial=resilience.llm_retry_initial_delay,
+                max=resilience.llm_retry_max_delay,
+                jitter=resilience.llm_retry_jitter,
+            ),
+            before_sleep=lambda state: logger.warning(
+                f"Retrying LLM call (attempt {state.attempt_number}): "
+                f"{state.outcome.exception()}"  # type: ignore[union-attr]
+            ),
+            reraise=True,
+        ):
+            with attempt:
+                return await litellm.acompletion(messages=messages, **kwargs)
+        raise RuntimeError("unreachable")  # pragma: no cover
 
     def _parse_response(self, response: Any, model: str, provider: str) -> LLMResponse:
         """Parse a litellm response into our standard LLMResponse."""
@@ -507,6 +549,7 @@ class LLMGateway:
         metadata: dict[str, Any] | None,
         thinking: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Build keyword arguments for litellm call.
 
@@ -522,8 +565,11 @@ class LLMGateway:
 
         # Hard per-call timeout so an unresponsive provider cannot stall the run
         # on litellm's ~600s default. The tenacity retry layer still handles
-        # litellm.Timeout as a transient error.
-        kwargs["timeout"] = self._settings.llm.request_timeout
+        # litellm.Timeout as a transient error. A caller may pass a longer
+        # ``timeout`` (e.g. codegen) to override the ``request_timeout`` default.
+        kwargs["timeout"] = (
+            timeout if timeout is not None else self._settings.llm.request_timeout
+        )
 
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
@@ -532,7 +578,7 @@ class LLMGateway:
             if spec and spec.max_output:
                 kwargs["max_tokens"] = spec.max_output
             else:
-                kwargs["max_tokens"] = 4096
+                kwargs["max_tokens"] = self._settings.resilience.llm_default_max_tokens
 
         if metadata:
             kwargs["metadata"] = metadata

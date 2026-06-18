@@ -17,6 +17,8 @@ async def evolve_node(
     state: AgentState,
     *,
     gateway: LLMGateway | None = None,
+    tools: Any | None = None,
+    sub_agent_registry: Any | None = None,
 ) -> dict[str, Any]:
     """Trigger the self-evolution pipeline.
 
@@ -27,6 +29,10 @@ async def evolve_node(
     Args:
         state: Current agent state with reflection results.
         gateway: Optional LLM gateway for mutation generation.
+        tools: Optional ToolRegistry — wired into the Phase-8 promotion canary
+            (a golden benchmark needs the live tool registry) when promotion is
+            opted in. ``None`` → no canary → no promotion (safe).
+        sub_agent_registry: Optional SubAgentRegistry — likewise for the canary.
 
     Returns:
         Partial state update with evolution results.
@@ -39,7 +45,9 @@ async def evolve_node(
 
     # Try running the evolution engine
     if gateway is not None:
-        result = await _run_evolution_engine(gateway, state, generation)
+        result = await _run_evolution_engine(
+            gateway, state, generation, tools=tools, sub_agent_registry=sub_agent_registry
+        )
         if result is not None:
             return result
 
@@ -65,6 +73,9 @@ async def _run_evolution_engine(
     gateway: LLMGateway,
     state: AgentState,
     generation: int,
+    *,
+    tools: Any | None = None,
+    sub_agent_registry: Any | None = None,
 ) -> dict[str, Any] | None:
     """Run the SelfEvolutionEngine. Returns None on failure."""
     try:
@@ -113,12 +124,32 @@ async def _run_evolution_engine(
             logger.debug(f"Git tracker not available: {e}")
             git_tracker = None
 
+        # Phase 8: build the promotion gate when live promotion is opted in AND
+        # the canary has its deps (gateway is present here; tools/registry needed
+        # for the golden benchmark). Missing deps → no gate → no promotion (the
+        # engine logs it; promotion is never required for a healthy cycle).
+        promotion_gate: Any | None = None
+        if (
+            getattr(settings.evolution, "evolution_promote_to_live", False)
+            and tools is not None
+            and sub_agent_registry is not None
+        ):
+            try:
+                from src.evolution.promote import GoldenCanary, PromotionGate
+
+                canary = GoldenCanary(gateway, tools, sub_agent_registry)
+                promotion_gate = PromotionGate(canary=canary.score, settings=settings)
+            except Exception as e:
+                logger.debug(f"Promotion gate not wired: {e}")
+                promotion_gate = None
+
         # Run one evolution cycle with full pipeline
         cycle_result = await engine.run_cycle(
             execution_history=execution_history,
             reflection=reflection,
             sandbox=sandbox,
             git_tracker=git_tracker,
+            promotion_gate=promotion_gate,
         )
 
         # Generate human-readable evolution report
@@ -146,6 +177,7 @@ async def _run_evolution_engine(
             "commit_hash": cycle_result.get("deployment", {}).get("commit_hash"),
             "rationale": cycle_result.get("proposal", {}).get("rationale", ""),
             "report": report,
+            "promotion": cycle_result.get("promotion", {}),
         }
 
         logger.info(

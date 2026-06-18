@@ -120,6 +120,14 @@ START -> classify -> plan -> retrieve_memory -> execute <-> reflect
 - **Autonomous Memory Folding** — the reflect node compresses long live conversations into episode/working/tool summaries (via `RemoveMessage`), persisting them to warm memory for recall on later runs
 - **Runtime Tool Creation** — Agent detects missing capabilities, generates tools via LLM with double-barrier security, and registers them for immediate use
 - **Sub-Agent Delegation** — Agent spawns specialized sub-agents as isolated LangGraph subgraphs, delegates subtasks, tracks performance with rolling metrics, and optimizes them via the evolution engine
+- **Typed Correctness Eval Harness** — beyond process metrics, a correctness layer (Structural / Execution-sandbox / Golden-spec / LLM-judge-oracle checks) scores deliverables and persists results to an `eval_results` table; wired into the verify node behind `EVAL_ENABLED`, runnable standalone via `--eval`
+- **Verify Completion Discipline** — the agent refuses to force-complete unless the goal's expected deliverable is present, non-empty, and well-formed (placeholder-leak scan for `.md`/`.txt`, parse-check for `.csv`/`.json`); a missing deliverable triggers a re-plan, never a false success
+- **Per-Tool Metrics + Performance Retirement** — each tool invocation records success/empty/latency; governance retires tools below a success-rate floor once they have enough runs, alongside semantic-dedup and cap retirement
+- **Semantic/Fact Memory Tier** — durable entity-ish facts (`memory_type="fact"`) extracted during folding and recalled alongside skills/episodes
+- **Cross-Process `--resume`** — a killed/interrupted run resumes from its last Postgres checkpoint via `--resume <run-id>`
+- **Per-Run Results Subfolders** — writes organize under `results/<run-id>/` (reads fall back to the flat root for backward recall); `--results-dir` / `--clean` CLI flags
+- **Evolution→Live Promotion Gate** — a PROMPT mutation that passes post-deploy verify promotes to a versioned, canary-gated pointer (auto-rollback on regression); opt-in via `EVOLUTION_PROMOTE_TO_LIVE`
+- **Centralized Config** — every resilience/circuit-breaker/rate-limiter/tool-limit/concurrency knob is a `pydantic-settings` env var (no hardcoded timeouts/caps in source)
 
 ---
 
@@ -301,6 +309,16 @@ python main.py --no-evolution --goal "..."
 
 # Stream the final answer token-by-token to stdout
 python main.py --stream --goal "..."
+
+# Run the golden eval suite (correctness checks + LLM-judge) and persist results
+python main.py --eval
+
+# Per-run output organization — writes land under results/<run-id>/; --clean clears it first
+python main.py --goal "..." --run-id my-task --clean
+python main.py --goal "..." --results-dir results/custom      # override the run's results root
+
+# Cross-process resume — continue a killed/interrupted run from its last checkpoint
+python main.py --resume my-task
 ```
 
 ### 4. Run tests

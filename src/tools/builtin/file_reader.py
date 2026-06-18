@@ -8,7 +8,7 @@ from typing import Optional
 from loguru import logger
 
 from src.config.settings import get_settings
-from src.tools._paths import normalize
+from src.tools._paths import resolve_existing
 
 
 def _results_root_fallback(file_path: str) -> Optional[Path]:
@@ -26,7 +26,7 @@ def _results_root_fallback(file_path: str) -> Optional[Path]:
     if file_path is None or Path(file_path).is_absolute():
         return None
     try:
-        candidate = normalize(file_path, base="results")
+        candidate = resolve_existing(file_path, base="results")
     except ValueError:
         return None  # path traversal outside results_root
     return candidate if candidate.exists() and candidate.is_file() else None

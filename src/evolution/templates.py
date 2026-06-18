@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.config.settings import get_settings
+
 # ─── Failure-pattern → prompt-fix mapping ────────────────────────────────
 
 _PROMPT_FIXES: dict[str, str] = {
@@ -406,11 +408,12 @@ def generate_config_tuning(
     Returns:
         Dict with content, target_path, and rationale.
     """
+    evolution_settings = get_settings().evolution
     content = {
         "tuning_target": description[:100],
         "adjustments": {
-            "temperature": 0.4,
-            "max_tokens_factor": 0.9,
+            "temperature": evolution_settings.evolution_temperature,
+            "max_tokens_factor": evolution_settings.evolution_max_tokens_factor,
             "cache_enabled": True,
         },
         "generation_source": "heuristic",

@@ -140,7 +140,7 @@ def build_task_graph(
     graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools, result_cache=result_cache))  # type: ignore[arg-type]
     graph.add_node("reflect", _wrap(reflect_node, gateway=gateway, tools=tools, memory=memory, folding_cfg=_folding_cfg_from_settings()))  # type: ignore[arg-type]
     graph.add_node("verify", _wrap(verify_node, gateway=gateway))  # type: ignore[arg-type]
-    graph.add_node("evolve", _wrap(evolve_node, gateway=gateway))  # type: ignore[arg-type]
+    graph.add_node("evolve", _wrap(evolve_node, gateway=gateway, tools=tools, sub_agent_registry=sub_agent_registry))  # type: ignore[arg-type]
     graph.add_node("store_memory", _wrap(store_memory_node, memory=memory, gateway=gateway))  # type: ignore[arg-type]
     graph.add_node("tool_create", _wrap(tool_create_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("agent_spawn", _wrap(agent_spawn_node, gateway=gateway, tools=tools, sub_agent_registry=sub_agent_registry))  # type: ignore[arg-type]

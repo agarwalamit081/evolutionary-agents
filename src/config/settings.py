@@ -79,7 +79,17 @@ class LLMProviderSettings(BaseSettings):
     # ``timeout``. Without it litellm falls back to its long default (~600s), so
     # a single unresponsive provider stalls the entire agent run. Bounded by the
     # tenacity retry layer (_MAX_RETRIES=3): worst case ≈ timeout × retries.
-    request_timeout: float = 60.0
+    # Default 90s (REQUEST_TIMEOUT) — reasoning/embedding calls fail fast to the
+    # fallback chain while leaving margin for a slow first token.
+    request_timeout: float = 90.0
+
+    # Longer timeout for code-generation calls (tool_create + evolution CODE
+    # mutations) that route to a code-strong model and emit a full handler in one
+    # shot — these legitimately exceed the reasoning default (observed live: a
+    # 58.4s deepseek-v4-pro codegen call was cut at the old 60s default). Passed
+    # via a per-call ``timeout`` override on the gateway so reasoning/embedding
+    # calls keep the shorter ``request_timeout`` and fail fast to the fallback.
+    codegen_timeout: float = 180.0
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -143,6 +153,109 @@ class LLMProviderSettings(BaseSettings):
         """Check if a provider has a non-empty API key configured."""
         key = self.get_provider_key(provider)
         return key is not None and len(key.strip()) > 0
+
+
+# ─── LLM Resilience Settings ────────────────────────────────────────
+
+
+class ResilienceSettings(BaseSettings):
+    """LLM call resilience: retry, sampling defaults, and output caps.
+
+    Centralizes the magic numbers previously hardcoded in
+    ``src/llm/gateway.py`` (``_MAX_RETRIES``, the retry backoff, the four
+    ``temperature=0.5`` defaults, and the ``max_tokens=4096`` fallback) so an
+    operator can tune the whole LLM I/O envelope from ``.env`` without code
+    changes. Distinct from ``LLMProviderSettings.request_timeout`` (the hard
+    per-call timeout), which stays where it is to avoid churning callers.
+    """
+
+    # Max retry attempts on transient LLM errors (429/5xx/timeout/conn).
+    llm_max_retries: int = 3  # Env: LLM_MAX_RETRIES
+    # tenacity wait_exponential_jitter params (seconds).
+    llm_retry_initial_delay: float = 1.0  # Env: LLM_RETRY_INITIAL_DELAY
+    llm_retry_max_delay: float = 30.0  # Env: LLM_RETRY_MAX_DELAY
+    llm_retry_jitter: float = 2.0  # Env: LLM_RETRY_JITTER
+    # Default sampling temperature when a caller omits it (gateway acompletion/
+    # astream/acompletion_with_tools all defaulted to 0.5).
+    llm_default_temperature: float = 0.5  # Env: LLM_DEFAULT_TEMPERATURE
+    # Default output cap when no model spec supplies max_tokens.
+    llm_default_max_tokens: int = 4096  # Env: LLM_DEFAULT_MAX_TOKENS
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    @field_validator("llm_default_temperature")
+    @classmethod
+    def validate_temperature(cls, v: float) -> float:
+        """Ensure temperature is a sane sampling range (0–2)."""
+        if not 0.0 <= v <= 2.0:
+            raise ValueError(f"Temperature must be between 0 and 2. Got: {v}")
+        return v
+
+
+# ─── Circuit Breaker Settings ───────────────────────────────────────
+
+
+class CircuitBreakerSettings(BaseSettings):
+    """Per-provider circuit breaker thresholds.
+
+    Previously the ``CircuitBreaker`` constructor defaults (failure_threshold=5,
+    recovery_timeout=60, half_open_max_calls=1). Exposed so provider reliability
+    tuning doesn't require editing ``src/llm/circuit_breaker.py``.
+    """
+
+    cb_failure_threshold: int = 5  # Env: CB_FAILURE_THRESHOLD
+    cb_recovery_timeout: float = 60.0  # Env: CB_RECOVERY_TIMEOUT
+    cb_half_open_max_calls: int = 1  # Env: CB_HALF_OPEN_MAX_CALLS
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    @field_validator("cb_failure_threshold", "cb_half_open_max_calls")
+    @classmethod
+    def validate_positive_int(cls, v: int) -> int:
+        """Ensure positive integers."""
+        if v < 1:
+            raise ValueError(f"Must be a positive integer. Got: {v}")
+        return v
+
+
+# ─── Rate Limiter Settings ──────────────────────────────────────────
+
+
+class RateLimiterSettings(BaseSettings):
+    """Per-provider rate-limit fallbacks.
+
+    ``src/llm/rate_limiter.py`` keeps an explicit PROVIDER_LIMITS table for
+    known providers; these are the RPM/TPM used when a provider is absent from
+    that table.
+    """
+
+    rate_limit_default_rpm: int = 60  # Env: RATE_LIMIT_DEFAULT_RPM
+    rate_limit_default_tpm: int = 100_000  # Env: RATE_LIMIT_DEFAULT_TPM
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    @field_validator("rate_limit_default_rpm", "rate_limit_default_tpm")
+    @classmethod
+    def validate_positive_int(cls, v: int) -> int:
+        """Ensure positive integers."""
+        if v < 1:
+            raise ValueError(f"Must be a positive integer. Got: {v}")
+        return v
 
 
 # ─── Database Settings ──────────────────────────────────────────────
@@ -232,6 +345,50 @@ class ToolCacheSettings(BaseSettings):
     )
 
 
+# ─── Tool Limits Settings ───────────────────────────────────────────
+
+
+class ToolLimitsSettings(BaseSettings):
+    """Per-tool timeouts, size caps, and retry params for the built-in tools.
+
+    Centralizes the module-level constants previously hardcoded in
+    ``src/tools/builtin/`` (terminal_command, http_request, web_scraper,
+    code_executor, web_search) so an operator can bound tool I/O from ``.env``.
+    Tools read these at call-time via ``get_settings().tools`` (not at import)
+    so changes take effect without a process restart in long-running hosts.
+    """
+
+    terminal_command_timeout: float = 30.0  # Env: TERMINAL_COMMAND_TIMEOUT
+    terminal_max_output_bytes: int = 16_000  # Env: TERMINAL_MAX_OUTPUT_BYTES
+    http_request_timeout: float = 15.0  # Env: HTTP_REQUEST_TIMEOUT
+    http_max_response_chars: int = 8000  # Env: HTTP_MAX_RESPONSE_CHARS
+    http_max_body_bytes: int = 1_000_000  # Env: HTTP_MAX_BODY_BYTES
+    web_scraper_timeout: float = 20.0  # Env: WEB_SCRAPER_TIMEOUT
+    web_scraper_max_bytes: int = 5 * 1024 * 1024  # Env: WEB_SCRAPER_MAX_BYTES
+    web_scraper_max_chars: int = 8000  # Env: WEB_SCRAPER_MAX_CHARS
+    code_executor_timeout: int = 30  # Env: CODE_EXECUTOR_TIMEOUT
+    web_search_max_attempts: int = 3  # Env: WEB_SEARCH_MAX_ATTEMPTS
+    web_search_delay_min: float = 0.2  # Env: WEB_SEARCH_DELAY_MIN
+    web_search_delay_max: float = 0.6  # Env: WEB_SEARCH_DELAY_MAX
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    @model_validator(mode="after")
+    def validate_delay_range(self) -> "ToolLimitsSettings":
+        """Ensure web_search_delay_min <= web_search_delay_max."""
+        if self.web_search_delay_min > self.web_search_delay_max:
+            raise ValueError(
+                f"WEB_SEARCH_DELAY_MIN ({self.web_search_delay_min}) must be <= "
+                f"WEB_SEARCH_DELAY_MAX ({self.web_search_delay_max})"
+            )
+        return self
+
+
 # ─── Budget Settings ────────────────────────────────────────────────
 
 
@@ -289,6 +446,29 @@ class EvolutionSettings(BaseSettings):
     # Max regeneration attempts after a validation failure (0 = single attempt,
     # no retry). NOT routed through validate_positive_int so 0 stays legal.
     max_evolution_retries: int = 3
+    # Code-emitting mutation LLM params (previously hardcoded in
+    # src/evolution/templates.py): sampling temperature and the fraction of the
+    # model's max output tokens the regeneration loop may consume.
+    evolution_temperature: float = 0.4  # Env: EVOLUTION_TEMPERATURE
+    evolution_max_tokens_factor: float = 0.9  # Env: EVOLUTION_MAX_TOKENS_FACTOR
+    # Sandbox subprocess timeouts (previously hardcoded in
+    # src/sandbox/executor.py asyncio.wait_for): venv creation + package install.
+    sandbox_venv_create_timeout: int = 60  # Env: SANDBOX_VENV_CREATE_TIMEOUT
+    sandbox_package_install_timeout: int = 120  # Env: SANDBOX_PACKAGE_INSTALL_TIMEOUT
+    # Phase 8 — evolution→live promotion gate (opt-in). When true, a deployed
+    # PROMPT mutation that passes the eval canary (score >= eval_canary_min_score)
+    # is written as a versioned artifact under ``evolved_handlers_dir`` and a
+    # ``current`` pointer is updated so the live agent loads it via the prompt
+    # builder (tagged [evolved]). CODE/TOOL mutations already reach live via the
+    # DB tool registry; this gate is scoped to PROMPT mutations. Off by default
+    # so nothing is promoted until the operator opts in. Env: EVOLUTION_PROMOTE_TO_LIVE.
+    evolution_promote_to_live: bool = False
+    # Directory holding promoted, versioned handler artifacts (prompts first).
+    # Layout: ``<dir>/prompts/<node>.<sha>.json`` (immutable versions) +
+    # ``<dir>/prompts/current.json`` (the live pointer manifest the builder reads).
+    # Default lives under .turing/ (gitignored scratch), NOT in core src/. Env:
+    # EVOLVED_HANDLERS_DIR.
+    evolved_handlers_dir: str = ".turing/evolved"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -302,12 +482,30 @@ class EvolutionSettings(BaseSettings):
         "evolution_max_mutations",
         "evolution_sandbox_timeout",
         "evolution_sandbox_memory_mb",
+        "sandbox_venv_create_timeout",
+        "sandbox_package_install_timeout",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
         """Ensure positive integers."""
         if v < 1:
             raise ValueError(f"Must be a positive integer. Got: {v}")
+        return v
+
+    @field_validator("evolution_temperature")
+    @classmethod
+    def validate_temperature(cls, v: float) -> float:
+        """Ensure evolution sampling temperature is a sane range (0–2)."""
+        if not 0.0 <= v <= 2.0:
+            raise ValueError(f"Temperature must be between 0 and 2. Got: {v}")
+        return v
+
+    @field_validator("evolution_max_tokens_factor")
+    @classmethod
+    def validate_factor(cls, v: float) -> float:
+        """Ensure max-tokens factor is a fraction of the model cap (0–1]."""
+        if not 0.0 < v <= 1.0:
+            raise ValueError(f"Factor must be between 0 and 1. Got: {v}")
         return v
 
 
@@ -360,10 +558,25 @@ class AgentSettings(BaseSettings):
     retire_min_runs: int = 20
     retire_success_floor: float = 0.25
     retire_recency_days: int = 30
+    # Per-tool success-metrics recording (M4). When true, the execute chokepoint
+    # records each tool invocation (success/empty/latency) to tool_call_metrics
+    # and updates the running aggregates on tool_registrations, which the
+    # performance-retirement path above (retire_min_runs/retire_success_floor)
+    # scores. Gated so a DB hiccup in the recorder never breaks a run.
+    # Env: TOOL_METRICS_ENABLED.
+    tool_metrics_enabled: bool = True
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"
     results_root: str = "results"
+    # Phase 7: per-run results subfolders. When true AND a run_id is active
+    # (set by main.py via _paths.set_active_run_id), deliverables written
+    # through the shared resolver land under ``results_root / <run_id> / ...``
+    # so each run is isolated on disk. Reads (verify/file_reader/eval checks)
+    # fall back to the flat root when the run subdir has nothing — so recall
+    # of older flat deliverables (battery-03) still works. No-op when no
+    # run_id is set (non-run-id runs behave exactly as before). Env: RESULTS_PER_RUN_SUBDIR.
+    results_per_run_subdir: bool = True
 
     # Memory folding (autonomous context compression)
     memory_folding_enabled: bool = True
@@ -390,6 +603,34 @@ class AgentSettings(BaseSettings):
     # intent from the goal before the execute loop and seed the spawn nodes.
     structure_analysis_enabled: bool = True
 
+    # Concurrency + loop bounds (previously module constants in
+    # src/graph/nodes/execute.py and src/graph/nodes/tool_create.py, and the
+    # verify data-tool cap in src/graph/nodes/verify.py).
+    # Max tools executed in parallel within a single execute step.
+    max_concurrent_tools: int = 5  # Env: MAX_CONCURRENT_TOOLS
+    # Extra LLM turns spent nudging the model to actually write deliverables.
+    max_write_nudges: int = 2  # Env: MAX_WRITE_NUDGES
+    # Max tool-handler regeneration attempts after a validation failure.
+    tool_gen_max_attempts: int = 3  # Env: TOOL_GEN_MAX_ATTEMPTS
+    # Cap on data-bearing tools inspected by the verify node.
+    verify_max_data_tools: int = 8  # Env: VERIFY_MAX_DATA_TOOLS
+    # Memory-folding LLM params (previously hardcoded in src/memory/folding.py).
+    memory_folding_temperature: float = 0.1  # Env: MEMORY_FOLDING_TEMPERATURE
+    memory_folding_max_tokens: int = 2048  # Env: MEMORY_FOLDING_MAX_TOKENS
+    # Phase 5: semantic/fact memory tier. When a memory fold is persisted, the
+    # episode summary is mined for durable facts (entity-ish knowledge) via the
+    # gateway and stored as warm memory_type="fact" — de-conflicted from the
+    # episodic cold tier and recalled alongside skills/folded memory. Extraction
+    # is best-effort (a gateway failure yields no facts, never an error).
+    memory_fact_extraction_enabled: bool = True  # Env: MEMORY_FACT_EXTRACTION_ENABLED
+    memory_fact_max_per_fold: int = 5  # Env: MEMORY_FACT_MAX_PER_FOLD
+    # F2: bounded retry count for framework-mandated tool DB-persistence. A
+    # validated tool must reach the DB (cross-run recall) even if the first
+    # write hits a transient connection error — each attempt opens a fresh
+    # session, so a poisoned session recovers on the next call (CostTracker-
+    # resilience pattern). Read at call-time in _persist_tool.
+    tool_persist_max_attempts: int = 2  # Env: TOOL_PERSIST_MAX_ATTEMPTS
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -402,12 +643,26 @@ class AgentSettings(BaseSettings):
         "max_tools_per_run",
         "max_sub_agents_per_run",
         "planning_max_steps",
+        "max_concurrent_tools",
+        "max_write_nudges",
+        "tool_gen_max_attempts",
+        "verify_max_data_tools",
+        "memory_folding_max_tokens",
+        "tool_persist_max_attempts",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
         """Ensure positive integers."""
         if v < 1:
             raise ValueError(f"Must be a positive integer. Got: {v}")
+        return v
+
+    @field_validator("memory_folding_temperature")
+    @classmethod
+    def validate_folding_temperature(cls, v: float) -> float:
+        """Ensure folding temperature is a sane sampling range (0–2)."""
+        if not 0.0 <= v <= 2.0:
+            raise ValueError(f"Folding temperature must be between 0 and 2. Got: {v}")
         return v
 
     @field_validator("context_window_reserve")
@@ -498,6 +753,31 @@ class LangSmithSettings(BaseSettings):
         )
 
 
+class EvalSettings(BaseSettings):
+    """Evaluation harness configuration (Phase 3 correctness layer).
+
+    Eval is opt-in: ``eval_enabled`` gates the verify-node correctness checks
+    (a normal goal with no registered GoalSpec is unaffected even when True).
+    ``eval_enforce`` (default False) makes a failing correctness check downgrade
+    a "complete" verdict to incomplete so the agent retries; when False the
+    score is recorded and a grounding warning emitted without changing the
+    verdict. The LLM-judge and the persistent eval store have their own toggles.
+    """
+
+    eval_enabled: bool = False  # Env: EVAL_ENABLED
+    eval_enforce: bool = False  # Env: EVAL_ENFORCE — opt-in completion gating
+    eval_llm_judge_enabled: bool = True  # Env: EVAL_LLM_JUDGE_ENABLED
+    eval_canary_min_score: float = 0.8  # Env: EVAL_CANARY_MIN_SCORE
+    eval_store_enabled: bool = True  # Env: EVAL_STORE_ENABLED
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 # ─── Root Settings ──────────────────────────────────────────────────
 
 
@@ -515,6 +795,11 @@ class Settings(BaseSettings):
     observability: ObservabilitySettings = ObservabilitySettings()  # type: ignore[assignment]
     langsmith: LangSmithSettings = LangSmithSettings()  # type: ignore[assignment]
     tool_cache: ToolCacheSettings = ToolCacheSettings()  # type: ignore[assignment]
+    resilience: ResilienceSettings = ResilienceSettings()  # type: ignore[assignment]
+    circuit_breaker: CircuitBreakerSettings = CircuitBreakerSettings()  # type: ignore[assignment]
+    rate_limiter: RateLimiterSettings = RateLimiterSettings()  # type: ignore[assignment]
+    tools: ToolLimitsSettings = ToolLimitsSettings()  # type: ignore[assignment]
+    eval: EvalSettings = EvalSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

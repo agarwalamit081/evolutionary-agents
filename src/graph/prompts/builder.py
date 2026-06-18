@@ -11,6 +11,13 @@ system prompt as a bulleted block:
   prompt, which has no JSON schema), so the guidance still leads the response.
 
 With no techniques the base prompt is passed through unchanged.
+
+Phase 8: when evolution→live promotion is opted in and a PROMPT mutation has
+been promoted for a node (``src.evolution.promote.PromotionGate``), that node's
+promoted suffixes are prepended to its system prompt as a tagged ``[evolved]``
+block — via ``splice_evolved`` / the ``node`` arg on ``build_messages``. An
+in-process candidate override lets the eval canary trial a candidate mutation
+without touching the on-disk pointer.
 """
 
 from __future__ import annotations
@@ -28,6 +35,70 @@ _TECHNIQUE_HEADING = "Reasoning techniques to apply:"
 
 # Pure/stateless selector — cheap to instantiate once and reuse across nodes.
 _SELECTOR = TechniqueSelector()
+
+# Phase 8: in-process candidate override. The eval canary
+# (``src.evolution.promote.GoldenCanary``) binds a candidate (node → suffixes)
+# for the duration of a canary run WITHOUT mutating the on-disk pointer, so a
+# trial mutation is visible to ``evolved_suffixes_for_node`` then cleared.
+# Empty unless a canary is mid-flight; promotion OFF → always empty.
+_candidate_override: dict[str, list[str]] = {}
+
+
+def set_evolved_candidate(node: str, suffixes: list[str]) -> None:
+    """Bind a candidate (node → suffixes) for the canary run (in-process only)."""
+    _candidate_override[node] = list(suffixes)
+
+
+def clear_evolved_candidate(node: str | None = None) -> None:
+    """Clear the candidate override (one node, or all when ``node`` is None)."""
+    if node is None:
+        _candidate_override.clear()
+    else:
+        _candidate_override.pop(node, None)
+
+
+def evolved_suffixes_for_node(node: str | None) -> list[str]:
+    """Active evolved suffixes for ``node`` (candidate override → on-disk pointer).
+
+    Returns ``[]`` when promotion is disabled, no pointer exists, or the node has
+    no promoted entry — so a node that never evolved (and the default OFF path)
+    is completely unaffected. The candidate override takes precedence so a canary
+    run sees its trial suffixes even before they are written to disk.
+    """
+    if not node:
+        return []
+    try:
+        from src.config.settings import get_settings
+
+        if not get_settings().evolution.evolution_promote_to_live:
+            return []
+    except Exception:  # noqa: BLE001 — promotion must never break prompt building
+        return []
+    if node in _candidate_override:
+        return list(_candidate_override[node])
+    try:
+        from src.evolution.promote import PromotionGate
+
+        return PromotionGate().current_suffixes(node)
+    except Exception:  # noqa: BLE001 — pointer read must never break prompt building
+        return []
+
+
+def render_evolved_block(suffixes: list[str]) -> str:
+    """Render promoted suffixes as a headed ``[evolved]`` block (empty when none)."""
+    if not suffixes:
+        return ""
+    lines = ["[evolved] promoted guidance (apply unless it conflicts with the task):"]
+    lines += [f"- {s}" for s in suffixes]
+    return "\n".join(lines)
+
+
+def splice_evolved(base_system: str, node: str | None) -> str:
+    """Prepend the node's promoted ``[evolved]`` block; no-op when none promoted."""
+    block = render_evolved_block(evolved_suffixes_for_node(node))
+    if not block:
+        return base_system
+    return f"{block}\n\n{base_system}"
 
 
 def select_techniques_for_node(
@@ -110,6 +181,7 @@ def build_messages(
     base_system: str,
     user_content: str,
     techniques: list[Technique] | None = None,
+    node: str | None = None,
 ) -> list[dict[str, str]]:
     """Build the ``[system, user]`` message pair for a gateway call.
 
@@ -118,11 +190,16 @@ def build_messages(
         user_content: The rendered user prompt.
         techniques: Optional techniques whose bodies are spliced into the
             system prompt. ``None`` or empty → pass-through.
+        node: Optional node id (``NODE_PLAN``/``NODE_EXECUTE``/…). When supplied
+            AND a PROMPT mutation has been promoted for that node (Phase 8, opt-
+            in), the promoted ``[evolved]`` guidance is prepended so the live
+            agent loads it. ``None``/no promotion → unchanged behavior.
 
     Returns:
         A two-element message list ready for ``gateway.acompletion``.
     """
     system = splice_techniques(base_system, techniques or [])
+    system = splice_evolved(system, node)
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user_content},

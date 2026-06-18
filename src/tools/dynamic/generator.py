@@ -107,12 +107,14 @@ class ToolGenerator:
                     messages=messages,
                     model=codegen_model,
                     response_format=json_mode,
+                    timeout=get_settings().llm.codegen_timeout,
                 )
             else:
                 response = await self._gateway.acompletion(
                     messages=messages,
                     complexity=TaskComplexity.SIMPLE,
                     response_format=json_mode,
+                    timeout=get_settings().llm.codegen_timeout,
                 )
 
             extractor = StructuredOutputManager()

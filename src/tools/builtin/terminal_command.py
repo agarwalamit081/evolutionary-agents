@@ -23,6 +23,7 @@ from typing import Optional
 
 from loguru import logger
 
+from src.config.settings import get_settings
 from src.tools._paths import project_root
 
 # Layer 1: commands the agent may invoke. All read-oriented.
@@ -61,8 +62,16 @@ _FIND_BLOCKED = frozenset(
      "-fprintf"}
 )
 
-_MAX_OUTPUT_BYTES = 16_000  # ~16 KB combined stdout+stderr
-_DEFAULT_TIMEOUT = 30.0
+# Output cap and timeout are operator-configurable via ToolLimitsSettings
+# (TERMINAL_MAX_OUTPUT_BYTES / TERMINAL_COMMAND_TIMEOUT). The schema default
+# below mirrors the settings default so the LLM-facing description is stable;
+# actual enforcement reads settings at call-time via _tool_limits().
+_SCHEMA_DEFAULT_TIMEOUT = 30.0  # mirrors ToolLimitsSettings.terminal_command_timeout
+
+
+def _tool_limits():
+    """Call-time accessor — never capture get_settings() at module import."""
+    return get_settings().tools
 
 
 def _resolve_cwd(cwd: Optional[str]) -> tuple[Optional[Path], str]:
@@ -117,7 +126,7 @@ async def terminal_command(
     command: str,
     args: Optional[list[str]] = None,
     cwd: Optional[str] = None,
-    timeout: float = _DEFAULT_TIMEOUT,
+    timeout: Optional[float] = None,
 ) -> str:
     """Run an allowlisted, shell-free read-only command.
 
@@ -126,12 +135,17 @@ async def terminal_command(
         args: List of command arguments. Shell metacharacters are treated
             literally — there is no shell.
         cwd: Directory to run in, resolved under the workspace/results root.
-        timeout: Seconds before the process is killed (default 30.0).
+        timeout: Seconds before the process is killed. ``None`` resolves to
+            ``TERMINAL_COMMAND_TIMEOUT`` (ToolLimitsSettings, default 30.0).
 
     Returns:
-        Combined stdout (+ stderr if any), capped at ~16 KB, prefixed with the
-        command line; or an ``ERROR:`` string.
+        Combined stdout (+ stderr if any), capped at the configured byte limit,
+        prefixed with the command line; or an ``ERROR:`` string.
     """
+    limits = _tool_limits()
+    if timeout is None:
+        timeout = limits.terminal_command_timeout
+    max_output_bytes = limits.terminal_max_output_bytes
     args = list(args or [])
     # Layer 1: command allowlist.
     if command not in _ALLOWED_COMMANDS:
@@ -182,8 +196,8 @@ async def terminal_command(
     combined = out
     if err_text.strip():
         combined += f"\n[stderr]\n{err_text}"
-    if len(combined) > _MAX_OUTPUT_BYTES:
-        combined = combined[:_MAX_OUTPUT_BYTES] + f"\n... (truncated at {_MAX_OUTPUT_BYTES} bytes)"
+    if len(combined) > max_output_bytes:
+        combined = combined[:max_output_bytes] + f"\n... (truncated at {max_output_bytes} bytes)"
 
     if return_code != 0:
         combined = f"[exit code {return_code}]\n{combined}"
@@ -232,8 +246,8 @@ TOOL_DEFINITION = {
             },
             "timeout": {
                 "type": "number",
-                "description": "Timeout in seconds before the command is killed (default: 30.0).",
-                "default": _DEFAULT_TIMEOUT,
+                "description": "Timeout in seconds before the command is killed (default: 30.0, configurable via TERMINAL_COMMAND_TIMEOUT).",
+                "default": _SCHEMA_DEFAULT_TIMEOUT,
             },
         },
         "required": ["command"],

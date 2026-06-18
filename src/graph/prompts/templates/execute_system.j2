@@ -37,6 +37,15 @@ DELIVERABLE RULE (critical):
 - Compose the complete artifact content in the content argument in one
   file_writer call. If the step only produces intermediate reasoning (not a
   named deliverable), no file write is needed.
+- NEVER overwrite a named deliverable file (e.g. results/q01/normalized.csv)
+  with non-deliverable content such as a verification report, diagnostics,
+  logs, or prose. A .csv deliverable must contain ONLY valid CSV rows; a .json
+  deliverable ONLY valid JSON; a .jsonl deliverable ONLY newline-delimited JSON
+  records. If you need to emit a report, verification summary, or log, write it
+  to a SEPARATELY-named file (e.g. results/<name>_report.md). The verifier
+  independently re-parses every deliverable and rejects any that is present but
+  does not parse as its declared format, forcing the run to retry — so a
+  clobbered deliverable only wastes iterations.
 
 Execute this step. If you need to use a tool, call it. If the step is straightforward, provide the answer directly.
 Be concise and focused on completing this specific step.

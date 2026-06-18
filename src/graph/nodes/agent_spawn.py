@@ -201,22 +201,23 @@ async def _spawn_single_agent(
         logger.warning(f"LLM call failed for agent spawn: {e}")
         return None
 
-    # Validate proposal
-    validation_errors = _validate_proposal(proposal, registry, tools)
-    if validation_errors:
-        logger.warning(
-            f"Invalid sub-agent proposal '{proposal.name}': "
-            f"{'; '.join(validation_errors)}"
-        )
-        return None
-
-    # ── Semantic dedup (B3) ──────────────────────────────────────────────
-    # Before persisting/registering a new agent, embed the capability (gap +
-    # proposal) and reuse an existing active agent whose capability is
-    # semantically identical (cosine >= capability_dedup_threshold). Only real
-    # ("api") embeddings participate. The reused agent must already be in the
+    # ── Semantic dedup / recall (B3) — MUST run before name-uniqueness ────
+    # Embed the capability (gap + proposal) and reuse an existing ACTIVE agent
+    # whose capability is semantically identical (cosine >=
+    # capability_dedup_threshold) instead of spawning a duplicate. Only real
+    # ("api") embeddings participate; the reused agent must already be in the
     # in-memory registry so delegate can spawn it this run. Best-effort: any
-    # failure degrades to spawn-and-register, never blocks the run.
+    # failure degrades to validate-and-spawn, never blocks the run.
+    #
+    # ORDERING IS LOAD-BEARING (battery-04 q2 F-c): reuse MUST precede
+    # _validate_proposal's name-uniqueness check. A sub-agent that persisted in
+    # a prior run is ACTIVE → loaded into the registry at startup →
+    # registry.has(name) is True. When that ran first it appended "already
+    # exists" and returned None BEFORE this block, so the recall+reuse path was
+    # dead code and re-running such a goal rejected the spawn and rerouted to
+    # tool_create (which failed). Dedup-first means a semantically-identical
+    # active agent is reused; name-uniqueness then only blocks a GENUINE exact-
+    # name collision with an agent that was NOT reused.
     from src.memory.embeddings import embed_capability
 
     dedup_text = (
@@ -249,6 +250,16 @@ async def _spawn_single_agent(
                     }
         except Exception as e:
             logger.debug(f"Sub-agent capability dedup skipped: {e}")
+
+    # Validate proposal (name-uniqueness now only blocks a genuine exact-name
+    # collision with an agent that dedup did NOT reuse).
+    validation_errors = _validate_proposal(proposal, registry, tools)
+    if validation_errors:
+        logger.warning(
+            f"Invalid sub-agent proposal '{proposal.name}': "
+            f"{'; '.join(validation_errors)}"
+        )
+        return None
 
     # Create SubAgentSpec from proposal
     spec = SubAgentSpec(

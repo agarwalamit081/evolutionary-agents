@@ -166,6 +166,101 @@ class MemoryManager:
         """
         await self.warm.update_fitness(skill_id, success)
 
+    async def store_fact(
+        self,
+        key: str,
+        value: str,
+        *,
+        source: str = "extraction",
+        confidence: float = 0.5,
+        tags: list[str] | None = None,
+    ) -> str:
+        """Store a durable fact in the semantic/fact tier (Phase 5).
+
+        Thin wrapper over :meth:`WarmMemoryStore.store_fact`. Facts are entity-
+        ish knowledge (schemas, counts, invariants) distinct from skills and
+        from episodic cold memory.
+
+        Args:
+            key: Short stable identifier / entity name.
+            value: The durable fact.
+            source: Provenance label.
+            confidence: Extraction confidence 0.0-1.0.
+            tags: Extra tags ("fact" is auto-prepended).
+
+        Returns:
+            UUID of the stored fact.
+        """
+        return await self.warm.store_fact(
+            key=key,
+            value=value,
+            source=source,
+            confidence=confidence,
+            tags=tags,
+        )
+
+    async def retrieve_facts(
+        self,
+        query: str = "",
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Recall durable facts, ranked semantically when a query is given.
+
+        Args:
+            query: Natural-language query; empty → fitness-ordered facts.
+            limit: Maximum facts to return.
+
+        Returns:
+            List of fact dicts (key, value, source, confidence, similarity?).
+        """
+        return await self.warm.retrieve_facts(query=query, limit=limit)
+
+    async def extract_and_store_facts(
+        self,
+        gateway: Any,
+        text: str,
+        *,
+        source: str = "extraction",
+        max_facts: int = 5,
+    ) -> int:
+        """Mine ``text`` for durable facts and persist each to the fact tier.
+
+        Best-effort: a gateway or store failure is logged and skipped (never
+        raises) so it cannot break the fold it runs inside.
+
+        Args:
+            gateway: An LLM gateway for the extraction call.
+            text: Episode/summary text to mine.
+            source: Provenance label stamped on each stored fact.
+            max_facts: Upper bound on facts extracted/stored.
+
+        Returns:
+            Number of facts actually persisted.
+        """
+        from src.memory.facts import extract_facts
+
+        try:
+            candidates = await extract_facts(gateway, text, max_facts=max_facts)
+        except Exception as exc:  # extraction must never break its caller
+            logger.debug(f"Fact extraction failed: {exc}")
+            return 0
+
+        stored = 0
+        for fact in candidates:
+            try:
+                await self.store_fact(
+                    key=fact.key,
+                    value=fact.value,
+                    source=source,
+                    confidence=fact.confidence,
+                )
+                stored += 1
+            except Exception as exc:  # one bad write must not abort the rest
+                logger.debug(f"Failed to store fact {fact.key!r}: {exc}")
+        if stored:
+            logger.info(f"Extracted + stored {stored} fact(s) from {source}")
+        return stored
+
     async def consolidate(self) -> dict[str, int]:
         """Run background consolidation across tiers.
 

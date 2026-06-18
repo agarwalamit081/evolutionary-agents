@@ -187,10 +187,14 @@ def _build_fixed_subgraph(
     spec: SubAgentSpec,
     gateway: LLMGateway | _ModelOverrideProxy,
     tools: ToolRegistry,
+    memory: MemoryManager | None = None,
 ) -> StateGraph:
-    """Build fixed template: classify → plan → execute ↔ reflect → END.
+    """Build fixed template: [retrieve] → classify → plan → execute ↔ reflect → END.
 
-    If tool_scope is "self_create", also adds tool_create node.
+    If tool_scope is "self_create", also adds tool_create node. When ``memory``
+    is wired, a leading ``retrieve`` node recalls warm+cold context for the
+    sub-agent's goal (2d) — read-only; sub-agent writes never reach long-term
+    memory, preserving the no-side-effects isolation contract.
     """
     # Lazy imports to avoid circular dependency (src.graph.nodes → src.agents → src.agents.subgraph)
     from src.graph.nodes import classify_node, execute_node, plan_node, reflect_node
@@ -203,8 +207,21 @@ def _build_fixed_subgraph(
     graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("reflect", _wrap(reflect_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
 
+    # Read-only long-term memory recall (2d): a MemoryManager recalls relevant
+    # warm+cold context for the sub-agent's goal and seeds ``retrieved_memories``
+    # into state, which plan/execute inject as context. Recall is READ-ONLY —
+    # sub-agents never persist to long-term memory (writes stay with the
+    # parent), so a delegated task cannot mutate shared memory as a side effect.
+    if memory is not None:
+        from src.graph.nodes import retrieve_memory_node
+
+        graph.add_node("retrieve", _wrap(retrieve_memory_node, memory=memory))  # type: ignore[arg-type]
+        graph.add_edge(START, "retrieve")
+        graph.add_edge("retrieve", "classify")
+    else:
+        graph.add_edge(START, "classify")
+
     # Linear edges
-    graph.add_edge(START, "classify")
     graph.add_edge("classify", "plan")
     graph.add_edge("plan", "execute")
 
@@ -255,9 +272,9 @@ def _build_fixed_subgraph(
 # NOTE: "evolve" is deliberately absent — sub-agents never self-evolve (F13 §4).
 # A custom node_config requesting "evolve" is rejected at _get_node_function /
 # the unknown-node skip in _build_custom_subgraph, and both builders assert the
-# invariant after construction.
+# invariant after construction. "retrieve" recalls read-only long-term memory (2d).
 _AVAILABLE_NODE_NAMES: list[str] = [
-    "classify", "plan", "execute", "reflect", "tool_create",
+    "classify", "plan", "execute", "reflect", "tool_create", "retrieve",
 ]
 
 
@@ -268,6 +285,7 @@ def _get_node_function(name: str) -> Callable[..., Any]:
         execute_node,
         plan_node,
         reflect_node,
+        retrieve_memory_node,
         tool_create_node,
     )
     nodes = {
@@ -276,6 +294,7 @@ def _get_node_function(name: str) -> Callable[..., Any]:
         "execute": execute_node,
         "reflect": reflect_node,
         "tool_create": tool_create_node,
+        "retrieve": retrieve_memory_node,
     }
     return nodes[name]
 
@@ -284,12 +303,15 @@ def _build_custom_subgraph(
     spec: SubAgentSpec,
     gateway: LLMGateway | _ModelOverrideProxy,
     tools: ToolRegistry,
-    _memory: MemoryManager | None = None,
+    memory: MemoryManager | None = None,
 ) -> StateGraph:
     """Build custom template from node_config.
 
-    note: ``_memory`` is accepted for API symmetry but not yet wired into
-    custom node composition.  Reserved for a future enhancement.
+    ``memory`` wires a read-only ``retrieve`` node (2d): when a custom config
+    includes "retrieve" and a MemoryManager is supplied, the node recalls
+    warm+cold context for the sub-agent's goal and seeds ``retrieved_memories``
+    into state (consumed by plan/execute). Recall never persists — sub-agent
+    writes stay isolated from long-term memory.
 
     node_config format:
         {
@@ -314,7 +336,7 @@ def _build_custom_subgraph(
             f"Sub-agent '{spec.name}': invalid node_config, "
             f"falling back to fixed template"
         )
-        return _build_fixed_subgraph(spec, gateway, tools)
+        return _build_fixed_subgraph(spec, gateway, tools, memory)
 
     graph = StateGraph(SubAgentState)
 
@@ -330,6 +352,11 @@ def _build_custom_subgraph(
         deps: dict[str, Any] = {"gateway": gateway}
         if node_name in ("plan", "execute", "reflect", "tool_create"):
             deps["tools"] = tools
+        # The retrieve node takes memory (not tools/gateway); only inject it
+        # when a MemoryManager is actually supplied so a "retrieve" node in a
+        # memory-less subgraph degrades to a no-op recall, not a TypeError.
+        if node_name == "retrieve" and memory is not None:
+            deps["memory"] = memory
 
         node_fn = _get_node_function(node_name)
         graph.add_node(node_name, _wrap(node_fn, **deps))  # type: ignore[arg-type]
@@ -340,7 +367,7 @@ def _build_custom_subgraph(
             f"Sub-agent '{spec.name}': no valid nodes in config, "
             f"falling back to fixed template"
         )
-        return _build_fixed_subgraph(spec, gateway, tools)
+        return _build_fixed_subgraph(spec, gateway, tools, memory)
 
     # Add static edges
     for edge in config.get("edges", []):
@@ -364,7 +391,7 @@ def _build_custom_subgraph(
 
     # Validate graph has at least START → something
     if not node_names:
-        return _build_fixed_subgraph(spec, gateway, tools)
+        return _build_fixed_subgraph(spec, gateway, tools, memory)
 
     # Guard: sub-agents never self-evolve (F13 §4). _AVAILABLE_NODE_NAMES
     # excludes "evolve", so a well-formed custom config can't add it — this
@@ -422,4 +449,4 @@ def build_subgraph(
     if spec.template_type == "custom" and spec.node_config:
         return _build_custom_subgraph(spec, effective_gateway, scoped_tools, memory)
 
-    return _build_fixed_subgraph(spec, effective_gateway, scoped_tools)
+    return _build_fixed_subgraph(spec, effective_gateway, scoped_tools, memory)

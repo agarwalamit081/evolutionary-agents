@@ -25,9 +25,6 @@ PROVIDER_LIMITS: dict[str, tuple[int, int]] = {
     "nvidia": (40, 60_000),
 }
 
-DEFAULT_RPM: int = 60
-DEFAULT_TPM: int = 100_000
-
 
 class RateLimiterRegistry:
     """Manages per-provider rate limiters for LLM API calls.
@@ -43,7 +40,13 @@ class RateLimiterRegistry:
     def _get_or_create(self, provider: str) -> tuple[aiolimiter.AsyncLimiter, aiolimiter.AsyncLimiter]:
         """Get or create RPM and TPM limiters for a provider."""
         if provider not in self._rpm_limiters:
-            rpm, tpm = PROVIDER_LIMITS.get(provider, (DEFAULT_RPM, DEFAULT_TPM))
+            rpm, tpm = PROVIDER_LIMITS.get(
+                provider,
+                (
+                    self._settings.rate_limiter.rate_limit_default_rpm,
+                    self._settings.rate_limiter.rate_limit_default_tpm,
+                ),
+            )
             # aiolimiter uses max_rate/time_period; we want per-minute
             self._rpm_limiters[provider] = aiolimiter.AsyncLimiter(max_rate=rpm, time_period=60)
             self._tpm_limiters[provider] = aiolimiter.AsyncLimiter(max_rate=tpm, time_period=60)
@@ -63,5 +66,11 @@ class RateLimiterRegistry:
 
     def get_limits(self, provider: str) -> tuple[int, int]:
         """Return (RPM, TPM) for a provider."""
-        rpm, tpm = PROVIDER_LIMITS.get(provider, (DEFAULT_RPM, DEFAULT_TPM))
+        rpm, tpm = PROVIDER_LIMITS.get(
+            provider,
+            (
+                self._settings.rate_limiter.rate_limit_default_rpm,
+                self._settings.rate_limiter.rate_limit_default_tpm,
+            ),
+        )
         return rpm, tpm

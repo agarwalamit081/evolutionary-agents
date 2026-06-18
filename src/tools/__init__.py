@@ -1,6 +1,7 @@
 """Tools package — tool registry and built-in tools."""
 
 from src.tools.builtin import ALL_TOOL_DEFINITIONS
+from src.tools.metrics import ToolMetricsRecorder
 from src.tools.registry import ToolRegistry
 from src.tools.result_cache import ToolResultCache
 
@@ -28,4 +29,5 @@ __all__ = [
     "create_default_registry",
     "ALL_TOOL_DEFINITIONS",
     "ToolResultCache",
+    "ToolMetricsRecorder",
 ]

@@ -57,6 +57,27 @@ class TestRetrieveMemoryNode:
         assert result["phase"] == Phase.EXECUTE
         assert result["retrieved_memories"] == []
 
+    @pytest.mark.asyncio
+    async def test_retrieve_recalls_facts_into_memories(self) -> None:
+        """Phase 5: durable facts are recalled and surfaced with tier='fact'."""
+        memory = MagicMock()
+        memory.retrieve_context = AsyncMock(return_value=[])
+        memory.warm = MagicMock()
+        memory.warm.retrieve = AsyncMock(return_value=[])  # evolved/folded empty
+        memory.retrieve_facts = AsyncMock(
+            return_value=[
+                {"key": "row_count", "value": "1024 rows", "confidence": 0.9},
+            ]
+        )
+        state = initial_state("how many rows", "thread-facts")
+        result = await retrieve_memory_node(state, memory=memory)
+
+        assert result["phase"] == Phase.EXECUTE
+        fact_entries = [m for m in result["retrieved_memories"] if m.get("tier") == "fact"]
+        assert len(fact_entries) == 1
+        assert fact_entries[0]["content"] == "row_count: 1024 rows"
+        assert fact_entries[0]["score"] == pytest.approx(0.9)
+
 
 class TestStoreMemoryNode:
     """Tests for store_memory_node."""

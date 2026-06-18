@@ -31,6 +31,56 @@ _ROOT_BY_NAME = {
     "project": lambda: _project_root(),
 }
 
+# Phase 7: active run identifier. Set by main.py (``_run_agent``) so the shared
+# resolver routes a run's deliverables under ``results_root / <run_id> / ...``,
+# isolating each run on disk. Process-global is sufficient — battery queries run
+# one at a time per process. ``None`` when no run_id is in play → every path
+# resolves flat exactly as before (non-regression for non-run-id runs).
+_active_run_id: str | None = None
+
+
+def set_active_run_id(run_id: str | None) -> None:
+    """Bind the active run_id for per-run results subfoldering (main.py entry).
+
+    Pass ``None`` to reset (e.g. between independent runs / in tests).
+    """
+    global _active_run_id
+    _active_run_id = run_id
+
+
+def get_active_run_id() -> str | None:
+    """Current active run_id, or ``None`` when no run is bound."""
+    return _active_run_id
+
+
+def _subdir_active() -> bool:
+    """Per-run subfoldering is on only with a run_id AND the setting enabled."""
+    if not _active_run_id:
+        return False
+    try:
+        return bool(_agent().results_per_run_subdir)  # type: ignore[attr-defined]
+    except AttributeError:
+        # Minimal agent fakes / older settings without the field → treat as off.
+        return False
+
+
+def _maybe_inject_run_subdir(parts: tuple[str, ...], root: Path) -> tuple[str, ...]:
+    """Prefix a run_id component so writes land under ``results_root/<run_id>/``.
+
+    Skipped unless ``root`` is the results root (workspace/project/explicit-bases
+    are never subfoldered), when subfoldering is off, or when the (already
+    de-nested) path already starts with the run_id — so a goal that names
+    ``results/<run_id>/x`` is NOT double-nested to ``results/<run_id>/<run_id>/x``.
+    """
+    run_id = _active_run_id
+    if run_id is None or not _subdir_active():
+        return parts
+    if root != _results_root():
+        return parts  # only the results base is per-run subfoldered
+    if parts and parts[0] == run_id:
+        return parts
+    return (run_id, *parts)
+
 
 def _agent() -> "object":
     # ``AgentSettings`` — typed loosely to avoid an import cycle with config.
@@ -99,21 +149,56 @@ def strip_results_prefix(parts: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def normalize(path: str, *, base: str | Path = "results") -> Path:
-    """Resolve ``path`` under ``base`` after de-nesting, with a traversal guard.
+    """Resolve ``path`` under ``base`` as a WRITE target, with per-run isolation.
 
     ``base`` is a named root (``"results"``/``"workspace"``/``"project"``) or an
     explicit absolute ``Path`` (used when a caller supplies its own
     ``sandbox_root``). The resolved base-root name is added to the strip set so
-    an explicit root de-nests its own name too. Raises ``ValueError`` on path
-    traversal outside ``base``; callers translate that to their existing
-    ``ERROR:`` strings to preserve behavior.
+    an explicit root de-nests its own name too.
+
+    Phase 7: when per-run subfoldering is active (an ``_active_run_id`` is bound
+    AND ``results_per_run_subdir`` is on), a results write is routed under
+    ``results_root / <run_id> / <path>`` so each run's deliverables are isolated
+    on disk. A goal that already names ``results/<run_id>/x`` is de-duplicated
+    (never double-nested). Workspace/project bases are never subfoldered. Raises
+    ``ValueError`` on path traversal outside ``base``; callers translate that to
+    their existing ``ERROR:`` strings to preserve behavior.
+
+    Use ``resolve_existing`` for reads — it prefers the run subdir but falls back
+    to the flat root so legacy/cross-run deliverables still recall.
     """
     root = _resolve_base(base)
     parts = _strip(Path(path).parts, root.name)
+    parts = _maybe_inject_run_subdir(parts, root)
     target = (root / Path(*parts)).resolve() if parts else root
     if not target.is_relative_to(root):
         raise ValueError(f"Path traversal blocked: {path}")
     return target
+
+
+def resolve_existing(path: str, *, base: str | Path = "results") -> Path:
+    """Resolve ``path`` as a READ target: run subdir first, flat fallback.
+
+    The primary candidate is ``normalize(path, base)`` — the run subdir when
+    per-run subfoldering is active, the flat root otherwise. If it exists on
+    disk it is returned. Otherwise we re-resolve *without* the run_id injection
+    (the flat root) and return that when it exists — so recall of older flat
+    deliverables (battery-03) and cross-run reads still work. When neither
+    exists, the primary candidate is returned (the canonical "where it would be"
+    location), so a caller's ``.exists()`` check simply reports absent.
+
+    Raises ``ValueError`` only when the flat resolution escapes ``base`` — the
+    primary (subdir) candidate is already traversal-guarded by ``normalize``.
+    """
+    primary = normalize(path, base=base)
+    if primary.exists():
+        return primary
+    flat_root = _resolve_base(base)
+    flat_parts = _strip(Path(path).parts, flat_root.name)
+    flat = (flat_root / Path(*flat_parts)).resolve() if flat_parts else flat_root
+    if flat != primary and flat.is_relative_to(flat_root) and flat.exists():
+        return flat
+    return primary
 
 
 def _strip(parts: tuple[str, ...], *extra: str) -> tuple[str, ...]:

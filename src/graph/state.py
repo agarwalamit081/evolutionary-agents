@@ -101,6 +101,18 @@ class AgentState(TypedDict, total=False):
     thread_id: str
     generation: int
 
+    # ─── Evaluation (Phase 3) ────────────────────────────────────────────
+    # ``eval_goal_spec_id`` associates this run with a GoalSpec (set by the
+    # ``--eval`` / ``--run-id`` CLI path). The verify node resolves it via
+    # ``lookup_goal_spec`` and, when ``EVAL_ENABLED``, runs its correctness
+    # checks; the aggregate score + per-check breakdown are written back here
+    # for the harness to extract. Stored as plain JSON-serializable values so
+    # checkpoints remain serializable (never a live Pydantic/GoalSpec object).
+    eval_goal_spec_id: str
+    eval_correctness_score: float
+    eval_checks: list[dict[str, Any]]
+    eval_correctness_passed: bool
+
 
 class EvolutionState(TypedDict, total=False):
     """State for the evolution subgraph."""

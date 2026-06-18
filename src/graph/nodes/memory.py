@@ -96,6 +96,25 @@ async def retrieve_memory_node(
                 )
         except Exception as e:
             logger.debug(f"Folded memory loading skipped: {e}")
+
+        # Recall durable facts (Phase 5). Facts are entity-ish knowledge mined
+        # from prior folds/runs — distinct from skills and from episodic cold
+        # memory — and ranked semantically against the goal when possible.
+        try:
+            facts = await memory.retrieve_facts(query=goal_text, limit=3)
+            for entry in facts:
+                value = entry.get("value", "")
+                key = entry.get("key", "")
+                content = f"{key}: {value}" if key else value
+                retrieved.append({
+                    "content": content,
+                    "tier": "fact",
+                    "score": entry.get("confidence", 0.5),
+                })
+            if facts:
+                logger.info(f"Loaded {len(facts)} fact(s) from the semantic tier")
+        except Exception as e:
+            logger.debug(f"Fact recall skipped: {e}")
     else:
         logger.debug("No MemoryManager available, returning empty memories")
 

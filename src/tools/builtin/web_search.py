@@ -23,11 +23,13 @@ from ddgs import DDGS
 from ddgs.exceptions import DDGSException, RatelimitException, TimeoutException
 from loguru import logger
 from tenacity import (
-    retry,
+    Retrying,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
 )
+
+from src.config.settings import get_settings
 
 
 # ── ddgs defaults (per tmp-code/ddgs-search.md) ──────────────────────────
@@ -40,8 +42,14 @@ _SAFESEARCH = "strict"
 # the next ('auto' first, then the lighter 'lite'/'html' backends).
 _BACKENDS = ("auto", "lite", "html")
 
-# Politeness delay window (seconds) before each ddgs request to avoid IP bans.
-_REQUEST_DELAY = (0.2, 0.6)
+# Politeness delay window + retry-attempt count are operator-configurable via
+# ToolLimitsSettings (WEB_SEARCH_DELAY_MIN / WEB_SEARCH_DELAY_MAX /
+# WEB_SEARCH_MAX_ATTEMPTS). Enforcement reads settings at call-time below.
+
+
+def _tool_limits():
+    """Call-time accessor — never capture get_settings() at module import."""
+    return get_settings().tools
 
 # Low-value / content-farm domains filtered from results post-fetch. Deliberately
 # conservative: social platforms with near-zero technical-research value.
@@ -171,13 +179,6 @@ def _log_retry(state: object) -> None:
     logger.warning(f"ddgs retry attempt #{attempt} after: {exc}")
 
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential_jitter(initial=0.4, max=2.0),
-    retry=retry_if_exception_type((RatelimitException, TimeoutException, DDGSException)),
-    before_sleep=_log_retry,
-    reraise=True,
-)
 def _ddgs_text(
     query: str,
     max_results: int,
@@ -190,30 +191,56 @@ def _ddgs_text(
     Returns a list of result dicts (keys: ``title``, ``href``, ``body``).
     Raises a ``DDGSException`` only when every backend has failed across all
     retry attempts. The whole chain is wrapped in tenacity so a transient
-    rate-limit/timeout retries before bubbling up (§6).
+    rate-limit/timeout retries before bubbling up (§6). The retry-attempt count
+    and politeness-delay window are operator-configurable via
+    ``WEB_SEARCH_MAX_ATTEMPTS`` / ``WEB_SEARCH_DELAY_*`` (ToolLimitsSettings).
     """
-    # Per-request politeness delay to avoid IP bans (§6). Lives inside the
-    # retried function so mocked tests (which replace this name) are unaffected.
-    time.sleep(uniform(*_REQUEST_DELAY))
+    limits = _tool_limits()
+    retryer = Retrying(
+        stop=stop_after_attempt(limits.web_search_max_attempts),
+        wait=wait_exponential_jitter(initial=0.4, max=2.0),
+        retry=retry_if_exception_type(
+            (RatelimitException, TimeoutException, DDGSException)
+        ),
+        before_sleep=_log_retry,
+        reraise=True,
+    )
+    for attempt in retryer:
+        with attempt:
+            # Per-request politeness delay to avoid IP bans (§6). Lives inside
+            # the retried scope so mocked tests (which replace this name) are
+            # unaffected.
+            time.sleep(
+                uniform(limits.web_search_delay_min, limits.web_search_delay_max)
+            )
 
-    last_exc: Exception | None = None
-    for backend in _BACKENDS:
-        try:
-            with DDGS() as ddgs:
-                text_kwargs: dict[str, object] = {
-                    "region": region,
-                    "safesearch": safesearch,
-                    "backend": backend,
-                    "max_results": max_results,
-                }
-                if timelimit:
-                    text_kwargs["timelimit"] = timelimit
-                return list(ddgs.text(query, **text_kwargs))
-        except (RatelimitException, TimeoutException, DDGSException) as exc:
-            last_exc = exc
-            logger.warning(f"ddgs backend '{backend}' failed for '{query[:50]}': {exc}")
-            continue
-    raise DDGSException(f"All ddgs backends failed: {last_exc}")
+            last_exc: Exception | None = None
+            for backend in _BACKENDS:
+                try:
+                    with DDGS() as ddgs:
+                        text_kwargs: dict[str, object] = {
+                            "region": region,
+                            "safesearch": safesearch,
+                            "backend": backend,
+                            "max_results": max_results,
+                        }
+                        if timelimit:
+                            text_kwargs["timelimit"] = timelimit
+                        return list(ddgs.text(query, **text_kwargs))
+                except (
+                    RatelimitException,
+                    TimeoutException,
+                    DDGSException,
+                ) as exc:
+                    last_exc = exc
+                    logger.warning(
+                        f"ddgs backend '{backend}' failed for '{query[:50]}': {exc}"
+                    )
+                    continue
+            raise DDGSException(f"All ddgs backends failed: {last_exc}")
+    # Unreachable: Retrying with reraise=True always returns or re-raises
+    # from within the loop above. Present so the return-type checker is satisfied.
+    raise DDGSException("ddgs retry loop exited without a result")
 
 
 async def web_search(

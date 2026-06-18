@@ -11,6 +11,12 @@ hashlib, base64, urllib.parse, html.parser, loguru
 5. Use sensible timeouts for any network operations (httpx with timeout=15.0)
 6. NOT import or use os, sys, subprocess, socket, eval, exec, or any file I/O \
 outside the current working directory
+7. Keep the handler SIMPLE and FLAT — a single async function with linear \
+logic. The safety pipeline rejects any function whose cyclomatic complexity \
+exceeds 20 branches ("Function too complex"). Avoid deep nesting and long \
+if/elif chains; if logic is complex, split it into small module-scope helper \
+functions (each under 20 branches) and prefer early-return validation over \
+elaborate branching.
 
 Respond with a JSON object matching this schema:
 - tool_name: snake_case identifier (e.g. "json_url_parser")

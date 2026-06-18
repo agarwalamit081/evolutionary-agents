@@ -341,6 +341,14 @@ class SandboxExecutor:
         tmp_dir = tempfile.mkdtemp(prefix="turing_pkg_sandbox_")
         venv_dir = Path(tmp_dir) / "venv"
         script_path = Path(tmp_dir) / "script.py"
+        # Operator-configurable via EvolutionSettings (SANDBOX_VENV_CREATE_TIMEOUT
+        # / SANDBOX_PACKAGE_INSTALL_TIMEOUT). getattr-with-default mirrors the
+        # __init__ pattern so root Settings, EvolutionSettings, and test mocks
+        # all resolve.
+        venv_create_timeout = getattr(self._settings, "sandbox_venv_create_timeout", 60)
+        package_install_timeout = getattr(
+            self._settings, "sandbox_package_install_timeout", 120
+        )
 
         try:
             # Create venv
@@ -349,7 +357,7 @@ class SandboxExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.communicate(), timeout=60)
+            await asyncio.wait_for(proc.communicate(), timeout=venv_create_timeout)
 
             # Install packages
             pip_path = str(venv_dir / "bin" / "pip")
@@ -358,7 +366,7 @@ class SandboxExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.communicate(), timeout=120)
+            await asyncio.wait_for(proc.communicate(), timeout=package_install_timeout)
 
             # Write script
             async with aiofiles.open(str(script_path), mode="w") as f:

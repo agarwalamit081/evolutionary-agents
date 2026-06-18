@@ -331,6 +331,81 @@ class TestCheckAndFoldPersistence:
         assert payload["verified_actions"] == {}  # honest: nothing verified
         assert skill_calls[0].kwargs["tags"] == ["folded_memory", "tool", "unverified"]
 
+    @pytest.mark.asyncio
+    async def test_fold_extracts_and_stores_durable_facts(
+        self, foldable_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 5: a fold also mines the episode summary for durable facts via
+        the memory manager, so entity-ish knowledge lands in the fact tier."""
+        from src.memory.folding import MemoryFolder, MemoryFoldResult
+
+        monkeypatch.setattr(MemoryFolder, "should_fold", lambda self, s: True)
+
+        async def _fake_fold(self: MemoryFolder, state: dict[str, Any]) -> MemoryFoldResult:
+            return MemoryFoldResult(
+                episode_memory={"summary": "ingested 1024 rows, all UTC ISO-8601"},
+                working_memory={"summary": "wk"},
+                tool_memory={"summary": "tool"},
+                fold_number=1,
+            )
+
+        monkeypatch.setattr(MemoryFolder, "fold", _fake_fold)
+
+        gateway = MagicMock()
+        memory = MagicMock()
+        memory.store_skill = AsyncMock()
+        memory.extract_and_store_facts = AsyncMock(return_value=3)
+
+        result = await _check_and_fold(foldable_state, gateway, memory, {"enabled": True})  # type: ignore[arg-type]
+        assert result is not None
+
+        # Extraction was invoked with the gateway + the episode narrative, and
+        # stamped with the fold's provenance + the configured cap.
+        memory.extract_and_store_facts.assert_awaited_once()
+        call = memory.extract_and_store_facts.await_args
+        assert call.args[0] is gateway
+        assert "ingested 1024 rows" in call.args[1]
+        assert call.kwargs["source"] == "fold_1_episode"
+        assert call.kwargs["max_facts"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_fold_skips_extraction_when_disabled(
+        self, foldable_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When memory_fact_extraction_enabled is False, no extraction runs."""
+        from types import SimpleNamespace
+
+        from src.memory.folding import MemoryFolder, MemoryFoldResult
+
+        monkeypatch.setattr(MemoryFolder, "should_fold", lambda self, s: True)
+
+        async def _fake_fold(self: MemoryFolder, state: dict[str, Any]) -> MemoryFoldResult:
+            return MemoryFoldResult(
+                episode_memory={"summary": "ep"},
+                working_memory={"summary": "wk"},
+                tool_memory={"summary": "tool"},
+                fold_number=1,
+            )
+
+        monkeypatch.setattr(MemoryFolder, "fold", _fake_fold)
+
+        fake_settings = SimpleNamespace(
+            agent=SimpleNamespace(
+                memory_fact_extraction_enabled=False,
+                memory_fact_max_per_fold=5,
+            )
+        )
+        monkeypatch.setattr("src.config.settings.get_settings", lambda: fake_settings)
+
+        gateway = MagicMock()
+        memory = MagicMock()
+        memory.store_skill = AsyncMock()
+        memory.extract_and_store_facts = AsyncMock(return_value=0)
+
+        result = await _check_and_fold(foldable_state, gateway, memory, {"enabled": True})  # type: ignore[arg-type]
+        assert result is not None
+        memory.extract_and_store_facts.assert_not_awaited()
+
 
 class TestFormatAvailableTools:
     """Tests for _format_available_tools — the inventory that grounds the

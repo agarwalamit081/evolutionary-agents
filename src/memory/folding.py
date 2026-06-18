@@ -24,6 +24,7 @@ import json_repair
 from langchain_core.messages import HumanMessage, RemoveMessage
 from loguru import logger
 
+from src.config.settings import get_settings
 from src.graph.enums import TaskComplexity
 
 if TYPE_CHECKING:
@@ -358,16 +359,17 @@ class MemoryFolder:
         Returns:
             Parsed JSON dict from the LLM response.
         """
+        agent_settings = get_settings().agent
         try:
             response = await self._gateway.acompletion(
                 messages=[{"role": "user", "content": prompt}],
                 complexity=TaskComplexity.TRIVIAL,
-                temperature=0.1,
+                temperature=agent_settings.memory_folding_temperature,
                 # The tool-memory summary is the richest of the three (it embeds
                 # the full tool history), so it is the most likely to truncate
                 # mid-string and yield "Unterminated string" parse errors. Give
                 # it room, and salvage with json_repair below regardless.
-                max_tokens=2048,
+                max_tokens=agent_settings.memory_folding_max_tokens,
             )
             content = response.content.strip()
 

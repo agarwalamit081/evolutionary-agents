@@ -408,7 +408,7 @@ async def _llm_reflect(
             node=NODE_REFLECT,
             goal_text=goal.text if goal else None,
         )
-        messages = build_messages(str(REFLECT_SYSTEM), user_prompt, techniques)
+        messages = build_messages(str(REFLECT_SYSTEM), user_prompt, techniques, node=NODE_REFLECT)
 
         response = await gateway.acompletion(
             messages=messages,
@@ -642,6 +642,38 @@ async def _check_and_fold(
                     )
                 except Exception as exc:
                     logger.debug(f"Failed to persist folded {kind} memory: {exc}")
+
+            # Phase 5: mine the episode summary for durable facts and persist
+            # them to the semantic/fact tier. Best-effort + gated: a gateway
+            # failure yields no facts (extract_and_store_facts never raises),
+            # and the toggle lets an operator disable it. Skipped when the
+            # episode summary itself failed to generate.
+            try:
+                from src.config.settings import get_settings
+
+                agent_cfg = get_settings().agent
+                episode = result.episode_memory
+                if (
+                    agent_cfg.memory_fact_extraction_enabled
+                    and isinstance(episode, dict)
+                    and not episode.get("error")
+                ):
+                    # Combine the goal + episode narrative into the text the
+                    # extractor mines — goal gives the entity domain.
+                    goal_text = state.get("current_goal")
+                    goal_str = goal_text.text if goal_text and hasattr(goal_text, "text") else ""
+                    episode_text = (
+                        f"Goal: {goal_str}\n"
+                        f"Episode: {json.dumps(episode, ensure_ascii=False)}"
+                    )
+                    await memory.extract_and_store_facts(
+                        gateway,
+                        episode_text,
+                        source=f"fold_{result.fold_number}_episode",
+                        max_facts=agent_cfg.memory_fact_max_per_fold,
+                    )
+            except Exception as exc:  # fact extraction must never break a fold
+                logger.debug(f"Fact extraction during fold skipped: {exc}")
 
         return {
             "phase": Phase.REFLECT,

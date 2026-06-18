@@ -17,6 +17,41 @@ def router() -> ModelRouter:
     return ModelRouter(settings)
 
 
+# Provider → settings.llm attribute holding its API key (mirrors
+# ``LLMSettings.get_provider_key``). Lets the F15 routing tests assert the
+# primary-vs-fallback INVARIANT regardless of which model the (tunable)
+# ``COMPLEXITY_TIER_MAP`` names — so an in-flight tier-map experiment (e.g. the
+# battery-04 OpenAI swap) doesn't reduce these to hardcoded-name assertions that
+# flip red every time the map is retuned.
+_PROVIDER_KEY_FIELDS: dict[str, str] = {
+    "openai": "openai_api_key",
+    "anthropic": "anthropic_api_key",
+    "deepseek": "deepseek_api_key",
+    "zai": "zai_api_key",
+    "alibaba": "dashscope_api_key",
+    "google": "google_api_key",
+    "groq": "groq_api_key",
+    "mistral": "mistral_api_key",
+    "moonshot": "moonshot_api_key",
+    "minimax": "minimax_api_key",
+    "openrouter": "openrouter_api_key",
+    "nvidia": "nvidia_api_key",
+}
+
+
+def _set_only_provider_key(settings: Settings, provider: str, value: str | None) -> None:
+    """Clear every provider key, then set exactly ``provider``'s key to ``value``.
+
+    Explicitly nulls all fields so a key inherited from ``.env`` cannot leak in
+    and satisfy a different provider's check.
+    """
+    for field in _PROVIDER_KEY_FIELDS.values():
+        setattr(settings.llm, field, None)
+    field = _PROVIDER_KEY_FIELDS.get(provider)
+    if field is not None:
+        setattr(settings.llm, field, value)
+
+
 class TestModelRouterExtractProvider:
     """Tests for _extract_provider static method."""
 
@@ -73,26 +108,51 @@ class TestModelRouterRoute:
         """F15: route() returns the complexity's primary (chain_key) model when
         its provider key is set — not the first fallback. Previously the primary
         was bypassed: _route_from_chain walked FALLBACK_CHAINS[chain_key], which
-        excludes the primary, so COMPLEX→deepseek-v4-flash silently resolved to
-        claude-haiku-4-5-20251001 (its first fallback with a key)."""
+        excludes the primary, so the configured primary silently resolved to its
+        first fallback with a key. Asserted generically against the current
+        COMPLEXITY_TIER_MAP so a tier-map experiment (battery-04 OpenAI swap)
+        can't flip this red — every provider is keyed, so whichever model the
+        map names as primary must be the one returned."""
+        from src.llm.model_router import COMPLEXITY_TIER_MAP
+
         settings = Settings()
-        settings.llm.deepseek_api_key = "test-deepseek-key"
-        settings.llm.zai_api_key = "test-zai-key"
+        for field in _PROVIDER_KEY_FIELDS.values():
+            setattr(settings.llm, field, "test-key")
         router = ModelRouter(settings)
-        assert router.route(TaskComplexity.COMPLEX) == "deepseek-v4-flash"
-        assert router.route(TaskComplexity.SIMPLE) == "deepseek-v4-flash"
-        assert router.route(TaskComplexity.CRITICAL) == "glm-4.7"
+        for complexity in (TaskComplexity.SIMPLE, TaskComplexity.COMPLEX, TaskComplexity.CRITICAL):
+            _tier, primary = COMPLEXITY_TIER_MAP[complexity]
+            assert router.route(complexity) == primary, (
+                f"{complexity}: primary {primary!r} not returned when its key is set"
+            )
 
     def test_route_falls_to_chain_when_primary_provider_lacks_key(self) -> None:
         """When the primary's provider has no key, route falls back to the
-        chain's first model whose provider does have a key."""
+        chain's first model whose provider does have a key. Asserted generically
+        against the current COMPLEXITY_TIER_MAP + its fallback chain so the test
+        tracks the invariant, not a model name that a tier-map experiment retunes."""
+        from src.config.model_registry import FALLBACK_CHAINS
+        from src.llm.model_router import COMPLEXITY_TIER_MAP
+
         settings = Settings()
-        settings.llm.deepseek_api_key = None
-        settings.llm.anthropic_api_key = "test-anthropic-key"
+        _tier, primary = COMPLEXITY_TIER_MAP[TaskComplexity.COMPLEX]
+        primary_provider = ModelRouter._extract_provider(primary)
+        # First chain model on a DIFFERENT provider than the primary, so keying
+        # it genuinely exercises the fallback path (same-provider members share
+        # the primary's lack of a key).
+        fallback = next(
+            (
+                m
+                for m in FALLBACK_CHAINS.get(primary, [])
+                if ModelRouter._extract_provider(m) != primary_provider
+            ),
+            None,
+        )
+        if fallback is None:
+            pytest.skip("COMPLEX primary's fallback chain has no cross-provider model")
+        _set_only_provider_key(settings, ModelRouter._extract_provider(fallback), "test-key")
         router = ModelRouter(settings)
-        # deepseek-v4-flash (deepseek) primary skipped → first in its chain
-        # (claude-haiku-4-5-20251001) whose provider (anthropic) has a key.
-        assert router.route(TaskComplexity.COMPLEX) == "claude-haiku-4-5-20251001"
+        # Primary skipped (no key); first chain member whose provider has a key wins.
+        assert router.route(TaskComplexity.COMPLEX) == fallback
 
     def test_complexity_tier_map_chain_keys_are_valid(self) -> None:
         """COMPLEXITY_TIER_MAP chain keys exist in FALLBACK_CHAINS."""

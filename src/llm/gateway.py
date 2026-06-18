@@ -464,18 +464,53 @@ class LLMGateway:
                 await self._circuit_breaker.record_failure(
                     attempt_provider, transient=False
                 )
-                # Recoverable tool_choice incompatibility: thinking-mode models
-                # (e.g. deepseek-v4-flash) reject a *forced* tool_choice with a
-                # 400 "Thinking mode does not support this tool_choice". That is
-                # not a provider outage — retry the SAME model once with
-                # tool_choice dropped. The execute-node write-nudge already adds
-                # a strong system-prompt instruction to call the file tool, so
-                # dropping the hard constraint preserves intent without burning
-                # the whole fallback chain on every write-nudge turn.
+                # Recoverable tool_choice / thinking-mode conflict. Thinking-mode
+                # models (e.g. deepseek-v4-flash, thinking ON by default) reject
+                # a *forced* tool_choice with a 400 "Thinking mode does not
+                # support this tool_choice". That is not a provider outage.
+                #
+                # Stage 1 — DeepSeek: the API supports disabling thinking via
+                # extra_body={"thinking":{"type":"disabled"}}. (litellm 1.83.14's
+                # native ``thinking=`` param only accepts "enabled" and silently
+                # drops "disabled", so extra_body is required.) With thinking
+                # disabled the model honors the forced tool_choice — strictly
+                # better than dropping tool_choice, which made deepseek narrate
+                # instead of calling the file tool (9 wasted write-nudges / q4).
+                # Verified empirically: extra_body path → tool_called=True.
+                #
+                # Stage 2 — fallback for any other model/cause: drop tool_choice
+                # and rely on the execute-node write-nudge's system-prompt hint.
                 if tool_choice and "tool_choice" in str(exc).lower():
+                    if attempt_provider == "deepseek":
+                        logger.warning(
+                            f"{attempt_model} rejects forced tool_choice "
+                            f"(thinking-mode); retrying same model with "
+                            f"thinking disabled"
+                        )
+                        retry_kwargs = dict(kwargs)
+                        retry_kwargs["extra_body"] = {
+                            **(kwargs.get("extra_body") or {}),
+                            "thinking": {"type": "disabled"},
+                        }
+                        try:
+                            response = await self._retry_call(messages, **retry_kwargs)
+                            await self._circuit_breaker.record_success(attempt_provider)
+                            return self._parse_response(
+                                response, attempt_model, attempt_provider
+                            )
+                        except Exception as retry_exc:
+                            logger.warning(
+                                f"thinking-disabled retry for {attempt_model} "
+                                f"also failed: {retry_exc.__class__.__name__}: "
+                                f"{retry_exc}"
+                            )
+                            last_error = retry_exc
+
+                    # Fallback (non-deepseek, or thinking-disable didn't work):
+                    # drop tool_choice and rely on the write-nudge system prompt.
                     logger.warning(
-                        f"{attempt_model} rejects forced tool_choice "
-                        f"(thinking-mode); retrying same model without it"
+                        f"{attempt_model} tool_choice conflict unresolved; "
+                        f"retrying same model with tool_choice dropped"
                     )
                     kwargs.pop("tool_choice", None)
                     try:
@@ -486,8 +521,9 @@ class LLMGateway:
                         )
                     except Exception as retry_exc:
                         logger.warning(
-                            f"tool_choice-less retry for {attempt_model} also "
-                            f"failed: {retry_exc.__class__.__name__}: {retry_exc}"
+                            f"tool_choice-less retry for {attempt_model} "
+                            f"also failed: {retry_exc.__class__.__name__}: "
+                            f"{retry_exc}"
                         )
                         last_error = retry_exc
                 else:

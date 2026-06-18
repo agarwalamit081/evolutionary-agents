@@ -475,7 +475,64 @@ class TestQ04TestResultsCountsProbe:
             self._probe_config(), ["results/q04/test_results.json"], {}
         )
         assert res.passed is False
-        assert "no tests executed" in res.evidence["stdout"]
+        assert "pass/fail verdict" in res.evidence["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_overall_status_stub_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """battery-04 q4 qwen false-positive: the orchestrator's test module
+        failed to import (collection error), so it wrote a plausible-looking
+        error report with ``overall_status: "failed"`` and a fabricated
+        ``error_summary`` claiming the q1-q3 deliverables were missing (they
+        were not). The OLD probe only inspected ``data.get('status')`` —
+        ``overall_status`` slipped past the stub guard, so the run declared eval
+        success on a result where ZERO tests executed. The stub guard must scan
+        every status-like top-level key."""
+        root = _patch_roots(monkeypatch, tmp_path)
+        q04 = Path(root, "q04", "test_results.json")
+        q04.parent.mkdir(parents=True, exist_ok=True)
+        q04.write_text(
+            json.dumps(
+                {
+                    "overall_status": "failed",
+                    "summary": {"total_tests": 0, "passed": 0, "failed": 0, "errors": 1},
+                    "error_summary": {
+                        "primary_error": "Module import failed during test collection",
+                        "missing_files": ["results/q01/normalized.csv"],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        res = await ExecutionCheck().check(
+            self._probe_config(), ["results/q04/test_results.json"], {}
+        )
+        assert res.passed is False
+        assert "stub" in res.evidence["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_all_errors_without_verdict_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A collection/import failure reports only ``errors`` (setup/collection
+        outcomes), never a pass or fail verdict — no test ran to completion. The
+        OLD 'tests ran' gate counted errors toward execution, so
+        ``{passed:0, failed:0, errors:1}`` passed. The probe must require at
+        least one concrete PASS or FAIL verdict. No top-level status stub here,
+        so this isolates the verdict gate from the stub guard."""
+        root = _patch_roots(monkeypatch, tmp_path)
+        q04 = Path(root, "q04", "test_results.json")
+        q04.parent.mkdir(parents=True, exist_ok=True)
+        q04.write_text(
+            json.dumps({"summary": {"passed": 0, "failed": 0, "errors": 1}}),
+            encoding="utf-8",
+        )
+        res = await ExecutionCheck().check(
+            self._probe_config(), ["results/q04/test_results.json"], {}
+        )
+        assert res.passed is False
+        assert "pass/fail verdict" in res.evidence["stdout"]
 
 
 

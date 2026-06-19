@@ -55,8 +55,10 @@ results/
 .claude/
 CLAUDE.md
 
-# Internal design documents
+# Internal/local-only docs — public repo carries only docs/ARCHITECTURE.md
 docs/design-docs/
+docs/*.md
+!docs/ARCHITECTURE.md
 
 # Unrelated project files
 scanner_module/

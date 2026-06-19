@@ -363,7 +363,7 @@ The agent can also **create new tools at runtime** when it detects a capability 
 
 ### Sub-Agent Delegation
 
-The agent can also **spawn specialized sub-agents** as isolated LangGraph subgraphs. When the reflect node detects a need for specialized processing, the `agent_spawn` node designs a sub-agent via LLM, validates it through the safety pipeline, persists it to PostgreSQL, and registers it for immediate use. The `delegate` node then routes subtasks to the appropriate sub-agent, tracks performance with rolling metrics (success rate, cost, latency, quality), and auto-deprecates underperformers. Sub-agents are optimized over time by the main agent's evolution engine. Max 3 sub-agents per run. See `docs/ARCHITECTURE.md`, `docs/design-docs/` for details.
+The agent can also **spawn specialized sub-agents** as isolated LangGraph subgraphs. When the reflect node detects a need for specialized processing, the `agent_spawn` node designs a sub-agent via LLM, validates it through the safety pipeline, persists it to PostgreSQL, and registers it for immediate use. The `delegate` node then routes subtasks to the appropriate sub-agent, tracks performance with rolling metrics (success rate, cost, latency, quality), and auto-deprecates underperformers. Sub-agents are optimized over time by the main agent's evolution engine. Max 3 sub-agents per run. See `docs/ARCHITECTURE.md` for details.
 
 ---
 
@@ -379,7 +379,7 @@ The agent can also **spawn specialized sub-agents** as isolated LangGraph subgra
 
 Background **consolidation** ("dreaming") moves data between tiers: episodic memories in cold storage are periodically analyzed for patterns, which are crystallized into skills in warm storage.
 
-**Autonomous memory folding** keeps long-running tasks within context limits: when the live conversation grows past a token/message threshold, the `reflect` node compresses it in parallel into three structured summaries — episode (key events/decisions), working (current goals/next actions), and tool (usage patterns/rules). Folding genuinely shrinks context (LangGraph `RemoveMessage` deletes the old messages), persists the summaries to warm memory, and recalls them on later runs — bounded by `MEMORY_FOLDING_MAX_FOLDS` per run. See [`docs/design-docs/08-memory-system.md`](docs/design-docs/08-memory-system.md) §13.
+**Autonomous memory folding** keeps long-running tasks within context limits: when the live conversation grows past a token/message threshold, the `reflect` node compresses it in parallel into three structured summaries — episode (key events/decisions), working (current goals/next actions), and tool (usage patterns/rules). Folding genuinely shrinks context (LangGraph `RemoveMessage` deletes the old messages), persists the summaries to warm memory, and recalls them on later runs — bounded by `MEMORY_FOLDING_MAX_FOLDS` per run. See `docs/ARCHITECTURE.md` for the memory-system design.
 
 ---
 
@@ -451,7 +451,7 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 
 ## Architecture Documentation
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and `docs/design-docs/` for the full architectural narrative covering three generations of the evolutionary agent, detailed Mermaid diagrams for tool creation and sub-agent spawning pipelines, key findings from testing, and design decisions.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full architectural narrative covering three generations of the evolutionary agent, detailed Mermaid diagrams for tool creation and sub-agent spawning pipelines, key findings from testing, and design decisions.
 
 ## License
 

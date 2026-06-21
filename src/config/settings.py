@@ -756,6 +756,21 @@ class AgentSettings(BaseSettings):
     # scores. Gated so a DB hiccup in the recorder never breaks a run.
     # Env: TOOL_METRICS_ENABLED.
     tool_metrics_enabled: bool = True
+    # Tool retrieval-before-selection (findings-05; default OFF). When true,
+    # execute/plan no longer inject EVERY active tool into the prompt — instead
+    # they keep the built-in tools (always) plus the top-k dynamically-created
+    # tools whose capability embeddings are semantically nearest the current
+    # goal/step. Reuses the existing capability_embedding index for RECALL (not
+    # just dedup): the MAX_ACTIVE_TOOLS=25 cap is a symptom of injecting all;
+    # retrieval bounds the prompt to what's relevant. Falls back to the full
+    # set when disabled, when the embedding provider is unavailable (hash
+    # fallback is not semantically meaningful), or on any retrieval error — so
+    # behavior is unchanged until toggled on and never starves the run.
+    # Built-ins are always included because they are not in the embedding index
+    # (only tool_create/agent_spawn persist embeddings). Env:
+    # TOOL_RETRIEVAL_ENABLED, TOOL_RETRIEVAL_TOP_K.
+    tool_retrieval_enabled: bool = False
+    tool_retrieval_top_k: int = 8
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"

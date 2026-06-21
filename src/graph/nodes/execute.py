@@ -445,8 +445,13 @@ async def _llm_execute(
             f"Execute step {step_index + 1}/{len(plan_steps)}: {step_description}"
         )
 
-        # Get tool definitions for function calling
-        tool_defs = tools.list_tools()
+        # Get tool definitions for function calling. When tool retrieval is
+        # enabled (findings-05), select_tools_for_query returns the built-ins
+        # plus the top-k dynamic tools nearest this step instead of every active
+        # tool; otherwise the full set (the default, unchanged behavior).
+        from src.tools.selection import select_tools_for_query
+
+        tool_defs = await select_tools_for_query(step_description, tools, get_settings())
 
         # A step that declares a concrete output file is a write-step: its
         # deliverable must be produced via a file-output tool (file_writer),

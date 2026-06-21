@@ -684,6 +684,9 @@ class TestCodeExecutorWriteSatisfiesWriteStep:
                 workspace_root=str(tmp_path / "workspace"),
                 results_per_run_subdir=False,
                 max_write_nudges=2,
+                # select_tools_for_query (findings-05) reads these off settings.agent.
+                tool_retrieval_enabled=False,
+                tool_retrieval_top_k=8,
             )
         )
 

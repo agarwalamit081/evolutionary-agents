@@ -194,6 +194,8 @@ async def _llm_plan(
         )
         from src.graph.schemas import GeneratedPlan
         from src.llm.structured_output import StructuredOutputManager
+        from src.config import get_settings
+        from src.tools.selection import select_tools_for_query
 
         # Build memory context if available
         memories = state.get("retrieved_memories", [])
@@ -220,9 +222,13 @@ async def _llm_plan(
             memory_context=memory_ctx,
             correction_context=correction_ctx,
         )
-        # Build dynamic tool list for the plan prompt
+        # Build dynamic tool list for the plan prompt. When tool retrieval is
+        # enabled (findings-05), select_tools_for_query returns the built-ins
+        # plus the top-k dynamic tools nearest the goal instead of every active
+        # tool; otherwise the full set (the default, unchanged behavior).
         if tools is not None:
-            tool_names = [t["function"]["name"] for t in tools.list_tools()]
+            selected = await select_tools_for_query(goal.text, tools, get_settings())
+            tool_names = [t["function"]["name"] for t in selected]
         else:
             tool_names = [
                 "code_executor", "web_search", "file_reader",

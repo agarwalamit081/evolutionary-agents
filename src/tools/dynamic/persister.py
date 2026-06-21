@@ -203,6 +203,28 @@ class ToolPersister:
             logger.debug(f"Tool capability find_similar failed: {e}")
             return []
 
+    async def retrieve_tools(
+        self,
+        query_embedding: list[float],
+        top_k: int = 8,
+    ) -> list[str]:
+        """RECALL (findings-05): the top-k active tool NAMES ranked by capability
+        cosine similarity to a query embedding — the recall counterpart to the
+        dedup-only ``find_similar``.
+
+        ``threshold=0.0`` so every embedded tool is eligible; the HNSW order +
+        ``limit`` do the ranking. Returns names only (the caller resolves them
+        via ``ToolRegistry.list_tools(names)``). Built-in tools are NOT here
+        (they have no stored embedding — only ``tool_create``/``agent_spawn``
+        persist embeddings) so the selection layer adds them unconditionally.
+        Best-effort: ``[]`` on any DB error (the caller then falls back to the
+        full tool set, never starving the run).
+        """
+        matches = await self.find_similar(
+            query_embedding, threshold=0.0, limit=top_k
+        )
+        return [m["tool_name"] for m in matches]
+
     async def retire(self, names: list[str]) -> int:
         """Mark named generated tools ``is_active=False`` in the DB.
 

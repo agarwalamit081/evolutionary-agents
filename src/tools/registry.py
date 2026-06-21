@@ -102,12 +102,19 @@ class ToolRegistry:
         tool = self._tools.get(name)
         return tool["handler"] if tool else None
 
-    def list_tools(self) -> list[dict[str, Any]]:
-        """List all registered tools (without handlers, for LLM consumption).
+    def list_tools(self, names: list[str] | None = None) -> list[dict[str, Any]]:
+        """List registered tools (without handlers, for LLM consumption).
+
+        Args:
+            names: When given, restrict the result to these tool names (in
+                registry order). Unknown names are silently skipped. ``None``
+                (default) returns every registered tool — the historical
+                behavior, used everywhere retrieval is disabled.
 
         Returns:
             List of tool descriptors suitable for bind_tools().
         """
+        wanted = set(names) if names is not None else None
         return [
             {
                 "type": "function",
@@ -118,6 +125,7 @@ class ToolRegistry:
                 },
             }
             for t in self._tools.values()
+            if wanted is None or t["name"] in wanted
         ]
 
     def list_names(self) -> list[str]:

@@ -90,6 +90,7 @@ class TestRetrieveMemoryNode:
         memory.retrieve_skills = AsyncMock(
             return_value=[
                 {
+                    "id": "skill-uuid-1",
                     "type": "skill",
                     "name": "utc_normalize",
                     "content": "pd.to_datetime(ts, utc=True)",
@@ -105,6 +106,9 @@ class TestRetrieveMemoryNode:
         assert len(skill_entries) == 1
         assert skill_entries[0]["content"] == "pd.to_datetime(ts, utc=True)"
         assert skill_entries[0]["score"] == pytest.approx(0.8)
+        # The recalled skill's id is surfaced so store_memory_node can feed the
+        # skill-fitness EMA (findings-05 D).
+        assert result["recalled_skill_ids"] == ["skill-uuid-1"]
 
 
 
@@ -160,6 +164,68 @@ class TestStoreMemoryNode:
 
         mock_memory.store_skill.assert_called_once()
         assert result["phase"] == Phase.COMPLETE
+
+    @pytest.mark.asyncio
+    async def test_store_updates_skill_fitness_on_success(self, sample_state: dict) -> None:
+        """findings-05 D: recalled skills get success=True when the run completes."""
+        memory = MagicMock()
+        memory.store_observation = AsyncMock(return_value=None)
+        memory.store_skill = AsyncMock(return_value="uuid")
+        update_fitness = AsyncMock(return_value=None)
+        memory.update_skill_fitness = update_fitness
+
+        state = dict(sample_state)
+        state["memory_observations"] = []
+        state["reflection"] = None
+        state["is_complete"] = True
+        state["recalled_skill_ids"] = ["s1", "s2"]
+
+        result = await store_memory_node(state, memory=memory)
+
+        assert result["phase"] == Phase.COMPLETE
+        # Each recalled skill credited with the run's success.
+        assert update_fitness.await_count == 2
+        successes = [call.kwargs["success"] for call in update_fitness.await_args_list]
+        assert successes == [True, True]
+
+    @pytest.mark.asyncio
+    async def test_store_updates_skill_fitness_on_failure(self, sample_state: dict) -> None:
+        """findings-05 D: recalled skills get success=False (decay) on an incomplete run."""
+        memory = MagicMock()
+        memory.store_observation = AsyncMock(return_value=None)
+        memory.store_skill = AsyncMock(return_value="uuid")
+        update_fitness = AsyncMock(return_value=None)
+        memory.update_skill_fitness = update_fitness
+
+        state = dict(sample_state)
+        state["memory_observations"] = []
+        state["reflection"] = None
+        state["is_complete"] = False
+        state["recalled_skill_ids"] = ["s1"]
+
+        result = await store_memory_node(state, memory=memory)
+
+        assert result["phase"] == Phase.HITL_GATE
+        update_fitness.assert_awaited_once_with("s1", success=False)
+
+    @pytest.mark.asyncio
+    async def test_store_no_recalled_skills_skips_fitness(self, sample_state: dict) -> None:
+        """No recalled skills → update_skill_fitness never called."""
+        memory = MagicMock()
+        memory.store_observation = AsyncMock(return_value=None)
+        memory.store_skill = AsyncMock(return_value="uuid")
+        memory.update_skill_fitness = AsyncMock(return_value=None)
+
+        state = dict(sample_state)
+        state["memory_observations"] = []
+        state["reflection"] = None
+        state["is_complete"] = True
+        # No recalled_skill_ids in state.
+
+        result = await store_memory_node(state, memory=memory)
+
+        assert result["phase"] == Phase.COMPLETE
+        memory.update_skill_fitness.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_store_observation_failure_graceful(self, sample_state: dict) -> None:

@@ -55,6 +55,13 @@ class AgentState(TypedDict, total=False):
     # ─── Memory ─────────────────────────────────────────────────────────
     retrieved_memories: list[dict[str, Any]]
     memory_observations: Annotated[list[str], operator.add]
+    # Skill ids recalled this run (semantic tier, findings-05 C). Populated by
+    # ``retrieve_memory_node``; consumed by ``store_memory_node`` to feed the EMA
+    # in ``WarmMemoryStore.update_fitness`` — the signal governance fitness-
+    # retirement + recall ranking improve on. Overwrite (no reducer): the skills
+    # recalled in the final plan iteration are credited for the run's outcome —
+    # one success signal per run, no skill↔tool mapping needed (findings-05 D).
+    recalled_skill_ids: list[str]
 
     # ─── Reflection ─────────────────────────────────────────────────────
     reflection: ReflectionResult | None

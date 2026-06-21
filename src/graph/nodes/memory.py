@@ -37,6 +37,9 @@ async def retrieve_memory_node(
     logger.info(f"Retrieving memories for: {goal_text[:60]}...")
 
     retrieved: list[dict[str, Any]] = []
+    # Skill ids recalled this run — surfaced to state so store_memory_node can
+    # feed the skill-fitness EMA (findings-05 D). Empty when nothing recalled.
+    recalled_skill_ids: list[str] = []
 
     if memory is not None:
         try:
@@ -125,6 +128,9 @@ async def retrieve_memory_node(
         try:
             skills = await memory.retrieve_skills(query=goal_text, limit=3)
             for entry in skills:
+                skill_id = entry.get("id")
+                if skill_id:
+                    recalled_skill_ids.append(str(skill_id))
                 retrieved.append({
                     "content": entry.get("content", ""),
                     "tier": "skill",
@@ -142,6 +148,7 @@ async def retrieve_memory_node(
     return {
         "phase": Phase.EXECUTE,
         "retrieved_memories": retrieved,
+        "recalled_skill_ids": recalled_skill_ids,
     }
 
 
@@ -201,6 +208,20 @@ async def store_memory_node(
                 logger.warning(f"Failed to store lessons: {e}")
 
         logger.info(f"Stored {stored_count}/{observations_count} observations to memory")
+
+        # Feed the skill-fitness EMA (findings-05 D). Each skill recalled this
+        # run (retrieve_memory_node populated recalled_skill_ids) gets
+        # success=is_complete — a completed run bumps fitness, an incomplete one
+        # decays it — the signal governance fitness-retirement + semantic recall
+        # ranking improve on. ``is_complete`` is the durable success signal
+        # verify persists (``goal_satisfied`` is verify-local, not in state).
+        # Non-fatal (CostTracker-resilience pattern): a hiccup on one skill
+        # never aborts the terminal sink; no skill↔tool mapping needed.
+        for skill_id in state.get("recalled_skill_ids", []):
+            try:
+                await memory.update_skill_fitness(str(skill_id), success=is_complete)
+            except Exception as e:
+                logger.debug(f"Skill fitness update skipped: {e}")
     else:
         logger.debug("No MemoryManager available, skipping memory storage")
 

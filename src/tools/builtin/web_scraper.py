@@ -28,7 +28,21 @@ import httpx
 import tiktoken
 import trafilatura
 from loguru import logger
-from markdownify import markdownify
+
+# markdownify is an OPTIONAL fallback (HTML→markdown for pages trafilatura can't
+# parse). It is imported DEFENSIVELY so a missing optional extraction lib NEVER
+# crashes graph build: an eager top-level ``from markdownify import ...`` made
+# the entire agent fail to start on EVERY goal whenever the dep was absent (Bug
+# A — the worker's run executor died at iter 0 with ModuleNotFoundError before
+# any node ran). When absent, extraction degrades to trafilatura-only
+# (see ``_extract_markdown``).
+try:
+    from markdownify import markdownify as _markdownify
+
+    _MARKDOWNIFY_AVAILABLE = True
+except ModuleNotFoundError:  # optional fallback dep not installed
+    _markdownify = None  # type: ignore[assignment]
+    _MARKDOWNIFY_AVAILABLE = False
 
 from src.config.settings import get_settings
 from src.tools.builtin._net_safety import assert_public_host
@@ -194,18 +208,25 @@ def _fetch_html(url: str, timeout: float, max_bytes: int) -> str:
 
 
 def _extract_markdown(html: str) -> str:
-    """Main-content markdown via trafilatura, with a markdownify fallback."""
+    """Main-content markdown via trafilatura, with an optional markdownify fallback.
+
+    markdownify is the fallback for pages trafilatura can't parse; it is OPTIONAL
+    (imported defensively at module top). When absent, this returns trafilatura's
+    result (or ``""`` when trafilatura also yielded nothing) — a missing optional
+    fallback must never raise, so a graph build never fails on it (Bug A).
+    """
     extracted = trafilatura.extract(
         html, output_format="markdown", include_tables=True, include_links=True
     )
     if extracted and extracted.strip():
         return extracted
-    try:
-        alt = markdownify(html)
-        if alt and alt.strip():
-            return alt
-    except Exception:
-        pass
+    if _MARKDOWNIFY_AVAILABLE and _markdownify is not None:
+        try:
+            alt = _markdownify(html)
+            if alt and alt.strip():
+                return alt
+        except Exception:
+            pass
     return ""
 
 

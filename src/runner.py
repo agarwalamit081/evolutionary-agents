@@ -377,6 +377,18 @@ async def execute_run(
                 await cost_session_cm.__aexit__(None, None, None)
             except Exception as e:
                 logger.debug(f"Cost session close skipped: {e}")
+        # Release the checkpointer's dedicated connection so a long-lived
+        # worker process doesn't leak one Postgres connection per run. The
+        # connection is bound to saver.conn (opened directly in create_checkpointer
+        # — NOT via a detached from_conn_string CM, which closes it on GC). No-op
+        # when there is no checkpointer. Never raises out of finally.
+        if checkpointer is not None:
+            try:
+                from src.graph.checkpoint import close_checkpointer
+
+                await close_checkpointer(checkpointer)
+            except Exception as e:
+                logger.debug(f"Checkpointer close skipped: {e}")
 
     # Save results file to results/ directory
     try:

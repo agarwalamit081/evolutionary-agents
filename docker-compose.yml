@@ -17,6 +17,15 @@ x-agent-common: &agent-common
     MEILISEARCH_KEY: ${MEILISEARCH_KEY:-}
     WORKSPACE_ROOT: /home/turing/.turing/workspace
     RESULTS_ROOT: /home/turing/.turing/results
+    # Phase 3b/c no-DinD: every code-exec role routes generated code through the
+    # remote runner (the worker has NO Docker socket). Forced here — it OVERRIDES
+    # .env — precisely because the container topology has no socket: letting .env
+    # select docker mode would silently fall back to a host subprocess and defeat
+    # the isolation goal. Host runs (`python main.py`) keep honoring whatever
+    # CODE_EXECUTOR_MODE / EVOLUTION_SANDBOX_MODE .env sets (default: subprocess).
+    CODE_EXECUTOR_MODE: runner
+    EVOLUTION_SANDBOX_MODE: runner
+    RUNNER_URL: http://runner:8090
   depends_on:
     postgres:
       condition: service_healthy
@@ -25,6 +34,10 @@ x-agent-common: &agent-common
     searxng:
       condition: service_started
     meilisearch:
+      condition: service_healthy
+    # Phase 3b/c: code-exec roles route generated code to the runner; waiting for
+    # it healthy avoids a first-code-exec host-subprocess fallback at startup.
+    runner:
       condition: service_healthy
   volumes:
     - turing-workspace:/home/turing/.turing
@@ -165,23 +178,60 @@ services:
     volumes:
       # Same persisted workspace/logs as the api (+ agent-cli) so deliverables a
       # worker writes survive restarts and are visible to the api (explicit list
-      # replaces the anchor's volumes, so both are re-declared here).
+      # replaces the anchor's volumes, so both are re-declared here). The worker
+      # no longer mounts docker.sock — generated code now runs in the remote
+      # no-DinD runner (Phase 3b/c), reached over turing-runner-net.
       - turing-workspace:/home/turing/.turing
       - turing-logs:/home/turing/logs
-      # STAGED (owner 2026-06-21): the worker KEEPS Docker-socket access so
-      # Phase-2c isolated code-exec (CODE_EXECUTOR_MODE=docker) still works — it
-      # spawns ephemeral turing-toolbox sandbox containers. The non-root turing
-      # user needs a supplementary group matching the host docker gid to read
-      # the socket: set DOCKER_GID=$(getent group docker | cut -d: -f3) and the
-      # group_add below grants it. Default code-exec is host-subprocess (no
-      # socket); docker mode is opt-in. The remote no-DinD runner (RunnerClient)
-      # that removes this mount is a deferred follow-up (P3b/c). SECURITY NOTE:
-      # a socket mount ≈ host root, so this is the tradeoff the staged split
-      # accepts — generated code runs inside turing-toolbox (network-off,
-      # read-only, mem-limited), not directly on the host daemon.
-      - /var/run/docker.sock:/var/run/docker.sock
-    group_add:
-      - "${DOCKER_GID:-0}"
+    networks:
+      # turing-net for postgres/redis/searxng/meili/api; turing-runner-net to
+      # reach the no-DinD code-exec runner (worker has NO Docker socket).
+      - turing-net
+      - turing-runner-net
+
+  # ─── Phase 3b/c — remote no-DinD code-execution runner (#218/#219) ──────
+  # The worker's single sink for generated code: both code_executor (untrusted
+  # LLM one-off code) and the evolution sandbox (statically vetted code) POST
+  # here over HTTP. The worker needs NO Docker socket (no Docker-in-Docker) — the
+  # disposable container itself is the isolation boundary (per-invocation
+  # gVisor/Kata hardening is a Phase-5 doc item).
+  #
+  # LEAST-PRIVILEGE: NO env_file, NO DATABASE_URL / REDIS_URL / search keys — it
+  # reads only RUNNER_* env (its results dir + timeout cap). NO internet egress:
+  # it lives on the internal-only turing-runner-net. :8090 is exposed to the
+  # internal network only (NOT mapped to a host port).
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    image: turing-runner:latest
+    environment:
+      RUNNER_RESULTS_ROOT: /home/turing/.turing/results
+      RUNNER_MAX_TIMEOUT_S: "300"
+    volumes:
+      # Shared workspace RW so a script's results/<file> writes are visible to the
+      # worker and land in the same persisted volume the worker/api read. logs for
+      # symmetry. UID ALIGNMENT: both this image and the main Dockerfile create the
+      # `turing` user via `useradd -m -r turing` from the same python:3.12-slim
+      # base, so they resolve to the SAME uid and shared-volume writes interoperate
+      # (a runtime uid-mismatch smoke is a Phase-5 hardening item).
+      - turing-workspace:/home/turing/.turing
+      - turing-logs:/home/turing/logs
+    expose:
+      - "8090"   # internal only — NOT mapped to a host port (no egress path)
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c 'import urllib.request;urllib.request.urlopen(\"http://127.0.0.1:8090/health\",timeout=2).read()'",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - turing-runner-net
+    restart: unless-stopped
 
   # The CLI-in-container path: one-off / smoke / manual runs via
   # `docker compose --profile cli run --rm agent --goal "..."`. Profile-gated so
@@ -191,6 +241,11 @@ services:
     <<: *agent-common
     profiles: ["cli"]
     container_name: turing-agent
+    networks:
+      # CLI smoke runs inherit CODE_EXECUTOR_MODE=runner from the anchor and route
+      # code-exec through the runner too, so reach it on turing-runner-net.
+      - turing-net
+      - turing-runner-net
     # Inherits the Dockerfile CMD (python main.py --interactive); extra args
     # pass through on `docker compose --profile cli run agent --goal "..."`.
 
@@ -215,3 +270,10 @@ volumes:
 networks:
   turing-net:
     driver: bridge
+  # Phase 3b/c — runner-only, internal (NO internet egress). Only the worker,
+  # agent-cli, and runner attach here; the runner has NO other network, so it is
+  # fully egress-isolated from the internet (postgres/redis/searxng/meili stay on
+  # turing-net, which the runner is NOT on).
+  turing-runner-net:
+    driver: bridge
+    internal: true

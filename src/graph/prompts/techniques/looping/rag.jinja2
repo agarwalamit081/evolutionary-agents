@@ -1,0 +1,16 @@
+{# RAG: Retrieval-augmented generation #}
+Answer using retrieved context. Distinguish retrieved facts from your knowledge.
+
+{% if retrieved_documents %}
+Retrieved context:
+{% for doc in retrieved_documents %}
+[{{ loop.index }}] {{ doc }}
+{% endfor %}
+{% else %}
+Context:
+No specific documents retrieved for this query.
+{% endif %}
+
+Query: {{ user_input }}
+
+Answer using ONLY the context above. Cite sources [n]. If the context doesn't contain the answer, state that explicitly.

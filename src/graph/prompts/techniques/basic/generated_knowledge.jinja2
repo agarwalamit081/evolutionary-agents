@@ -1,0 +1,24 @@
+{# Generated Knowledge: Produce relevant facts before attempting to answer #}
+Objective: {{ objective|default("Generate relevant background knowledge first, then use it to answer the query.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+Do not answer the query immediately. First, retrieve or generate the factual foundation required to answer it accurately.
+
+<knowledge_generation>
+List 3-5 specific, factual statements, definitions, or background concepts that are strictly necessary to answer this query.
+Format:
+- [Fact 1]: <Statement> (Confidence: High/Medium/Low)
+- [Fact 2]: <Statement> (Confidence: High/Medium/Low)
+</knowledge_generation>
+
+<knowledge_application>
+Using ONLY the generated knowledge above (and avoiding unsupported assumptions), construct the answer to the query.
+</knowledge_application>
+
+<final_answer>
+Provide the final answer, explicitly citing which generated facts support your conclusion.
+</final_answer>

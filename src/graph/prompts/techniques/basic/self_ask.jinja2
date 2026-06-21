@@ -1,0 +1,28 @@
+{# Self-Ask: Model questions itself explicitly to bridge knowledge gaps #}
+Objective: {{ objective|default("Break down the query into necessary sub-questions, answer them, and synthesize.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+1. Identify the core question and the intermediate knowledge required to answer it.
+2. Generate 2-4 specific, answerable sub-questions.
+3. Answer each sub-question sequentially using available context.
+4. Synthesize the sub-answers into a comprehensive final answer.
+
+<sub_questions>
+1. ...
+2. ...
+3. ...
+</sub_questions>
+
+<sub_answers>
+1. ...
+2. ...
+3. ...
+</sub_answers>
+
+<final_answer>
+Synthesized conclusion based strictly on the sub-answers above.
+</final_answer>

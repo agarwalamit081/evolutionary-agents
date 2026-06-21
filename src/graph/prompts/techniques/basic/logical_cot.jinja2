@@ -1,0 +1,24 @@
+{# Logical CoT: Step-by-step reasoning with explicit validity checks #}
+Objective: {{ objective|default("Perform Chain of Thought reasoning with explicit validity checks at each step.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+Break down the reasoning into discrete, verifiable logical steps.
+
+<premises>
+List the foundational facts or givens from the query.
+</premises>
+
+<derivation_steps>
+For each step in your reasoning, provide:
+- Step N: <The logical statement or deduction>
+- Justification: <Why this step is valid based on previous steps or external facts>
+- Validity Check: <Confirm this step does not introduce fallacies or unwarranted assumptions>
+</derivation_steps>
+
+<final_answer>
+If all validity checks pass, state the final conclusion. If a validity check fails, backtrack and revise the derivation.
+</final_answer>

@@ -1,0 +1,19 @@
+{# Echo Prompting: Restate, clarify assumptions, then answer #}
+Objective: {{ objective|default("Ensure perfect alignment with the user's intent by restating and clarifying before answering.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+1. First, repeat and rephrase the query in your own words to confirm understanding.
+2. Identify any implicit assumptions or ambiguities in the query and state how you are resolving them.
+3. Finally, provide the comprehensive answer based on your clarified understanding.
+
+<echo_and_rephrase>
+Repeat and rephrase the query to confirm understanding, then identify assumptions and ambiguities
+</echo_and_rephrase>
+
+<final_answer>
+Your comprehensive answer based on the clarified understanding
+</final_answer>

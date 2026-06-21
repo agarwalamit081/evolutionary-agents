@@ -1,0 +1,21 @@
+{# Step-Back Prompting: Abstract high-level principles before specific application #}
+Objective: {{ objective|default("Abstract to high-level principles first, then apply them to the specific query.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+Do not answer the specific query immediately. First, step back to identify the broader category or fundamental principle at play.
+
+<step_back_abstraction>
+What general principle, scientific law, framework, or high-level concept underlies this specific query? State it clearly.
+</step_back_abstraction>
+
+<principle_application>
+Now, apply that abstracted principle directly to the specific details of the <query> to derive the answer.
+</principle_application>
+
+<final_answer>
+Provide the final, synthesized answer based on the applied principle.
+</final_answer>

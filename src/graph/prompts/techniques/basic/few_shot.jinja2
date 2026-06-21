@@ -1,0 +1,33 @@
+{# Few-shot: Multiple examples to demonstrate pattern #}
+You are an expert AI assistant. Answer the following query by following the pattern shown in the examples.
+
+<examples>
+{% if examples %}
+{% for ex in examples %}
+Example {{ loop.index }}:
+Question: {{ ex.input }}
+Answer: {{ ex.output }}
+
+{% endfor %}
+{% else %}
+Example 1:
+Question: What is 15% of 200?
+Answer: 30
+
+Example 2:
+Question: If 3 apples cost $6, how much do 5 apples cost?
+Answer: $10
+
+Example 3:
+Question: A car travels 120 miles in 2 hours. What is its speed?
+Answer: 60 mph
+{% endif %}
+</examples>
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+<answer>
+Your answer here
+</answer>

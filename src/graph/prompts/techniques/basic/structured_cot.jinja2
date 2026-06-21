@@ -1,0 +1,25 @@
+{# Structured CoT: Rigid, template-enforced reasoning structure #}
+Objective: {{ objective|default("Follow a strict, predefined reasoning structure to ensure comprehensive analysis.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+You MUST follow this exact structural template. Do not deviate from the section order or naming.
+
+<analysis>
+Extract and list all relevant facts, constraints, and variables explicitly stated or implied in the query.
+</analysis>
+
+<reasoning>
+Perform step-by-step logical deduction based strictly on the <analysis> section. Show your work clearly.
+</reasoning>
+
+<uncertainty_flag>
+(Optional) Flag any steps where confidence is low or assumptions were made. If none, state "None".
+</uncertainty_flag>
+
+<final_answer>
+Provide the concise, definitive conclusion derived from the reasoning.
+</final_answer>

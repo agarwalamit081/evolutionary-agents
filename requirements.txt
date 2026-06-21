@@ -1,0 +1,109 @@
+# ─── Core Framework ──────────────────────────────────────────────
+langchain==1.3.0
+langchain-openai==1.1.10            # ONLY for bind_tools() — not direct LLM calls
+langchain-anthropic==1.3.5          # ONLY for bind_tools() — not direct LLM calls
+langchain-community==0.4.1
+langchain-text-splitters==1.1.2
+langgraph==1.2.0
+langgraph-prebuilt==1.1.0
+langgraph-checkpoint-postgres==3.1.0
+langgraph-checkpoint-sqlite==3.1.0  # Local development + testing only
+langchain-mcp-adapters==0.2.2
+
+# ─── LLM Gateway ────────────────────────────────────────────────
+litellm==1.83.14                    # PRIMARY — all chat completions go through here
+# Docker installs litellm with --no-deps (its metadata over-pins fastapi/uvicorn/
+# orjson/rich/prometheus/opentelemetry/aiohttp/click/pypdf to old exact versions;
+# the working env deliberately runs newer ones — see Dockerfile). litellm base deps
+# that no OTHER requirement pulls in are pinned here so they survive the --no-deps
+# install: fastuuid (litellm/_uuid.py imports it eagerly) and tokenizers
+# (litellm/utils.py: `from tokenizers import Tokenizer` — was previously pulled by
+# transformers, now removed to slim the image).
+fastuuid==0.14.0
+tokenizers==0.22.2
+openai==2.24.0                      # ONLY for structured outputs, batch API, fine-tuning
+
+# ─── Database & Persistence ─────────────────────────────────────
+sqlalchemy==2.0.49
+asyncpg==0.31.0
+alembic==1.18.4
+pgvector==0.4.2
+redis==7.4.0
+aiosqlite==0.21.0                   # Local development + testing only
+sqlite-vec==0.1.9                   # Local vector search without Postgres
+
+# ─── Configuration ──────────────────────────────────────────────
+pydantic==2.12.5
+pydantic-settings==2.14.1
+python-dotenv==1.2.2
+
+# ─── Resilience & Rate Limiting ─────────────────────────────────
+tenacity==8.5.0
+backoff==2.2.1
+aiolimiter==1.2.1
+
+# ─── Async I/O ──────────────────────────────────────────────────
+httpx==0.28.1
+httpx-sse==0.4.3
+aiohttp==3.13.3
+aiofiles==25.1.0
+
+# ─── Serialization ──────────────────────────────────────────────
+orjson==3.11.9
+msgspec==0.21.1                     # 10x faster than orjson for LLM output streams
+
+# ─── Logging & Observability ────────────────────────────────────
+loguru==0.7.3
+structlog==25.5.0
+opentelemetry-api==1.39.1
+opentelemetry-sdk==1.39.1
+opentelemetry-instrumentation-asyncpg==0.60b1
+opentelemetry-instrumentation-fastapi==0.60b1
+opentelemetry-instrumentation-httpx==0.60b1
+prometheus-client==0.25.0
+
+# ─── CLI & Interface ────────────────────────────────────────────
+click==8.3.1
+rich==14.3.1
+fastapi==0.136.1
+uvicorn==0.47.0
+
+# ─── MCP Integration ────────────────────────────────────────────
+mcp==1.26.0
+fastmcp==3.2.4
+
+# ─── Code Analysis ──────────────────────────────────────────────
+ruff==0.15.12
+black==26.5.1
+
+# ─── Utilities ──────────────────────────────────────────────────
+tiktoken==0.12.0
+jinja2==3.1.6
+json-repair==0.59.10
+pyyaml==6.0.3
+numpy==1.26.4
+# Scientific-computing baseline for generated code. Pinned explicitly because
+# they were previously pulled transitively by sentence-transformers/torch, which
+# are now removed to slim the image — pinning keeps them without the ML weight.
+scipy==1.17.1
+sympy==1.14.0
+networkx==3.6.1
+pandas==2.2.3
+
+# ─── Web & Document Tools (builtin tooling) ─────────────────────
+ddgs==9.14.2                         # DuckDuckGo search (web_search tool)
+trafilatura==2.0.0                   # URL → clean markdown (web_scraper tool)
+pypdf==6.9.1                         # PDF text extraction (document_parser)
+python-docx==1.2.0                   # Word .docx extraction (document_parser)
+openpyxl==3.1.5                      # Excel .xlsx extraction (document_parser)
+unstructured==0.21.5                 # Document partitioning — allowlisted for generated tools
+markdown-it-py==4.2.0                # Markdown parsing — allowlisted for generated tools
+
+# ─── Development & Testing ──────────────────────────────────────
+pytest==8.4.2
+pytest-asyncio==0.23.8
+pytest-cov==7.1.0
+pytest-mock==3.15.1
+pytest-timeout==2.4.0
+pytest-xdist==3.8.0
+mypy==2.1.0

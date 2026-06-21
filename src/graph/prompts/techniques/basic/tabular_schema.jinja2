@@ -1,0 +1,19 @@
+{# Tabular Schema: Strict table format output #}
+Provide your answer in a strict table format using Markdown syntax.
+
+Each key point should be a row with relevant columns.
+
+Format:
+| Column 1 | Column 2 | Column 3 |
+|----------|----------|----------|
+| Data    | Data     | Data     |
+
+{% if table_schema %}
+Required table schema: {{ table_schema }}
+{% endif %}
+
+{% if columns %}
+Columns: {% for col in columns %}{{ col.name }} ({{ col.type }}){% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}
+
+Query: {{ user_input }}

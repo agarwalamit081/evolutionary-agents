@@ -1,0 +1,49 @@
+{# Sub-Query Decomposition: Split complex query for parallel retrieval #}
+You are an expert AI assistant. Answer the following query by splitting it into sub-queries.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+{% set decomposition_method = decomposition_method|default("semantic") %}
+{% set num_subqueries = num_subqueries|default(3) %}
+{% set iteration = iteration|default(1) %}
+{% set max_iterations = max_iterations|default(5) %}
+
+<decomposition_strategy>
+Decomposition strategy: {{ decomposition_method }}
+</decomposition_strategy>
+
+{% if iteration == 1 %}
+<phase>
+Step 1: Decompose into sub-queries
+</phase>
+
+Break this complex query into {{ num_subqueries }} smaller, distinct sub-questions.
+
+Each sub-query should be:
+- Clear and self-contained
+- Answerable with a single retrieval pass
+- Without overlapping information needs
+- In logical order if dependencies exist
+
+<sub_queries>
+List your {{ num_subqueries }} sub-queries
+</sub_queries>
+{% elif iteration <= num_subqueries + 1 %}
+<phase>
+Step {{ iteration - 1 }}: Answer sub-query {{ iteration - 1 }}
+</phase>
+
+<sub_query_answer>
+Your answer to sub-query {{ iteration - 1 }}
+</sub_query_answer>
+{% else %}
+<phase>
+Final step: Synthesis
+</phase>
+
+<final_synthesis>
+Synthesize all sub-question answers into a comprehensive final answer to the original query.
+</final_synthesis>
+{% endif %}

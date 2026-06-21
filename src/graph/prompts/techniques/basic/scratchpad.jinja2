@@ -1,0 +1,22 @@
+{# Scratchpad: Dedicated, persistent working memory space for complex reasoning #}
+Objective: {{ objective|default("Use a dedicated scratchpad to organize thoughts, track variables, and explore approaches before answering.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+Do not output the final answer immediately. First, use the scratchpad to organize your working memory.
+
+<scratchpad>
+- KNOWN: List all explicit facts and constraints from the query.
+- UNKNOWN: List what information is missing or needs to be derived.
+- APPROACH 1: [Briefly outline a solution path]
+- APPROACH 2: [Briefly outline an alternative path, if applicable]
+- DEAD ENDS: [Note any approaches that fail and why]
+- DRAFT CALCULATION/LOGIC: [Show your raw working, math, or logical mapping here]
+</scratchpad>
+
+<final_answer>
+Based strictly on the organized work in the <scratchpad>, provide the clear, final answer to the query.
+</final_answer>

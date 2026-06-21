@@ -1,0 +1,21 @@
+{# Beat Reverse Curse: Force bidirectional relationship mapping to overcome LLM directional bias #}
+Objective: {{ objective|default("Overcome directional bias by explicitly mapping all relationships bidirectionally before answering.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+LLMs often suffer from the "Reverse Curse" (knowing A->B but failing B->A). To mitigate this:
+1. Extract all entities and relationships from the query.
+2. For EVERY relationship stated (e.g., "A is the parent of B"), you MUST explicitly state the inverse (e.g., "B is the child of A").
+3. Verify that the bidirectional mapping is logically consistent.
+4. Use this verified, bidirectional knowledge graph to answer the query.
+
+<relationship_extraction>
+Extract all entities and relationships, then map each one bidirectionally
+</relationship_extraction>
+
+<final_answer>
+Your answer based on verified bidirectional relationships
+</final_answer>

@@ -1,0 +1,220 @@
+"""Shared path resolution for the file-touching tools.
+
+Single source of truth so ``file_writer`` / ``code_executor`` /
+``terminal_command`` / ``file_reader`` / ``verify`` / ``execute`` all agree on
+where a logical path like ``results/foo.md`` lands on disk.
+
+Historical bug this centralizes: each tool resolved its own working directory
+(``results_root`` vs ``workspace_root``) and de-nested redundant ``results/``
+prefixes independently. The same string then resolved to *different* files
+across tools — so a ``code_executor`` script globbing ``results/*.md`` from
+inside ``results/`` found ``results/results/*.md`` (nothing) and the LLM
+fabricated output. Aligning every tool to ``project_root`` (parent of
+``results_root``) and routing all de-nesting through here makes a path resolve
+identically whether written, executed, or cat'd.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+# Reference the *module object* (not the symbol) so tests can monkeypatch
+# ``src.config.settings.get_settings`` (the single source) and have it take
+# effect here — a module-level ``from … import get_settings`` would capture the
+# original and ignore the patch. This keeps settings reading in exactly one place.
+from src.config import settings as _settings
+
+# Named roots a caller can ask ``normalize`` to resolve against.
+_ROOT_BY_NAME = {
+    "results": lambda: _results_root(),
+    "workspace": lambda: _workspace_root(),
+    "project": lambda: _project_root(),
+}
+
+# Phase 7: active run identifier. Set by main.py (``_run_agent``) so the shared
+# resolver routes a run's deliverables under ``results_root / <run_id> / ...``,
+# isolating each run on disk. Process-global is sufficient — battery queries run
+# one at a time per process. ``None`` when no run_id is in play → every path
+# resolves flat exactly as before (non-regression for non-run-id runs).
+_active_run_id: str | None = None
+
+
+def set_active_run_id(run_id: str | None) -> None:
+    """Bind the active run_id for per-run results subfoldering (main.py entry).
+
+    Pass ``None`` to reset (e.g. between independent runs / in tests).
+    """
+    global _active_run_id
+    _active_run_id = run_id
+
+
+def get_active_run_id() -> str | None:
+    """Current active run_id, or ``None`` when no run is bound."""
+    return _active_run_id
+
+
+def _subdir_active() -> bool:
+    """Per-run subfoldering is on only with a run_id AND the setting enabled."""
+    if not _active_run_id:
+        return False
+    try:
+        return bool(_agent().results_per_run_subdir)  # type: ignore[attr-defined]
+    except AttributeError:
+        # Minimal agent fakes / older settings without the field → treat as off.
+        return False
+
+
+def _maybe_inject_run_subdir(parts: tuple[str, ...], root: Path) -> tuple[str, ...]:
+    """Prefix a run_id component so writes land under ``results_root/<run_id>/``.
+
+    Skipped unless ``root`` is the results root (workspace/project/explicit-bases
+    are never subfoldered), when subfoldering is off, or when the (already
+    de-nested) path already starts with the run_id — so a goal that names
+    ``results/<run_id>/x`` is NOT double-nested to ``results/<run_id>/<run_id>/x``.
+    """
+    run_id = _active_run_id
+    if run_id is None or not _subdir_active():
+        return parts
+    if root != _results_root():
+        return parts  # only the results base is per-run subfoldered
+    if parts and parts[0] == run_id:
+        return parts
+    return (run_id, *parts)
+
+
+def _agent() -> "object":
+    # ``AgentSettings`` — typed loosely to avoid an import cycle with config.
+    return _settings.get_settings().agent
+
+
+def _results_root() -> Path:
+    return Path(_agent().results_root).resolve()  # type: ignore[attr-defined]
+
+
+def _workspace_root() -> Path:
+    return Path(_agent().workspace_root).resolve()  # type: ignore[attr-defined]
+
+
+def _project_root() -> Path:
+    """Parent of ``results_root`` — the common ancestor every tool runs from.
+
+    On host-run this is the repo root (``results_root="results"`` relative to
+    CWD). In the container (``RESULTS_ROOT=/home/turing/.turing/results``) it is
+    the persisted volume. Aligning cwd here is what makes ``results/foo.md``
+    resolve the same for reads, writes, and subprocess globs.
+    """
+    return _results_root().parent
+
+
+def results_root() -> Path:
+    """Resolved ``results_root`` (where ``file_writer`` deliverables live)."""
+    return _results_root()
+
+
+def workspace_root() -> Path:
+    """Resolved ``workspace_root`` (inputs/fixtures scratch dir)."""
+    return _workspace_root()
+
+
+def project_root() -> Path:
+    """Resolved project root — the single cwd for all file-touching tools."""
+    return _project_root()
+
+
+def _strip_names(*extra: str) -> set[str]:
+    agent = _agent()
+    return {
+        n.lower()
+        for n in (
+            "results",
+            Path(agent.results_root).name,  # type: ignore[attr-defined]
+            Path(agent.workspace_root).name,  # type: ignore[attr-defined]
+            *extra,
+        )
+        if n
+    }
+
+
+def strip_results_prefix(parts: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop redundant leading ``results/``/workspace components from path parts.
+
+    Goals say "save to results/<file>" but ``file_writer`` already writes under
+    ``results_root``, which would double-nest to ``results/results/<file>``. Strip
+    a leading component matching the literal ``results``, the configured
+    ``results_root`` name, or the workspace name so ``results/x``,
+    ``results/results/x`` and bare ``x`` collapse to one target. Never strips a
+    lone filename (``len(parts) > 1`` guard).
+    """
+    return _strip(parts)
+
+
+def normalize(path: str, *, base: str | Path = "results") -> Path:
+    """Resolve ``path`` under ``base`` as a WRITE target, with per-run isolation.
+
+    ``base`` is a named root (``"results"``/``"workspace"``/``"project"``) or an
+    explicit absolute ``Path`` (used when a caller supplies its own
+    ``sandbox_root``). The resolved base-root name is added to the strip set so
+    an explicit root de-nests its own name too.
+
+    Phase 7: when per-run subfoldering is active (an ``_active_run_id`` is bound
+    AND ``results_per_run_subdir`` is on), a results write is routed under
+    ``results_root / <run_id> / <path>`` so each run's deliverables are isolated
+    on disk. A goal that already names ``results/<run_id>/x`` is de-duplicated
+    (never double-nested). Workspace/project bases are never subfoldered. Raises
+    ``ValueError`` on path traversal outside ``base``; callers translate that to
+    their existing ``ERROR:`` strings to preserve behavior.
+
+    Use ``resolve_existing`` for reads — it prefers the run subdir but falls back
+    to the flat root so legacy/cross-run deliverables still recall.
+    """
+    root = _resolve_base(base)
+    parts = _strip(Path(path).parts, root.name)
+    parts = _maybe_inject_run_subdir(parts, root)
+    target = (root / Path(*parts)).resolve() if parts else root
+    if not target.is_relative_to(root):
+        raise ValueError(f"Path traversal blocked: {path}")
+    return target
+
+
+def resolve_existing(path: str, *, base: str | Path = "results") -> Path:
+    """Resolve ``path`` as a READ target: run subdir first, flat fallback.
+
+    The primary candidate is ``normalize(path, base)`` — the run subdir when
+    per-run subfoldering is active, the flat root otherwise. If it exists on
+    disk it is returned. Otherwise we re-resolve *without* the run_id injection
+    (the flat root) and return that when it exists — so recall of older flat
+    deliverables (battery-03) and cross-run reads still work. When neither
+    exists, the primary candidate is returned (the canonical "where it would be"
+    location), so a caller's ``.exists()`` check simply reports absent.
+
+    Raises ``ValueError`` only when the flat resolution escapes ``base`` — the
+    primary (subdir) candidate is already traversal-guarded by ``normalize``.
+    """
+    primary = normalize(path, base=base)
+    if primary.exists():
+        return primary
+    flat_root = _resolve_base(base)
+    flat_parts = _strip(Path(path).parts, flat_root.name)
+    flat = (flat_root / Path(*flat_parts)).resolve() if flat_parts else flat_root
+    if flat != primary and flat.is_relative_to(flat_root) and flat.exists():
+        return flat
+    return primary
+
+
+def _strip(parts: tuple[str, ...], *extra: str) -> tuple[str, ...]:
+    """Shared de-nest loop. ``extra`` adds names (e.g. an explicit base root)."""
+    names = _strip_names(*extra)
+    parts = tuple(parts)
+    while len(parts) > 1 and parts[0].lower() in names:
+        parts = parts[1:]
+    return parts
+
+
+def _resolve_base(base: str | Path) -> Path:
+    if isinstance(base, Path):
+        return base.resolve()
+    try:
+        resolver = _ROOT_BY_NAME[base]
+    except KeyError as exc:  # pragma: no cover — defensive; callers pass literals
+        raise ValueError(f"Unknown root base: {base!r}") from exc
+    return resolver()

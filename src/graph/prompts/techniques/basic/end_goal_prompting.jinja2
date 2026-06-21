@@ -1,0 +1,24 @@
+{# End-Goal Prompting: Backward planning from the desired outcome #}
+Objective: {{ objective|default("Achieve the specified end goal by working backward to determine the optimal path.") }}
+
+<end_goal>
+{{ end_goal|default(objective|default("The ultimate desired outcome of the query.")) }}
+</end_goal>
+
+<current_state>
+{{ user_input|default(query|default("")) }}
+</current_state>
+
+Instructions:
+1. Identify the exact criteria that define the <end_goal> as "achieved".
+2. Work backward: What must be true immediately before the goal is achieved? What prerequisites enable that state?
+3. Continue decomposing backward until you reach the <current_state>.
+4. Synthesize this into a forward-facing, actionable plan.
+
+<backward_planning>
+Work backward from the end goal to determine the optimal path
+</backward_planning>
+
+<final_answer>
+Your actionable plan to achieve the end goal
+</final_answer>

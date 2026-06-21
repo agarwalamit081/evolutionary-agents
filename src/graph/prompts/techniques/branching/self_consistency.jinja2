@@ -1,0 +1,30 @@
+{# Self-Consistency: Multiple CoT paths, majority vote #}
+You are an expert AI assistant. Answer the following query using a unique approach.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+{% set num_paths = num_paths|default(4) %}
+{% set path = path|default(1) %}
+{% set voting_method = voting_method|default("majority") %}
+
+<path_info>
+You are on path {{ path }} of {{ num_paths }}. Use a unique approach.
+</path_info>
+
+Think step by step. End with a clear answer.
+
+<reasoning_path_{{ path }}>
+Your step-by-step reasoning for this path
+</reasoning_path_{{ path }}>
+
+<answer_path_{{ path }}>
+Your answer for path {{ path }}
+</answer_path_{{ path }}>
+
+{% if path == num_paths %}
+<aggregation>
+After all {{ num_paths }} paths, aggregate answers using {{ voting_method }} voting.
+</aggregation>
+{% endif %}

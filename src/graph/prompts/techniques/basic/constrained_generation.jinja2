@@ -1,0 +1,23 @@
+{# Constrained Generation: Strict structural and length constraints #}
+Objective: {{ objective|default("Generate a response that strictly adheres to the defined structural and length constraints.") }}
+
+<constraints>
+1. Format: {{ output_format|default("Exactly 3 parts: [REASONING], [ANSWER], [CONFIDENCE]") }}
+2. Length: {{ max_words|default("Under 500 words") }}
+3. Tone: {{ tone|default("Objective and analytical") }}
+{% if custom_constraints %}
+4. {{ custom_constraints }}
+{% endif %}
+</constraints>
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+You MUST follow the constraints exactly. Any deviation is considered a failure.
+Provide your response using the exact format specified in the <constraints> block.
+
+<constrained_output>
+Your response following the exact constraints specified above
+</constrained_output>

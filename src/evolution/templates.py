@@ -1,0 +1,591 @@
+"""Mutation templates — generate real, structured content for each mutation type.
+
+Each template function produces a dict with:
+- content: JSON-serialisable payload with the actual improvement
+- target_path: file path in the shadow repo for git tracking
+- rationale: human-readable explanation of the change
+
+These replace the comment-only heuristic mutations that produced no
+observable effect at runtime.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from src.config.settings import get_settings
+
+# ─── Failure-pattern → prompt-fix mapping ────────────────────────────────
+
+_PROMPT_FIXES: dict[str, str] = {
+    "json": (
+        "IMPORTANT: Always respond with valid JSON matching the requested schema. "
+        "Do NOT wrap JSON in markdown code fences. If the schema requires specific "
+        "field types, respect them exactly."
+    ),
+    "timeout": (
+        "When performing multi-step reasoning, break complex tasks into smaller "
+        "sub-tasks. If a step is taking too long, summarize intermediate results "
+        "and proceed rather than retrying indefinitely."
+    ),
+    "format": (
+        "Follow the requested output format precisely. Use the exact field names "
+        "and types specified in the schema. Do not add extra commentary outside "
+        "the structured response."
+    ),
+    "tool": (
+        "Before invoking a tool, verify its parameters match the expected schema. "
+        "After receiving tool results, extract the key information rather than "
+        "repeating the raw output verbatim."
+    ),
+    "error": (
+        "When an error occurs during execution, analyze the error message to "
+        "determine if it is transient (retry) or permanent (try an alternative "
+        "approach). Include the error context in your reasoning."
+    ),
+    "context": (
+        "When the conversation context is large, focus on the most recent "
+        "instructions and results. Summarize earlier steps concisely rather "
+        "than repeating them in full."
+    ),
+    "plan": (
+        "When generating execution plans, ensure each step has a clear success "
+        "criterion. Mark steps as completed only when their output matches the "
+        "expected result."
+    ),
+}
+
+_DEFAULT_PROMPT_FIX = (
+    "Apply careful reasoning to each step. Verify intermediate results before "
+    "proceeding. If a step fails, analyze the failure and adjust the approach."
+)
+
+# ─── Workflow parameter adjustments ──────────────────────────────────────
+
+_WORKFLOW_ADJUSTMENTS: dict[str, dict[str, Any]] = {
+    "reduce_execution_time": {
+        "early_stop_on_confidence": True,
+        "confidence_threshold": 0.85,
+        "max_iterations": 8,
+        "parallel_tool_calls": True,
+    },
+    "improve_accuracy": {
+        "verification_enabled": True,
+        "reflection_after_steps": 3,
+        "max_iterations": 15,
+        "require_lesson_extraction": True,
+    },
+    "balance_speed_accuracy": {
+        "early_stop_on_confidence": True,
+        "confidence_threshold": 0.75,
+        "reflection_after_steps": 4,
+        "max_iterations": 10,
+    },
+}
+
+# ─── Tool parameter adjustments ──────────────────────────────────────────
+
+_TOOL_ADJUSTMENTS: dict[str, dict[str, Any]] = {
+    "code_executor": {
+        "timeout_seconds": 60,
+        "max_output_lines": 200,
+        "capture_stderr": True,
+    },
+    "code_validator": {
+        "check_security": True,
+        "check_style": True,
+        "max_complexity": 15,
+    },
+    "web_search": {
+        "max_results": 5,
+        "timeout_seconds": 30,
+        "snippet_length": 500,
+    },
+    "memory_search": {
+        "min_fitness": 0.4,
+        "max_results": 5,
+        "include_cold": True,
+    },
+}
+
+# ─── Memory retrieval strategy adjustments ───────────────────────────────
+
+_MEMORY_STRATEGIES: dict[str, dict[str, Any]] = {
+    "precision_focused": {
+        "min_fitness": 0.6,
+        "max_results": 3,
+        "include_cold": False,
+        "tag_overlap_threshold": 2,
+    },
+    "recall_focused": {
+        "min_fitness": 0.3,
+        "max_results": 7,
+        "include_cold": True,
+        "tag_overlap_threshold": 1,
+    },
+    "balanced": {
+        "min_fitness": 0.4,
+        "max_results": 5,
+        "include_cold": True,
+        "tag_overlap_threshold": 1,
+    },
+}
+
+
+def generate_prompt_improvement(
+    patterns: list[str],
+    current_content: str | None = None,
+) -> dict[str, Any]:
+    """Generate a concrete prompt improvement addressing failure patterns.
+
+    Maps common failure keywords to specific prompt suffixes that guide
+    the LLM toward better behaviour. Returns structured JSON that the
+    retrieve_memory_node can load at runtime.
+
+    Args:
+        patterns: Failure pattern descriptions from analysis.
+        current_content: Current prompt text (unused by heuristic but
+            kept for interface consistency with LLM generation).
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    suffixes: list[str] = []
+    matched_keywords: list[str] = []
+
+    for pattern in patterns:
+        pattern_lower = pattern.lower()
+        for keyword, fix in _PROMPT_FIXES.items():
+            if keyword in pattern_lower and fix not in suffixes:
+                suffixes.append(fix)
+                matched_keywords.append(keyword)
+
+    if not suffixes:
+        suffixes.append(_DEFAULT_PROMPT_FIX)
+
+    content = {
+        "target_node": "execute",
+        "suffixes": suffixes,
+        "reason": f"Addresses failure patterns: {', '.join(matched_keywords) or 'general improvement'}",
+        "generation_source": "heuristic",
+    }
+
+    rationale = (
+        f"Added {len(suffixes)} prompt improvement(s) addressing: "
+        f"{', '.join(matched_keywords) if matched_keywords else 'general performance'}. "
+        f"These will be injected as additional context during task execution."
+    )
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": "evolution/prompt_improvements.json",
+        "rationale": rationale,
+    }
+
+
+def generate_workflow_config(
+    description: str,
+) -> dict[str, Any]:
+    """Generate workflow parameter adjustments based on the opportunity description.
+
+    Args:
+        description: The opportunity description from analysis.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    desc_lower = description.lower()
+
+    if "time" in desc_lower or "speed" in desc_lower or "fast" in desc_lower:
+        strategy = "reduce_execution_time"
+    elif "accura" in desc_lower or "quality" in desc_lower or "correct" in desc_lower:
+        strategy = "improve_accuracy"
+    else:
+        strategy = "balance_speed_accuracy"
+
+    config = _WORKFLOW_ADJUSTMENTS[strategy]
+
+    rationale = (
+        f"Applied '{strategy}' workflow configuration: "
+        f"early_stop={config.get('early_stop_on_confidence', False)}, "
+        f"max_iterations={config.get('max_iterations', 10)}. "
+        f"Based on opportunity: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps({"strategy": strategy, **config}, indent=2),
+        "target_path": "evolution/workflow_config.json",
+        "rationale": rationale,
+    }
+
+
+def generate_tool_config(
+    description: str,
+) -> dict[str, Any]:
+    """Generate tool parameter adjustments.
+
+    Args:
+        description: The opportunity description from analysis.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    desc_lower = description.lower()
+
+    # Pick the most relevant tool based on description keywords
+    if "code" in desc_lower and "exec" in desc_lower:
+        tool_name = "code_executor"
+    elif "valid" in desc_lower:
+        tool_name = "code_validator"
+    elif "search" in desc_lower or "web" in desc_lower:
+        tool_name = "web_search"
+    else:
+        tool_name = "memory_search"
+
+    config = _TOOL_ADJUSTMENTS[tool_name]
+
+    rationale = (
+        f"Adjusted {tool_name} parameters: "
+        + ", ".join(f"{k}={v}" for k, v in config.items())
+        + f". Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps({"tool": tool_name, **config}, indent=2),
+        "target_path": "evolution/tool_config.json",
+        "rationale": rationale,
+    }
+
+
+def generate_memory_config(
+    description: str,
+) -> dict[str, Any]:
+    """Generate memory retrieval strategy adjustments.
+
+    Args:
+        description: The opportunity description from analysis.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    desc_lower = description.lower()
+
+    if "precision" in desc_lower or "relevant" in desc_lower or "noise" in desc_lower:
+        strategy = "precision_focused"
+    elif "recall" in desc_lower or "miss" in desc_lower or "more context" in desc_lower:
+        strategy = "recall_focused"
+    else:
+        strategy = "balanced"
+
+    config = _MEMORY_STRATEGIES[strategy]
+
+    rationale = (
+        f"Applied '{strategy}' memory retrieval strategy: "
+        f"min_fitness={config['min_fitness']}, max_results={config['max_results']}. "
+        f"Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps({"strategy": strategy, **config}, indent=2),
+        "target_path": "evolution/memory_config.json",
+        "rationale": rationale,
+    }
+
+
+def _first_function(source: str) -> tuple[str, bool] | None:
+    """Return ``(name, is_async)`` of the first top-level function, or None."""
+    import ast as _ast
+
+    if not source:
+        return None
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if isinstance(node, _ast.AsyncFunctionDef):
+            return node.name, True
+        if isinstance(node, _ast.FunctionDef):
+            return node.name, False
+    return None
+
+
+def _memoization_wrapper(name: str, is_async: bool) -> str:
+    """Emit an async memoization wrapper around function ``name``.
+
+    The wrapper caches results keyed by ``(args, sorted kwargs)``. ``is_async``
+    selects ``await`` vs. a plain call so the wrapper composes with either
+    signature. Module-level ``_EVOLUTION_MEMO_CACHE`` avoids colliding with any
+    caller-defined cache.
+    """
+    call = (
+        f"await {name}(*args, **kwargs)"
+        if is_async
+        else f"{name}(*args, **kwargs)"
+    )
+    return (
+        "_EVOLUTION_MEMO_CACHE = {}\n"
+        "\n"
+        "\n"
+        f"async def {name}_cached(*args, **kwargs):\n"
+        f'    """Memoized variant of {name} (evolution heuristic)."""\n'
+        "    key = (args, tuple(sorted(kwargs.items())))\n"
+        "    if key in _EVOLUTION_MEMO_CACHE:\n"
+        "        return _EVOLUTION_MEMO_CACHE[key]\n"
+        f"    result = {call}\n"
+        "    _EVOLUTION_MEMO_CACHE[key] = result\n"
+        "    return result\n"
+    )
+
+
+# Standalone memoization helper emitted when current_content has no parseable
+# function to wrap (still real, loadable, Layer-7-passing async code).
+_STANDALONE_MEMO_HELPER = (
+    "_EVOLUTION_MEMO_CACHE = {}\n"
+    "\n"
+    "\n"
+    "async def memoized_compute(key, factory):\n"
+    '    """Return the cached result for key, computing it via factory once."""\n'
+    "    if key in _EVOLUTION_MEMO_CACHE:\n"
+    "        return _EVOLUTION_MEMO_CACHE[key]\n"
+    "    result = await factory()\n"
+    "    _EVOLUTION_MEMO_CACHE[key] = result\n"
+    "    return result\n"
+)
+
+
+def generate_code_improvement(
+    description: str,
+    current_content: str | None = None,
+) -> dict[str, Any]:
+    """Generate a real, loadable code improvement (heuristic fallback).
+
+    When ``current_content`` defines a function, wraps it with a memoization
+    layer (a cached variant avoiding recomputation of repeated calls);
+    otherwise emits a standalone memoization helper. Unlike the prior
+    analysis-only JSON, this is real Python that passes the safety pipeline and
+    can be sandbox-tested and deployed (B2). ``target_path`` is a ``.py``.
+
+    Args:
+        description: The opportunity description.
+        current_content: Current code to improve.
+
+    Returns:
+        Dict with content (Python source), target_path (.py), and rationale.
+    """
+    base = (current_content or "").strip()
+    target = _first_function(base)
+    if target is not None:
+        name, is_async = target
+        content = base + "\n\n\n" + _memoization_wrapper(name, is_async)
+        rationale = (
+            f"Wrapped '{name}' with a memoization layer to cache repeated "
+            f"results (evolution heuristic). Based on: {description[:80]}"
+        )
+    else:
+        content = _STANDALONE_MEMO_HELPER
+        rationale = (
+            "Emitted a standalone async memoization helper (no parseable "
+            f"function found in current content). Based on: {description[:80]}"
+        )
+
+    return {
+        "content": content,
+        "target_path": "evolution/code_improvement.py",
+        "rationale": rationale,
+    }
+
+
+def generate_config_tuning(
+    description: str,
+) -> dict[str, Any]:
+    """Generate configuration parameter tuning.
+
+    Args:
+        description: The opportunity description.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    evolution_settings = get_settings().evolution
+    content = {
+        "tuning_target": description[:100],
+        "adjustments": {
+            "temperature": evolution_settings.evolution_temperature,
+            "max_tokens_factor": evolution_settings.evolution_max_tokens_factor,
+            "cache_enabled": True,
+        },
+        "generation_source": "heuristic",
+    }
+
+    rationale = f"Configuration tuning based on: {description[:80]}"
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": "evolution/config_tuning.json",
+        "rationale": rationale,
+    }
+
+
+# ─── Sub-Agent Mutation Templates ───────────────────────────────────────
+
+
+def generate_sub_agent_prompt_mutation(
+    opportunity: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate a prompt override mutation for a sub-agent.
+
+    Improves the system_prompt_override to be more specific based on
+    observed failure patterns.
+
+    Args:
+        opportunity: Dict with 'target_sub_agent' and 'description'.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    agent_name = opportunity.get("target_sub_agent", "unknown")
+    description = opportunity.get("description", "")
+
+    content = {
+        "mutation_type": "sub_agent_prompt",
+        "target_sub_agent": agent_name,
+        "system_prompt_override": (
+            f"You are a specialized sub-agent for {agent_name} tasks. "
+            f"Focus on accuracy and completeness. "
+            f"If a step fails, analyze the error and try an alternative approach. "
+            f"Always return structured, concise results."
+        ),
+        "generation_source": "heuristic",
+    }
+
+    rationale = (
+        f"Updated system prompt for sub-agent '{agent_name}' to improve "
+        f"accuracy and error recovery. Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": f"evolution/sub_agent_{agent_name}_prompt.json",
+        "rationale": rationale,
+    }
+
+
+def generate_sub_agent_tool_mutation(
+    opportunity: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate a tool set adjustment mutation for a sub-agent.
+
+    Expands or restricts the tool_subset based on the opportunity.
+
+    Args:
+        opportunity: Dict with 'target_sub_agent' and 'description'.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    agent_name = opportunity.get("target_sub_agent", "unknown")
+    description = opportunity.get("description", "")
+
+    content = {
+        "mutation_type": "sub_agent_tools",
+        "target_sub_agent": agent_name,
+        "tool_scope": "inherit_all",
+        "rationale": (
+            f"Expanded tool access to inherit_all to give sub-agent "
+            f"'{agent_name}' more flexibility in completing tasks."
+        ),
+        "generation_source": "heuristic",
+    }
+
+    rationale = (
+        f"Expanded tool set for sub-agent '{agent_name}' from inherit_subset "
+        f"to inherit_all. Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": f"evolution/sub_agent_{agent_name}_tools.json",
+        "rationale": rationale,
+    }
+
+
+def generate_sub_agent_config_mutation(
+    opportunity: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate a configuration adjustment mutation for a sub-agent.
+
+    Adjusts max_iterations, depth_limit, or other config parameters.
+
+    Args:
+        opportunity: Dict with 'target_sub_agent' and 'description'.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    agent_name = opportunity.get("target_sub_agent", "unknown")
+    description = opportunity.get("description", "")
+
+    content = {
+        "mutation_type": "sub_agent_config",
+        "target_sub_agent": agent_name,
+        "max_iterations": 15,
+        "depth_limit": 0,
+        "rationale": (
+            f"Increased max_iterations to 15 to allow sub-agent '{agent_name}' "
+            f"more time to complete complex subtasks."
+        ),
+        "generation_source": "heuristic",
+    }
+
+    rationale = (
+        f"Config adjustment for sub-agent '{agent_name}': "
+        f"increased max_iterations to 15. Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": f"evolution/sub_agent_{agent_name}_config.json",
+        "rationale": rationale,
+    }
+
+
+def generate_sub_agent_model_tier_mutation(
+    opportunity: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate a model tier downgrade mutation for a sub-agent.
+
+    Reduces cost by downgrading model tier when performance allows.
+
+    Args:
+        opportunity: Dict with 'target_sub_agent' and 'description'.
+
+    Returns:
+        Dict with content, target_path, and rationale.
+    """
+    agent_name = opportunity.get("target_sub_agent", "unknown")
+    description = opportunity.get("description", "")
+
+    # Downgrade from complex to simple, or simple to trivial
+    content = {
+        "mutation_type": "sub_agent_model_tier",
+        "target_sub_agent": agent_name,
+        "model_tier": "simple",
+        "rationale": (
+            f"Downgraded model tier for sub-agent '{agent_name}' to 'simple' "
+            f"to reduce cost while maintaining acceptable performance."
+        ),
+        "generation_source": "heuristic",
+    }
+
+    rationale = (
+        f"Model tier downgrade for sub-agent '{agent_name}' to 'simple' "
+        f"for cost reduction. Based on: {description[:80]}"
+    )
+
+    return {
+        "content": json.dumps(content, indent=2),
+        "target_path": f"evolution/sub_agent_{agent_name}_tier.json",
+        "rationale": rationale,
+    }

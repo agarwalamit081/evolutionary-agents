@@ -1,0 +1,20 @@
+{# Be on Your Toe: Hyper-vigilant, skeptical analysis to avoid traps #}
+Objective: {{ objective|default("Analyze the query with extreme vigilance to avoid cognitive traps and trick questions.") }}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+Before answering, you MUST perform a rigorous vigilance check. Do not rush to a conclusion.
+
+<vigilance_check>
+1. TRICK DETECTION: Is this a trick question, riddle, or containing misleading premises?
+2. COGNITIVE TRAPS: Are there common logical fallacies or biases embedded in the prompt?
+3. PREMISE VERIFICATION: Are the underlying assumptions of the query actually true?
+4. SUSPICIOUS ASPECTS: Flag any ambiguous phrasing, missing context, or contradictory elements.
+</vigilance_check>
+
+<final_answer>
+Based strictly on the vigilance check above, provide your carefully considered, verified answer. If the query is fundamentally flawed, state why before attempting a conditional answer.
+</final_answer>

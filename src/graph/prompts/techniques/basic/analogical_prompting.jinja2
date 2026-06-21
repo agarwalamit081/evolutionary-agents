@@ -1,0 +1,28 @@
+{# Analogical Prompting: Generate/recall relevant analogies #}
+First, recall or generate 2-3 relevant analogies or similar problems.
+
+For each analogy, write out its solution approach step-by-step.
+
+{% if source_domain %}
+Source domain analogy: {{ source_domain }}
+
+{% if analogy_mapping %}
+Mapping rules:
+{% for mapping in analogy_mapping %}
+- {{ mapping.target_element }} ↔ {{ mapping.source_element }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
+[ANALOGY 1]
+Similar problem: ...
+Solution: ...
+
+[ANALOGY 2]
+...
+
+[APPLICATION]
+Apply insights to target problem: {{ user_input }}
+
+[ANSWER]
+...

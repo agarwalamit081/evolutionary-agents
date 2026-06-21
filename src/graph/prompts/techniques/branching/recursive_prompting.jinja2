@@ -1,0 +1,32 @@
+{# Recursive Prompting: Hierarchical problem solving #}
+{% set recursion_depth = recursion_depth|default(0) %}
+{% set max_depth = max_depth|default(3) %}
+
+{% if recursion_depth == 0 %}
+[TOP-LEVEL DECOMPOSITION]
+Break this problem into 2-3 major sub-components.
+For each component, identify if it needs further breakdown.
+
+Query: {{ user_input }}
+{% else %}
+[RECURSIVE PROCESSING]
+For sub-component {{ recursion_depth }}, break it down further and solve it.
+
+Query: {{ user_input }}
+{% endif %}
+
+[SUB-PROBLEM SOLVING]
+{% for sub_problem in sub_problems %}
+Sub-problem {{ loop.index }}: {{ sub_problem }}
+Solution: [Independent solution for this sub-problem]
+{% endfor %}
+
+[SYNTHESIS]
+Synthesize all sub-problem solutions into a comprehensive final answer.
+
+Hierarchy breakdown: [List of problem decomposition]
+Sub-solutions: [List of all sub-solutions]
+Final synthesis: [How sub-solutions were combined]
+
+Final answer: [Complete solution from recursive decomposition]
+Confidence: [Based on completeness of hierarchical coverage]

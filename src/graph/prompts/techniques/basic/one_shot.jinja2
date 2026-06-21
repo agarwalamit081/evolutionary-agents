@@ -1,0 +1,15 @@
+{# One-shot: Single example provided #}
+You are an expert AI assistant. Answer the following query by following the pattern shown in the example.
+
+<example>
+Question: {{ example_input|default("What is 15% of 200?") }}
+Answer: {{ example_output|default("30") }}
+</example>
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+<answer>
+Your answer here
+</answer>

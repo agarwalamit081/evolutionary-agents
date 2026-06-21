@@ -1,0 +1,26 @@
+{# Chain-of-Verification: Draft, verify, revise #}
+You are an expert AI assistant. Answer the following query through a draft-verify-revise process.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Follow this verification protocol:
+1. DRAFT initial response
+2. GENERATE 3-5 verification questions
+3. ANSWER each verification question independently
+4. CHECK consistency between draft and verifications
+5. REVISE draft if verifications reveal inconsistencies
+
+{% if verification_questions %}
+<verification_questions>
+Verification questions to address:
+{% for vq in verification_questions %}
+- {{ vq }}
+{% endfor %}
+</verification_questions>
+{% endif %}
+
+<verified_answer>
+Your verified final answer after completing the verification process
+</verified_answer>

@@ -1,0 +1,38 @@
+{# Algorithm-of-Thoughts: DFS/BFS search emulation #}
+Emulate a systematic algorithmic search process using DFS (Depth-First Search) strategy.
+
+Query: {{ user_input }}
+
+[SEARCH TREE EXPLORATION]
+
+[NODE 0 - ROOT]
+Initial approach generation:
+Provide 2-3 possible solution paths forward.
+
+[NODE 1 - PATH 1]
+Take the first approach. Develop it fully.
+- If you hit a roadblock → backtrack to root
+- If successful → mark as terminal node
+Evaluation: [promise level: 0-1]
+
+{% if path1_status %}
+Path 1 status: {{ path1_status }}
+{% if "roadblock" in path1_status.lower() or "issue" in path1_status.lower() %}
+→ Backtrack to root, try Path 2
+
+[NODE 2 - PATH 2]
+Take a different approach. Develop it fully.
+Evaluation: [promise level: 0-1]
+
+{% else %}
+→ Path 1 successful, use as final approach
+{% endif %}
+{% endif %}
+
+[FINAL ANSWER]
+Based on algorithmic search exploration, provide the final answer.
+
+Best approach found: [Selected from search tree]
+Search strategy: DFS
+Nodes explored: [Total nodes evaluated]
+Confidence: [Based on search completeness]

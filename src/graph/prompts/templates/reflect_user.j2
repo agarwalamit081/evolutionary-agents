@@ -1,0 +1,15 @@
+Goal: {{ goal_text }}
+Completed steps: {{ completed_count }}/{{ total_steps }}
+{{ completed_summary }}
+Step results (what each completed step actually produced — this is your evidence):
+{{ step_results }}
+Successful tool calls (tools that ran and returned output — e.g. a file_writer
+path here means the deliverable was written):
+{{ successful_tools }}
+Errors: {{ error_count }}
+{{ errors_summary }}
+Tool errors: {{ tool_errors }}
+Available tools (already registered — do NOT list any of these, or a capability
+they already provide, as missing):
+{{ available_tools }}
+Reflect on the execution progress.

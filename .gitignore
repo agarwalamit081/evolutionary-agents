@@ -1,0 +1,68 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Legacy source (backed up during migration)
+src_legacy/
+
+# Runtime data
+agent_memory/
+evolved_skills/
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.sqlite3
+.turing/
+
+# Agent output files (charts, data exports, reports)
+results/
+
+# Claude Code configuration
+.claude/
+CLAUDE.md
+
+# Internal/local-only docs — public repo carries only docs/ARCHITECTURE.md
+docs/design-docs/
+docs/*.md
+!docs/ARCHITECTURE.md
+
+# Local-only runtime/validation artifacts (battery fixtures, monitoring snapshots, ad-hoc probes)
+data/
+input/
+monitor/
+scripts/battery*.sh
+/test_*.py

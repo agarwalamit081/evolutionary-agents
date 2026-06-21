@@ -1,0 +1,836 @@
+"""Execute node — runs the current plan step with tool calling."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import time
+from typing import TYPE_CHECKING, Any
+
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from loguru import logger
+
+from src.config.settings import get_settings
+from src.graph.enums import GoalStatus, Phase
+from src.graph.models import ToolResult
+from src.graph.state import AgentState
+
+if TYPE_CHECKING:
+    from src.llm.gateway import LLMGateway
+    from src.tools.registry import ToolRegistry
+    from src.tools.result_cache import ToolResultCache
+
+# Maximum concurrent tool calls per execute step — operator-configurable via
+# AgentSettings (MAX_CONCURRENT_TOOLS). Read at call-time in _execute_tool_calls.
+
+# Tools whose output produces an on-disk deliverable. Only ``file_writer``
+# writes under ``results_root`` — verify treats its ``file_path`` as the
+# authoritative deliverable path, so a write-step that never calls it leaves no
+# artifact for verification to find.
+FILE_OUTPUT_TOOLS: frozenset[str] = frozenset({"file_writer"})
+
+# How many EXTRA LLM turns a write-step gets to actually call a write tool after
+# an explicit nudge. Cheaper models (haiku) frequently narrate the deliverable
+# as prose on turn 1 and only call file_writer once told to. Bounded so a
+# stubborn refusal degrades gracefully (mark complete) instead of looping;
+# max_write_nudges + 1 total attempts per step. Operator-configurable via
+# AgentSettings (MAX_WRITE_NUDGES). Read at call-time in _run_step.
+
+# Detects a declared output path in a step description: "save/write/export …
+# <file>". Mirrors verify._SAVE_TO_RE so the path we nudge toward is the same
+# one verification will later check on disk.
+_WRITE_INTENT_RE = re.compile(
+    r"\b(?:save|write|export|store|dump|output)\b[^.]*?"
+    # Require a >=2-char extension: real file extensions are always >=2 letters
+    # (py/md/csv/json/txt/jsonl). A 1-char tail matches abbreviations ("e.g",
+    # "i.e") and version/section fragments ("1.0", "3.2"), which were captured
+    # as bogus deliverable paths and fed false missing-deliverable verify loops
+    # (F-k).
+    r"\b([A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]{2,})\b",
+    re.IGNORECASE,
+)
+
+# Detects the canonical deliverable path embedded in the GOAL text. Goals name
+# their output as "results/<name>.<ext>" regardless of verb ("save/merge/
+# combine ... to/into results/x.md"). This is the fall-back target for a
+# producing step that declares no path of its own — without it, a "merge the
+# results into a cohesive overview" step narrates the deliverable as prose and
+# never calls file_writer (Q3 never produced q3_overview.md).
+_GOAL_DELIVERABLE_RE = re.compile(
+    r"\b(results/[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+)\b",
+    re.IGNORECASE,
+)
+
+# Marks a ``results/`` path as an INPUT the goal reads from, not an output it
+# writes. A goal commonly names its input first ("Reuse q01's normalizer output
+# at results/q01/normalized.csv"), so the first match is the input; without this
+# guard _extract_goal_deliverable returned that input as the deliverable (F-k).
+# The signal is the word immediately before "results/".
+_GOAL_INPUT_CONTEXT_RE = re.compile(
+    r"\b(?:at|from|using|against|reuse|input|source|read)\s*$",
+    re.IGNORECASE,
+)
+
+# A step that assembles the final output but names no concrete file (so
+# _WRITE_INTENT_RE misses it). "merge/combine/assemble/integrate/finalize the
+# results" is the reliable signal such a step is the deliverable producer. The
+# last step of any plan is also treated as producing (catch-all for a final
+# write the planner phrased without a bring-together verb).
+_PRODUCING_STEP_RE = re.compile(
+    r"\b(?:merge|merging|combined|combine|compil\w*|assembl\w*|integrat\w*|"
+    r"consolidat\w*|finali\w*)",
+    re.IGNORECASE,
+)
+
+
+def _messages_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
+    """Convert LangChain messages (or OpenAI dicts) to OpenAI chat-format dicts.
+
+    The gateway (litellm) expects OpenAI message dicts, while the graph state
+    stores LangChain ``AnyMessage`` objects. This bridges the two so the
+    execute node can feed the real conversation history into each LLM call —
+    without it, the agent is stateless across steps and memory folding has no
+    real context to compress.
+    """
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if isinstance(m, dict):
+            out.append(m)
+            continue
+        mtype = getattr(m, "type", "")
+        content = getattr(m, "content", "")
+        if mtype == "human":
+            out.append({"role": "user", "content": content})
+        elif mtype == "system":
+            out.append({"role": "system", "content": content})
+        elif mtype == "ai":
+            entry: dict[str, Any] = {"role": "assistant", "content": content}
+            tcs = getattr(m, "tool_calls", None) or []
+            if tcs:
+                entry["tool_calls"] = [
+                    {
+                        "id": tc.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("name", ""),
+                            "arguments": json.dumps(
+                                tc.get("args", {}), default=str
+                            ),
+                        },
+                    }
+                    for tc in tcs
+                ]
+            out.append(entry)
+        elif mtype == "tool":
+            entry_t: dict[str, Any] = {
+                "role": "tool",
+                "content": content,
+                "tool_call_id": getattr(m, "tool_call_id", ""),
+            }
+            name = getattr(m, "name", None)
+            if name:
+                entry_t["name"] = name
+            out.append(entry_t)
+        else:
+            out.append({"role": "user", "content": str(content)})
+    return out
+
+
+def _build_ai_message(
+    content: str | None,
+    tool_calls: list[dict[str, Any]],
+) -> AIMessage:
+    """Build an AIMessage for the thread, attaching validated tool calls.
+
+    Falls back to a content-only message if tool-call validation fails, so a
+    malformed provider response never breaks the run.
+    """
+    text = content or ""
+    if not tool_calls:
+        return AIMessage(content=text)
+    try:
+        normalized = []
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            raw_args = fn.get("arguments", "{}")
+            try:
+                args = (
+                    json.loads(raw_args)
+                    if isinstance(raw_args, str)
+                    else raw_args
+                )
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            normalized.append(
+                {
+                    "name": fn.get("name", ""),
+                    "args": args,
+                    "id": tc.get("id", ""),
+                    "type": "tool_call",
+                }
+            )
+        return AIMessage(content=text, tool_calls=normalized)
+    except Exception as exc:  # noqa: BLE001 — never break the run on validation
+        logger.debug(
+            f"AIMessage tool_call validation failed, storing content only: {exc}"
+        )
+        return AIMessage(content=text)
+
+
+def _extract_expected_file_path(step_description: str) -> str | None:
+    """Return the deliverable path a write-step declares, or None.
+
+    A step like "Write the onboarding guide to results/q9.md" declares
+    ``results/q9.md`` as its output. Only steps naming a concrete output path
+    are treated as write-steps — a vague "generate a report" step with no file
+    target never triggers a nudge (and never risks a spurious loop).
+    """
+    match = _WRITE_INTENT_RE.search(step_description or "")
+    return match.group(1) if match else None
+
+
+def _extract_goal_deliverable(goal_text: str) -> str | None:
+    """Return the canonical OUTPUT deliverable path named in the goal, or None.
+
+    Goals embed paths as ``results/<name>.<ext>``. A goal often names its INPUT
+    first ("process results/q01/x.csv -> write results/q03/y.csv"), so returning
+    the first match grabs the input (F-k). Instead skip any path whose
+    immediately-preceding word marks it as an input (at/from/using/against/reuse/
+    input/source/read) and return the LAST remaining match — outputs are stated
+    last, after "writing ... to". If every path is input-context, fall back to
+    the last path overall.
+    """
+    text = goal_text or ""
+    matches = list(_GOAL_DELIVERABLE_RE.finditer(text))
+    if not matches:
+        return None
+    outputs: list[str] = []
+    for match in matches:
+        window = text[max(0, match.start() - 24): match.start()].lower()
+        if _GOAL_INPUT_CONTEXT_RE.search(window):
+            continue
+        outputs.append(match.group(1))
+    if outputs:
+        return outputs[-1]
+    return matches[-1].group(1)
+
+
+def _is_producing_step(
+    step_description: str, step_index: int, n_steps: int
+) -> bool:
+    """True if this step assembles the final deliverable.
+
+    Either it uses a bring-together verb (merge/combine/assemble/integrate/
+    finalize/…) or it is the last step of the plan (catch-all). Combined with
+    the on-disk check this targets exactly the merge/finalize step without
+    nudging read/enumerate/verify sub-steps.
+    """
+    if _PRODUCING_STEP_RE.search(step_description or ""):
+        return True
+    return n_steps > 0 and step_index + 1 >= n_steps
+
+
+def _deliverable_on_disk(path: str) -> bool:
+    """True if ``path`` already exists under results_root, non-empty.
+
+    Resolves via the shared path resolver — the same one ``file_writer`` uses —
+    so the de-nest set matches exactly and the check sees what file_writer would
+    write. Used so the goal-deliverable fall-back only nudges while the file is
+    still missing — never re-nudges once it exists.
+    """
+    from src.tools._paths import normalize
+
+    try:
+        target = normalize(path, base="results")
+    except Exception:  # noqa: BLE001 — traversal/settings failure must not abort a step
+        return False
+    try:
+        return target.is_file() and target.stat().st_size > 0
+    except (OSError, ValueError):  # noqa: BLE001 — unreadable/invalid path → not on disk
+        return False
+
+
+def _tool_call_name(tool_call: dict[str, Any]) -> str:
+    """Extract the function name from an OpenAI-format tool call."""
+    fn = tool_call.get("function", {})
+    name = fn.get("name") if isinstance(fn, dict) else None
+    return name or str(tool_call.get("name", ""))
+
+
+def _tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
+    """Parse the JSON arguments of an OpenAI-format tool call into a dict."""
+    fn = tool_call.get("function", {})
+    raw = fn.get("arguments", tool_call.get("args", "{}"))
+    try:
+        return json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _called_file_output_tool(tool_calls: list[dict[str, Any]]) -> bool:
+    """True if any tool call targets a deliverable-producing tool."""
+    return any(_tool_call_name(tc) in FILE_OUTPUT_TOOLS for tc in tool_calls)
+
+
+def _first_file_output_call(
+    tool_calls: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the first deliverable-producing tool call, or None."""
+    for tc in tool_calls:
+        if _tool_call_name(tc) in FILE_OUTPUT_TOOLS:
+            return tc
+    return None
+
+
+def _write_nudge(path: str) -> str:
+    """Build the user-role nudge that pushes the LLM to call file_writer."""
+    return (
+        "Your previous turn described the deliverable in text but did not "
+        "write it to disk. This step requires producing the file deliverable "
+        f"at '{path}'. Call the file_writer tool now with file_path set to "
+        "that path, create_dirs set to true (so nested output folders are "
+        "auto-created), and content set to your full deliverable text. Use "
+        "file_writer for the deliverable file — NOT code_executor. Do not "
+        "respond with text only — verification reads the filesystem, so the "
+        "deliverable must be written via file_writer to count as done."
+    )
+
+
+def _offers_tool(tool_defs: list[dict[str, Any]], name: str) -> bool:
+    """True if ``name`` is among the offered function-calling tool schemas."""
+    for td in tool_defs:
+        fn = td.get("function") if isinstance(td, dict) else None
+        if isinstance(fn, dict) and fn.get("name") == name:
+            return True
+        if isinstance(td, dict) and td.get("name") == name:
+            return True
+    return False
+
+
+async def execute_node(
+    state: AgentState,
+    *,
+    gateway: LLMGateway | None = None,
+    tools: ToolRegistry | None = None,
+    result_cache: ToolResultCache | None = None,
+) -> dict[str, Any]:
+    """Execute the current plan step.
+
+    When gateway and tools are provided, uses LLM tool calling.
+    Otherwise falls back to simulated step execution.
+
+    Args:
+        state: Current agent state with plan and step index.
+        gateway: Optional LLM gateway for tool-calling execution.
+        tools: Optional tool registry for executing tool calls.
+        result_cache: Optional Redis cache for idempotent tool results.
+            Only tools flagged ``cacheable`` in the registry are routed
+            through it; the cache is best-effort and never breaks a call.
+
+    Returns:
+        Partial state update with execution results.
+    """
+    plan_steps = state.get("plan_steps", [])
+    step_index = state.get("current_step_index", 0)
+    goal = state.get("current_goal")
+    messages = state.get("messages", [])
+    iteration_count = state.get("iteration_count", 0)
+
+    # Guard: no plan or index out of range
+    if not plan_steps or step_index >= len(plan_steps):
+        logger.warning("Execute called with no remaining steps")
+        return {
+            "phase": Phase.REFLECT,
+            "iteration_count": iteration_count + 1,
+        }
+
+    current_step = plan_steps[step_index]
+    logger.info(
+        f"Executing step {step_index + 1}/{len(plan_steps)}: "
+        f"{current_step.description[:60]}..."
+    )
+
+    # Mark current step as active
+    current_step.status = GoalStatus.ACTIVE
+
+    # Build execution context
+    goal_text = goal.text if goal else "Unknown goal"
+
+    # Try LLM + tool execution first, fall back to simulated
+    if gateway is not None and tools is not None:
+        result = await _llm_execute(
+            gateway, tools, state, current_step.description, goal_text, result_cache
+        )
+        if result is not None:
+            return result
+
+    # Simulated execution fallback
+    return await _simulated_execute(state, current_step, goal_text, messages, iteration_count)
+
+
+async def _llm_execute(
+    gateway: LLMGateway,
+    tools: ToolRegistry,
+    state: AgentState,
+    step_description: str,
+    goal_text: str,
+    result_cache: ToolResultCache | None = None,
+) -> dict[str, Any] | None:
+    """Execute step via LLM with tool calling. Returns None on failure."""
+    try:
+        from src.graph.enums import TaskComplexity
+        from src.graph.prompts import (
+            EXECUTE_SYSTEM,
+            NODE_EXECUTE,
+            select_techniques_for_node,
+            splice_evolved,
+            splice_techniques,
+        )
+
+        plan_steps = state.get("plan_steps", [])
+        step_index = state.get("current_step_index", 0)
+        completed_steps = state.get("completed_steps", [])
+        tool_results = state.get("tool_results", [])
+        iteration_count = state.get("iteration_count", 0)
+        memories = state.get("retrieved_memories", [])
+
+        # Build context
+        memory_ctx = ""
+        if memories:
+            memory_ctx = "\nRelevant context:\n" + "\n".join(f"- {m}" for m in memories[:3])
+
+        tool_results_ctx = ""
+        if tool_results:
+            recent = tool_results[-3:]
+            tool_results_ctx = "\nRecent tool results:\n" + "\n".join(
+                f"- {r.tool_name}: {r.output[:100]}" for r in recent if hasattr(r, "tool_name")
+            )
+
+        system_prompt = EXECUTE_SYSTEM.format(
+            goal_text=goal_text,
+            completed_count=len(completed_steps),
+            total_steps=len(plan_steps),
+            step_description=step_description,
+            memory_context=memory_ctx,
+            tool_results_context=tool_results_ctx,
+        )
+
+        # §5: select prompting techniques for this execute call and splice their
+        # bodies into the system prompt. The execute prompt has no JSON-schema
+        # footer, so splice_techniques injects after the opening paragraph.
+        # Gate on the classified complexity so the heuristic/LLM-failure path
+        # (which carries no techniques) stays unchanged.
+        goal = state.get("current_goal")
+        execute_complexity = (
+            goal.complexity if goal and goal.complexity else TaskComplexity.SIMPLE
+        )
+        techniques = select_techniques_for_node(
+            complexity=execute_complexity, node=NODE_EXECUTE, goal_text=goal_text,
+        )
+        system_prompt = splice_techniques(system_prompt, techniques)
+        # Phase 8: prepend any promoted [evolved] guidance for this node (no-op
+        # unless evolution→live promotion is opted in AND a PROMPT mutation was
+        # promoted for the execute node).
+        system_prompt = splice_evolved(system_prompt, NODE_EXECUTE)
+
+        # ── Stateful ReAct thread ─────────────────────────────────────────
+        # state["messages"] is the canonical conversation history (seeded with
+        # the goal by initial_state). Feed it to the LLM so the agent reasons
+        # across steps, and append this step's user turn + assistant reply +
+        # tool results so memory folding has real context to compress. Without
+        # this, every step runs blind and folds save ~nothing.
+        history = state.get("messages", [])
+        step_label = (
+            f"Execute step {step_index + 1}/{len(plan_steps)}: {step_description}"
+        )
+
+        # Get tool definitions for function calling
+        tool_defs = tools.list_tools()
+
+        # A step that declares a concrete output file is a write-step: its
+        # deliverable must be produced via a file-output tool (file_writer),
+        # not narrated as text. Cheaper models frequently emit the deliverable
+        # as prose on turn 1 and only call file_writer after an explicit nudge,
+        # so a write-step gets up to MAX_WRITE_NUDGES extra turns — bounded so
+        # a stubborn refusal degrades gracefully (mark complete) instead of
+        # looping. A non-write step runs once, exactly as before.
+        expected_path = _extract_expected_file_path(step_description)
+        if expected_path is None:
+            # A producing step (merge/combine/… or the final step) that names no
+            # path of its own falls back to the goal's canonical deliverable, so
+            # the final file still gets written to disk instead of narrated as
+            # prose. Only while the deliverable is missing — once written, the
+            # step runs once like any non-write step. (Q3's merge step produced a
+            # text-only overview and q3_overview.md was never created.)
+            goal_deliverable = _extract_goal_deliverable(goal_text)
+            if (
+                goal_deliverable is not None
+                and _is_producing_step(step_description, step_index, len(plan_steps))
+                and not _deliverable_on_disk(goal_deliverable)
+            ):
+                expected_path = goal_deliverable
+                logger.debug(
+                    f"Step has no declared output path; falling back to goal "
+                    f"deliverable '{expected_path}' (producing step, not on disk)"
+                )
+        max_attempts = (get_settings().agent.max_write_nudges + 1) if expected_path else 1
+
+        # Front-load the file_writer requirement on turn 1. Without this, cheaper
+        # models narrate the deliverable as prose on the first attempt and only
+        # call file_writer once the post-hoc nudge fires — burning 1-2 extra
+        # turns (~10-20s) per write-step and often an extra verify→plan cycle.
+        # Stating the exact path + tool up front lets the model write the file
+        # on the first attempt; the nudge (below) remains as a bounded fallback.
+        if expected_path:
+            step_label = (
+                f"{step_label}\n\nThis step's deliverable MUST be written to "
+                f"disk: call the file_writer tool with file_path='{expected_path}', "
+                f"create_dirs=true (so nested output folders are auto-created), "
+                f"and content set to your full deliverable text. Use file_writer "
+                f"for the deliverable file — NOT code_executor. A text-only "
+                f"reply does not count as done — verification reads the "
+                f"filesystem, so the file must exist at that path."
+            )
+
+        # Every LangChain message produced across this step's attempts. On a
+        # nudge path this carries the text-only first turn + the nudge + the
+        # tool-calling follow-up, so reflect/folding see the real trace.
+        turn_messages: list[Any] = []
+        nudge_text: str | None = None
+        raw_tool_calls: list[dict[str, Any]] = []
+        new_tool_results: list[ToolResult] = []
+        response_content: str | None = ""
+
+        for attempt in range(max_attempts):
+            # Payload: system + history + the step turn + prior attempts in
+            # this step + the nudge (when nudging). Re-derived each attempt so
+            # the LLM sees its own prior text-only reply before the nudge.
+            payload: list[dict[str, Any]] = [
+                {"role": "system", "content": system_prompt},
+                *_messages_to_openai(history),
+                {"role": "user", "content": step_label},
+                *_messages_to_openai(turn_messages),
+            ]
+            if nudge_text is not None:
+                payload.append({"role": "user", "content": nudge_text})
+
+            # On a nudge turn (the model narrated instead of writing), force the
+            # file_writer tool call structurally via a named tool_choice that
+            # even narration-prone models cannot ignore. Only when file_writer is
+            # actually offered (always true for write-steps). Turn 1 stays free
+            # so a step that must compute (call code_executor, etc.) before
+            # writing still can. Cures the q3/q4 "narrates through all nudges"
+            # loop. OpenAI / DashScope-compat / NVIDIA-NIM all honor this.
+            forced_tool_choice: dict[str, Any] | None = None
+            if nudge_text is not None and _offers_tool(tool_defs, "file_writer"):
+                forced_tool_choice = {
+                    "type": "function",
+                    "function": {"name": "file_writer"},
+                }
+
+            response = await gateway.acompletion_with_tools(
+                messages=payload,
+                tools=tool_defs,
+                tool_choice=forced_tool_choice,
+            )
+
+            # Process tool calls if present. gather preserves order, so each
+            # result zips 1:1 with its tool_call — needed for ToolMessage
+            # correlation.
+            raw_tool_calls = response.tool_calls or []
+            new_tool_results = (
+                await _execute_tool_calls_parallel(
+                    raw_tool_calls, tools, result_cache
+                )
+                if raw_tool_calls
+                else []
+            )
+            response_content = response.content
+
+            # Append this attempt's real turn to the thread (Human → AI → Tool).
+            turn_messages.append(
+                HumanMessage(content=nudge_text if nudge_text is not None else step_label)
+            )
+            turn_messages.append(_build_ai_message(response.content, raw_tool_calls))
+            for tc, tr in zip(raw_tool_calls, new_tool_results, strict=False):
+                tr.metadata["tool_call_id"] = tc.get("id", "")
+                turn_messages.append(
+                    ToolMessage(
+                        content=tr.output or tr.error or "",
+                        tool_call_id=tc.get("id", ""),
+                        name=tr.tool_name,
+                    )
+                )
+
+            current_step = plan_steps[step_index]
+
+            # A failed tool call (e.g. a hallucinated tool name) must not read
+            # as progress. Keep the step ACTIVE, DO NOT advance the index, and
+            # surface the failure in the thread + tool_results so the next
+            # execute pass retries with feedback. route_after_execute routes
+            # the failed result back to execute (recoverable, bounded by the
+            # max-iterations guard). (F14: previously a failed tool call was
+            # marked COMPLETED and the run aborted with is_complete=True.)
+            if any(not tr.success for tr in new_tool_results):
+                current_step.status = GoalStatus.ACTIVE
+                logger.info(
+                    f"Step {step_index + 1} had failed tool call(s); "
+                    f"retrying without advancing"
+                )
+                return {
+                    "phase": Phase.EXECUTE,
+                    "messages": turn_messages,
+                    "current_step_index": step_index,  # unchanged → retry same step
+                    "iteration_count": iteration_count + 1,
+                    "tool_results": new_tool_results,
+                }
+
+            # Write-step that did not call a file-output tool AND whose declared
+            # deliverable is NOT already on disk → nudge and retry if attempts
+            # remain; otherwise fall through to mark complete (verify then flags
+            # the missing deliverable). The disk check is what lets a
+            # code_executor-mediated write satisfy a write-step: code_executor is
+            # not in FILE_OUTPUT_TOOLS (it has no file_path arg to record), but
+            # when the agent's generated code DOES write the deliverable to disk
+            # the step is genuinely done — nudging anyway false-fires and burns
+            # max_attempts turns re-prompting for a file_writer call that isn't
+            # needed (battery-04 q1+q3: the agent wrote results/<run>/*.csv via
+            # code_executor, the nudge looped 3x → "marking complete (verify
+            # will flag the gap)", verify flagged missing, run looped to
+            # MAX_ITERATIONS). Resolves via the same normalize() the goal-
+            # deliverable fall-back uses, so it sees exactly where the file lands.
+            if (
+                expected_path
+                and not _called_file_output_tool(raw_tool_calls)
+                and not _deliverable_on_disk(expected_path)
+            ):
+                if attempt < max_attempts - 1:
+                    nudge_text = _write_nudge(expected_path)
+                    logger.info(
+                        f"Step {step_index + 1} expects deliverable at "
+                        f"{expected_path} but no file-output tool was called; "
+                        f"nudging (attempt {attempt + 2}/{max_attempts})"
+                    )
+                    continue
+                logger.warning(
+                    f"Step {step_index + 1} expects deliverable at "
+                    f"{expected_path} but file_writer was not called after "
+                    f"{max_attempts} attempts; marking complete "
+                    f"(verify will flag the gap)"
+                )
+
+            break  # success: tool called, or not a write-step, or budget spent
+
+        # Mark step complete with the LLM result. Record the actual write-tool
+        # call on the step so verify's deliverable detection has the
+        # authoritative path (not just phrasal cues from the plan text).
+        current_step = plan_steps[step_index]
+        current_step.status = GoalStatus.COMPLETED
+        result_text = response_content or step_description
+        current_step.result = result_text[:500]
+        file_tc = _first_file_output_call(raw_tool_calls)
+        if file_tc is not None:
+            current_step.tool_name = "file_writer"
+            current_step.tool_input = _tool_call_args(file_tc)
+
+        return {
+            "phase": Phase.REFLECT,
+            "messages": turn_messages,
+            "current_step_index": step_index + 1,
+            "iteration_count": iteration_count + 1,
+            "completed_steps": [current_step],
+            "tool_results": new_tool_results,
+        }
+    except Exception as e:
+        logger.debug(f"LLM execution failed, using simulated: {e}")
+        return None
+
+
+async def _simulated_execute(
+    state: AgentState,
+    current_step: Any,
+    goal_text: str,
+    messages: list[Any],  # noqa: ARG001 — kept for future use
+    iteration_count: int,
+) -> dict[str, Any]:
+    """Simulated step execution (heuristic fallback)."""
+    step_index = state.get("current_step_index", 0)
+
+    user_message = {
+        "role": "user",
+        "content": (
+            f"Execute the following step:\n"
+            f"Step: {current_step.description}\n"
+            f"Goal context: {goal_text}\n"
+            f"Tool: {current_step.tool_name or 'none specified'}\n"
+            f"Proceed with execution."
+        ),
+    }
+
+    current_step.status = GoalStatus.COMPLETED
+    current_step.result = f"Executed: {current_step.description}"
+
+    return {
+        "phase": Phase.REFLECT,
+        "messages": [user_message],
+        "current_step_index": step_index + 1,
+        "iteration_count": iteration_count + 1,
+        "completed_steps": [current_step],
+    }
+
+
+async def _execute_tool_call(
+    tc: dict[str, Any],
+    tools: ToolRegistry,
+    cache: ToolResultCache | None = None,
+) -> ToolResult:
+    """Execute a single tool call and return a ToolResult.
+
+    For idempotent, cacheable tools (opt-in via the registry), successful
+    results are served from / written to ``cache`` so repeated calls within
+    and across runs skip the underlying work. Errors are never cached and any
+    cache failure degrades to a transparent miss.
+
+    Args:
+        tc: Tool call dict with function.name and function.arguments.
+        tools: Tool registry for handler lookup.
+        cache: Optional result cache for cacheable tools.
+
+    Returns:
+        ToolResult with success/failure status.
+    """
+    tool_name = tc.get("function", {}).get("name", tc.get("name", ""))
+    tool_args_str = tc.get("function", {}).get("arguments", tc.get("args", "{}"))
+
+    handler = tools.get_handler(tool_name)
+    if handler is None:
+        return ToolResult(
+            tool_name=tool_name,
+            success=False,
+            output="",
+            error=f"Unknown tool: {tool_name}",
+        )
+
+    # Parse args up front: the cache key needs canonical args, and a clean
+    # parse error is more useful than a generic handler exception.
+    try:
+        args = json.loads(tool_args_str) if isinstance(tool_args_str, str) else tool_args_str
+    except (json.JSONDecodeError, TypeError) as exc:
+        return ToolResult(
+            tool_name=tool_name,
+            success=False,
+            output="",
+            error=f"Invalid arguments for {tool_name}: {exc}",
+        )
+
+    # Cache lookup — only for opt-in cacheable tools.
+    if cache is not None and tools.is_cacheable(tool_name):
+        cached = await cache.get(tool_name, args)
+        if cached is not None:
+            logger.debug(f"Tool cache HIT: {tool_name}")
+            return ToolResult(
+                tool_name=tool_name,
+                success=bool(cached.get("success", True)),
+                output=str(cached.get("output", "")),
+                error=cached.get("error"),
+                metadata={"cached": True},
+            )
+
+    start = time.perf_counter()
+    try:
+        result = await handler(**args)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        out = str(result)
+        tr = ToolResult(
+            tool_name=tool_name,
+            success=True,
+            output=out[:2000],
+        )
+        # Record the invocation outcome (non-fatal; gated by TOOL_METRICS_ENABLED).
+        # A blank success is an empty-output signal; latency is captured for both.
+        await _record_tool_metric(
+            tool_name, success=True, empty_output=not out.strip(), latency_ms=latency_ms
+        )
+        # Cache only successful results of cacheable tools (never errors).
+        if cache is not None and tools.is_cacheable(tool_name):
+            await cache.set(
+                tool_name,
+                args,
+                {
+                    "success": tr.success,
+                    "output": tr.output,
+                    "error": tr.error,
+                },
+            )
+        return tr
+    except Exception as e:
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        await _record_tool_metric(
+            tool_name, success=False, empty_output=False, latency_ms=latency_ms
+        )
+        return ToolResult(
+            tool_name=tool_name,
+            success=False,
+            output="",
+            error=str(e)[:500],
+        )
+
+
+async def _record_tool_metric(
+    tool_name: str, *, success: bool, empty_output: bool, latency_ms: int
+) -> None:
+    """Record a tool-invocation outcome (M4 success metrics).
+
+    Thin, non-fatal wrapper around :meth:`ToolMetricsRecorder.record` so the
+    execute chokepoint stays decoupled from the recorder/DB. A failure here (e.g.
+    DB unavailable) is logged inside the recorder and never propagates — metrics
+    are observability-only and must never break a tool call.
+    """
+    try:
+        from src.tools.metrics import ToolMetricsRecorder
+
+        await ToolMetricsRecorder().record(
+            tool_name,
+            success=success,
+            empty_output=empty_output,
+            latency_ms=latency_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 — metrics must never break a tool call
+        logger.debug("Tool metric recording skipped for '{}': {}", tool_name, exc)
+
+
+async def _execute_tool_calls_parallel(
+    tool_calls: list[dict[str, Any]],
+    tools: ToolRegistry,
+    cache: ToolResultCache | None = None,
+) -> list[ToolResult]:
+    """Execute multiple tool calls concurrently with semaphore limiting.
+
+    Uses asyncio.gather so independent tool calls run in parallel.
+    A semaphore caps concurrency at MAX_CONCURRENT_TOOLS to avoid
+    overwhelming external services.
+
+    Args:
+        tool_calls: List of tool call dicts from LLM response.
+        tools: Tool registry for handler lookup.
+        cache: Optional result cache forwarded to each call.
+
+    Returns:
+        List of ToolResult in the same order as tool_calls.
+    """
+    if not tool_calls:
+        return []
+
+    if len(tool_calls) == 1:
+        # Single call — skip gather overhead
+        return [await _execute_tool_call(tool_calls[0], tools, cache)]
+
+    semaphore = asyncio.Semaphore(get_settings().agent.max_concurrent_tools)
+
+    async def _limited(tc: dict[str, Any]) -> ToolResult:
+        async with semaphore:
+            return await _execute_tool_call(tc, tools, cache)
+
+    results = await asyncio.gather(*[_limited(tc) for tc in tool_calls])
+    return list(results)

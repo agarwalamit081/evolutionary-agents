@@ -1,0 +1,48 @@
+{# Negative Prompting: Explicit exclusion constraints with self-verification #}
+Objective: {{ objective|default("Provide a direct, factual, and concise answer while strictly avoiding prohibited elements.") }}
+
+<positive_guidelines>
+{% if positive_guidelines %}
+{% for item in positive_guidelines %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- Be direct and factual.
+- Use concise language.
+{% endif %}
+</positive_guidelines>
+
+<negative_constraints>
+{% if negative_constraints %}
+{% for item in negative_constraints %}
+- DO NOT {{ item }}
+{% endfor %}
+{% else %}
+- DO NOT use vague or speculative language.
+- DO NOT include irrelevant information or filler words.
+- DO NOT make assumptions beyond what is explicitly given.
+{% endif %}
+</negative_constraints>
+
+{% if forbidden_topics %}
+<forbidden_topics>
+{{ forbidden_topics }}
+</forbidden_topics>
+{% endif %}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+1. Draft your answer.
+2. In the <constraint_check> block, explicitly verify that your draft violates NONE of the <negative_constraints>.
+3. Output the final, clean answer in <final_answer>.
+
+<constraint_check>
+Verify each constraint and confirm none are violated
+</constraint_check>
+
+<final_answer>
+Your verified final answer after constraint check
+</final_answer>

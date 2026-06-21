@@ -1,0 +1,35 @@
+{# Non-Text Prompting: Code/structured data to guide response #}
+Represent the problem using structured data formats for precise reasoning.
+
+Query: {{ user_input }}
+
+{% if input_modality %}
+Input modality: {{ input_modality }}
+{% if input_modality == "table" %}
+Schema: {{ schema }}
+Records: {{ data_sample }}
+{% elif input_modality == "json" %}
+Structure: {{ schema }}
+Data: {{ data_sample }}
+{% endif %}
+{% else %}
+Input modality: structured data
+
+Represent as:
+- Python data structures (lists, dicts, sets, tuples)
+- Tables with rows and columns
+- Pseudocode or algorithms
+- Graph structures
+{% endif %}
+
+[STRUCTURED REPRESENTATION]
+Convert the query into appropriate structured format.
+
+[REASONING ON STRUCTURED DATA]
+Using the structured data representation, solve the problem through:
+- Pattern recognition
+- Algorithmic processing
+- Data manipulation
+- Logical deduction
+
+Final answer: [Result from structured data analysis]

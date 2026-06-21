@@ -1,0 +1,28 @@
+{# Contrastive Prompting: Side-by-side do's and don'ts examples #}
+Use this contrastive approach:
+
+[DO] Example of correct approach:
+{% if positive_example %}
+{{ positive_example }}
+{% else %}
+✓ Correct way: ...
+✓ Why it works: ...
+{% endif %}
+
+[DON'T] Example of incorrect approach:
+{% if negative_example %}
+{{ negative_example }}
+{% else %}
+✗ Wrong way: ...
+✗ Why it fails: ...
+{% endif %}
+
+{% if contrast_criteria %}
+Key contrasts to observe:
+{% for contrast in contrast_criteria %}
+- {{ contrast }}
+{% endfor %}
+{% endif %}
+
+[APPLY]
+Apply the correct approach to solve: {{ user_input }}

@@ -1,0 +1,21 @@
+{# Rephrase and Respond: Two-step clarification to eliminate ambiguity #}
+Objective: {{ objective|default("Clarify the query by rephrasing it before attempting to answer.") }}
+
+<original_query>
+{{ user_input|default(query|default("")) }}
+</original_query>
+
+Instructions:
+Ambiguity is the enemy of accuracy. First, clarify what is actually being asked.
+
+<rephrased_query>
+Restate the query in your own words to be as explicit, precise, and unambiguous as possible. Identify the core intent.
+</rephrased_query>
+
+<assumption_clarification>
+List any implicit assumptions you are making to answer this rephrased query. If the query is fundamentally ambiguous, state the different possible interpretations.
+</assumption_clarification>
+
+<final_answer>
+Provide the comprehensive answer based strictly on the clarified <rephrased_query> and stated assumptions.
+</final_answer>

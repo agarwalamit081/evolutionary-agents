@@ -1,0 +1,38 @@
+{# Directional Stimulus: Hints to steer reasoning without giving the answer #}
+Objective: {{ objective|default("Solve the query by utilizing the provided directional hints to guide your reasoning process.") }}
+
+<directional_hints>
+{% if hints %}
+{% for hint in hints %}
+- {{ hint }}
+{% endfor %}
+{% else %}
+- Break complex problems into smaller, manageable parts.
+- Consider multiple perspectives before concluding.
+- Verify your reasoning by working backwards from a hypothetical answer.
+- Use concrete examples to test abstract concepts.
+{% endif %}
+</directional_hints>
+
+{% if hint_rationale %}
+<hint_rationale>
+{{ hint_rationale }}
+</hint_rationale>
+{% endif %}
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+Instructions:
+1. The hints are a "compass", not the answer. Use them to steer your focus.
+2. In the <reasoning_alignment> block, explicitly state how you applied the hints to guide your thought process.
+3. Provide the final answer based on this guided reasoning.
+
+<reasoning_alignment>
+Explain how you applied each hint to guide your reasoning process
+</reasoning_alignment>
+
+<answer>
+Your final answer based on guided reasoning
+</answer>

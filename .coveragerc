@@ -1,0 +1,27 @@
+# Coverage configuration — makes coverage measurable + enforced.
+# Run: python -m pytest -k "not e2e" --cov --cov-report=term-missing
+# (pytest-cov is a declared dependency; .coverage + htmlcov/ are gitignored.)
+[run]
+source = src
+branch = True
+omit =
+    */tests/*
+
+[report]
+show_missing = True
+# Lines/constructs that are unreachable by deterministic unit tests.
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @overload
+    def __repr__
+# Floor that guards regressions. Measured line coverage 84% over all of src/
+# (branch coverage is stricter — see the run that produced this file); 80%
+# keeps a small buffer below current state so a regression fails the gate
+# without breaking on healthy code.
+fail_under = 80
+
+[html]
+directory = htmlcov

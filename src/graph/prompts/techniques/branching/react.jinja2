@@ -1,0 +1,35 @@
+{# ReAct: Interleave reasoning with tool actions #}
+You are an expert AI assistant. Answer the following query by interleaving reasoning with tool actions.
+
+<query>
+{{ user_input|default(query|default("")) }}
+</query>
+
+{% set max_iterations = max_iterations|default(3) %}
+{% set iteration = iteration|default(1) %}
+
+<available_tools>
+Available tools: {{ available_tools|default("calculation_tool, code_execution_tool, compound_interest_tool, permutation_tool") }}
+</available_tools>
+
+Solve step by step using tools when needed.
+
+<iteration_{{ iteration }}>
+THOUGHT: [Your reasoning about what to do next]
+
+ACTION: [Tool name to use, or NONE if ready to answer]
+
+{% if action and action != "NONE" %}
+<tool_use>
+Tool: {{ action }}
+Action Input: [input for the tool]
+Observation: [result from tool]
+</tool_use>
+{% endif %}
+</iteration_{{ iteration }}>
+
+{% if iteration == max_iterations or solution_is_clear %}
+<final_answer>
+FINAL ANSWER: Your final answer to the query
+</final_answer>
+{% endif %}

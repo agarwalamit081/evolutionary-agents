@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: turing-postgres
+    environment:
+      POSTGRES_DB: turing_agent
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    ports:
+      - "5433:5432"
+    volumes:
+      # pg18+ uses version-specific data subdirs; mount the PARENT so future
+      # major-version upgrades work via pg_upgrade (docker-library/postgres#1259).
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - turing-net
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: turing-redis
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    ports:
+      - "6380:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - turing-net
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: turing-agent
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/turing_agent
+      REDIS_URL: redis://redis:6379/0
+      # Persist deliverables + workspace across container restarts. Both land on
+      # the already-mounted turing-workspace volume (/home/turing/.turing), so no
+      # new volume is needed. Without these overrides the relative defaults
+      # (".turing/workspace", "results") resolve under /app and are ephemeral —
+      # and the workspace volume above was effectively unused. results_root's
+      # parent (/home/turing/.turing) is the project_root every file tool runs
+      # from, so a written results/<file> survives restarts.
+      WORKSPACE_ROOT: /home/turing/.turing/workspace
+      RESULTS_ROOT: /home/turing/.turing/results
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - turing-workspace:/home/turing/.turing
+      - turing-logs:/home/turing/logs
+    networks:
+      - turing-net
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  turing-workspace:
+  turing-logs:
+
+networks:
+  turing-net:
+    driver: bridge

@@ -279,6 +279,14 @@ alembic upgrade head
 > `Database engine created → localhost:5433/turing_agent`); verify the
 > host/database match the container (`turing-postgres` / `turing_agent`).
 
+> **⚠️ Do not run the legacy `../web-search/docker-compose.yml`** — that older
+> standalone stack (the `ws_*` containers: `ws_searxng`/`ws_meilisearch`/
+> `ws_postgres`/`ws_redis` + its own api/worker) is fully superseded by this
+> project's `turing-*` services. Bringing it up alongside the app duplicates
+> SearXNG/Meilisearch/Postgres/Redis on clashing ports and wastes resources.
+> It is kept only as a reference; if it is ever running, stop it with
+> `docker compose -f ../web-search/docker-compose.yml down` (plain, no `-v`).
+
 ### 2. Configure
 
 ```bash

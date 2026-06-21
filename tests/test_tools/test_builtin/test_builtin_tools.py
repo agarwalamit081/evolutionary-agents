@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from src.tools.builtin import ALL_TOOL_DEFINITIONS
@@ -294,52 +296,32 @@ class TestFileWriterResultsDir:
 
 
 class TestWebSearch:
-    """Tests for the ddgs-based web_search tool (mocked ddgs client)."""
+    """Tests for the SearXNG-primary web_search tool (mocked fetch seam)."""
 
     @pytest.mark.asyncio
     async def test_returns_formatted_results(self) -> None:
         """Results are formatted as title / snippet / URL."""
         fake = [{"title": "T", "href": "http://example.com/x", "body": "B"}]
-        with patch("src.tools.builtin.web_search._ddgs_text", return_value=fake):
+        with patch("src.tools.builtin.web_search._fetch_results", return_value=fake):
             result = await web_search("test query")
         assert "T" in result and "http://example.com/x" in result and "B" in result
 
     @pytest.mark.asyncio
     async def test_no_results_message(self) -> None:
         """Empty results yield a clear 'no results' message."""
-        with patch("src.tools.builtin.web_search._ddgs_text", return_value=[]):
+        with patch("src.tools.builtin.web_search._fetch_results", return_value=[]):
             result = await web_search("obscure query")
         assert "No results" in result
 
     @pytest.mark.asyncio
-    async def test_backend_failure_returns_error(self) -> None:
-        """When all backends fail, an ERROR string is returned (not raised)."""
-        from ddgs.exceptions import DDGSException
-
+    async def test_fetch_failure_returns_error(self) -> None:
+        """When the fetch layer raises, an ERROR string is returned (not raised)."""
         with patch(
-            "src.tools.builtin.web_search._ddgs_text", side_effect=DDGSException("boom")
+            "src.tools.builtin.web_search._fetch_results",
+            side_effect=RuntimeError("boom"),
         ):
             result = await web_search("fail query")
         assert "ERROR" in result
-
-    @pytest.mark.asyncio
-    async def test_strict_safesearch_and_param_passthrough(self) -> None:
-        """region/timelimit/max_results flow through; safesearch is forced strict."""
-        from unittest.mock import MagicMock
-
-        mock = MagicMock(
-            return_value=[{"title": "T", "href": "http://example.com/a", "body": "B"}]
-        )
-        with patch("src.tools.builtin.web_search._ddgs_text", mock):
-            await web_search("q", max_results=7, region="wt-wt", timelimit="w")
-
-        assert mock.call_args is not None
-        # Called positionally: (query, max_results, region, safesearch, timelimit)
-        args = mock.call_args.args
-        assert args[1] == 7          # max_results
-        assert args[2] == "wt-wt"    # region
-        assert args[3] == "strict"   # safesearch forced strict (§6)
-        assert args[4] == "w"        # timelimit
 
     @pytest.mark.asyncio
     async def test_filters_spam_domains(self) -> None:
@@ -348,7 +330,7 @@ class TestWebSearch:
             {"title": "Spam", "href": "https://www.pinterest.com/pin/123", "body": "x"},
             {"title": "Good", "href": "https://example.com/article", "body": "y"},
         ]
-        with patch("src.tools.builtin.web_search._ddgs_text", return_value=fake):
+        with patch("src.tools.builtin.web_search._fetch_results", return_value=fake):
             result = await web_search("query")
         assert "Good" in result
         assert "pinterest.com" not in result
@@ -360,7 +342,7 @@ class TestWebSearch:
             {"title": "A", "href": "https://example.com/a?utm_source=x", "body": "b"},
             {"title": "A2", "href": "https://example.com/a", "body": "b"},
         ]
-        with patch("src.tools.builtin.web_search._ddgs_text", return_value=fake):
+        with patch("src.tools.builtin.web_search._fetch_results", return_value=fake):
             result = await web_search("query")
         assert result.count("URL:") == 1  # deduped to a single result
         assert "utm_source" not in result  # tracking param stripped from output
@@ -372,7 +354,7 @@ class TestWebSearch:
             "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Freal&rut=abc"
         )
         fake = [{"title": "Real", "href": redirect, "body": "content"}]
-        with patch("src.tools.builtin.web_search._ddgs_text", return_value=fake):
+        with patch("src.tools.builtin.web_search._fetch_results", return_value=fake):
             result = await web_search("query")
         assert "https://example.com/real" in result
         assert "duckduckgo.com/l/" not in result
@@ -383,10 +365,182 @@ class TestWebSearch:
         from unittest.mock import MagicMock
 
         mock = MagicMock(return_value=[])
-        with patch("src.tools.builtin.web_search._ddgs_text", mock):
+        with patch("src.tools.builtin.web_search._fetch_results", mock):
             result = await web_search("   ")
         assert "ERROR" in result
         assert mock.call_count == 0  # never reached the fetcher
+
+    @pytest.mark.asyncio
+    async def test_batch_mode_returns_one_block_per_query(self) -> None:
+        """queries=[...] fans out and yields one Query-prefixed block each."""
+        per_query = [
+            [{"title": "T1", "href": "http://a.com/1", "body": "B1"}],
+            [],  # second query has no results
+        ]
+        with patch(
+            "src.tools.builtin.web_search._fetch_batch", return_value=per_query
+        ):
+            result = await web_search(queries=["alpha", "beta"])
+        assert 'Query: "alpha"' in result
+        assert "T1" in result
+        # second query's no-results block is present
+        assert 'Query: "beta"' in result
+        assert "No results" in result
+
+
+class TestSearXNGFetcher:
+    """Unit tests for the SearXNG primary fetcher (mocked httpx transport)."""
+
+    @pytest.mark.asyncio
+    async def test_searxng_call_normalizes_results(self) -> None:
+        """SearXNG JSON is normalized to title/href/body + params carry region/time."""
+        from src.tools.builtin.web_search import _searxng_call
+
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.update(request.url.params)
+            return httpx.Response(
+                200,
+                json={"results": [
+                    {"title": "T", "url": "https://x.com/a", "content": "snippet"},
+                ]},
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            rows = await _searxng_call(client, "q", 5, "us-en", "w")
+
+        assert rows == [{"title": "T", "href": "https://x.com/a", "body": "snippet"}]
+        # region us-en -> SearXNG language en-US; timelimit w -> time_range week.
+        assert seen["format"] == "json"
+        assert seen["language"] == "en-US"
+        assert seen["time_range"] == "week"
+        assert seen["safesearch"] == "2"
+
+    @pytest.mark.asyncio
+    async def test_transient_5xx_is_retried_then_raises(self) -> None:
+        """A persistent 5xx is retried (transient) then surfaces as an error."""
+        from src.tools.builtin.web_search import (
+            _searxng_fetch,
+            TransientSearchError,
+        )
+
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(503, text="upstream down")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(TransientSearchError):
+                await _searxng_fetch(client, "q", 5, "us-en", "")
+
+        # Retried up to WEB_SEARCH_MAX_ATTEMPTS (default 3) before giving up.
+        assert calls["n"] == 3
+
+
+class TestFallbackChain:
+    """Tests for the SearXNG → paid-provider fallback orchestrator."""
+
+    @pytest.mark.asyncio
+    async def test_searxng_success_short_circuits_paid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When SearXNG returns results, no paid provider is called."""
+        from src.tools.builtin import web_search as ws
+
+        monkeypatch.setenv("TAVILY_API_KEY", "k")
+        tavily_calls = {"n": 0}
+
+        async def fake_tavily(client, key, query, max_results):
+            tavily_calls["n"] += 1
+            return []
+
+        monkeypatch.setitem(ws.PROVIDER_ADAPTERS, "tavily", fake_tavily)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"results": [
+                {"title": "S", "url": "https://s.com", "content": "c"}]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            rows = await ws._search_with_fallback(client, "q", 5, "us-en", "", False)
+
+        assert rows and rows[0]["href"] == "https://s.com"
+        assert tavily_calls["n"] == 0  # paid fallback never engaged
+
+    @pytest.mark.asyncio
+    async def test_searxng_down_falls_to_paid_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SearXNG 400 (non-transient) → keyed Tavily provider is tried next."""
+        from src.tools.builtin import web_search as ws
+
+        monkeypatch.setenv("TAVILY_API_KEY", "k")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "api.tavily.com" in str(request.url):
+                return httpx.Response(200, json={"results": [
+                    {"title": "TV", "url": "https://t.com", "content": "tc"}]})
+            # SearXNG primary: non-transient 400 → provider unavailable, no retry.
+            return httpx.Response(400, text="bad")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            rows = await ws._search_with_fallback(client, "q", 5, "us-en", "", False)
+
+        assert rows and rows[0]["href"] == "https://t.com"
+
+    @pytest.mark.asyncio
+    async def test_no_keyed_providers_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With SearXNG down and no provider keys, [] is returned (never raised)."""
+        from src.tools.builtin import web_search as ws
+
+        for var in (
+            "TAVILY_API_KEY", "SERPER_API_KEY", "BRAVE_SEARCH_API_KEY",
+            "SERPAPI_API_KEY", "SERPSTACK_API_KEY", "LLMLAYER_API_KEY",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, text="bad")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            rows = await ws._search_with_fallback(client, "q", 5, "us-en", "", False)
+
+        assert rows == []
+
+
+class TestBatchConcurrency:
+    """The batch semaphore caps concurrent fetches at SEARCH_BATCH_CONCURRENCY."""
+
+    @pytest.mark.asyncio
+    async def test_concurrency_capped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        from src.tools.builtin import web_search as ws
+
+        # get_settings() is a cached singleton, so setenv can't change the value
+        # already read at construction — patch the accessor directly.
+        monkeypatch.setattr(
+            ws, "_search_settings",
+            lambda: SimpleNamespace(search_batch_concurrency=2),
+        )
+        live = {"now": 0, "peak": 0}
+
+        async def slow_fetch(query, max_results, region, timelimit, deep_crawl):
+            live["now"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+            await asyncio.sleep(0.02)
+            live["now"] -= 1
+            return [{"title": query, "href": f"http://x/{query}", "body": "b"}]
+
+        monkeypatch.setattr(ws, "_fetch_results", slow_fetch)
+        # 6 queries, concurrency capped at 2 → peak in-flight never exceeds 2.
+        await ws._fetch_batch(["q1", "q2", "q3", "q4", "q5", "q6"], 5, "us-en", "", False)
+        assert live["peak"] <= 2
 
 
 class TestWebSearchCleaning:

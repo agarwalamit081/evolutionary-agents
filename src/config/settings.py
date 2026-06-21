@@ -537,6 +537,49 @@ class ToolLimitsSettings(BaseSettings):
         return self
 
 
+class ToolSandboxSettings(BaseSettings):
+    """Runtime ``code_executor`` isolation (Phase 2c — opt-in, default off).
+
+    The ``code_executor`` builtin normally runs untrusted one-off LLM code in a
+    HOST subprocess (network on, no mem cap, full host FS) — the T2-high
+    sandbox-bypass gap from findings-03. When ``code_executor_mode='docker'``,
+    the tool instead routes the code through ``SandboxExecutor`` docker mode:
+    network disabled, container rootfs read-only, a memory cap, and the agent's
+    results dir mounted read-write so ``results/<file>`` deliverables still
+    persist. If Docker is unavailable it falls back to the host subprocess (with
+    a WARNING) so a run never hard-fails on a missing daemon.
+
+    Distinct from ``EvolutionSettings``: that sandbox vets ALREADY-statically-
+    validated handler code and runs host BY DESIGN (``execute_code_subprocess``);
+    this gates UNVALIDATED runtime one-off code, so it defaults OFF until an
+    operator opts in. The ``turing-toolbox`` image mirrors
+    ``src/tools/dynamic/allowlist.py`` so an import of an allowlisted third-party
+    dep resolves in the container too.
+    """
+
+    code_executor_mode: Literal["subprocess", "docker"] = "subprocess"
+    code_executor_sandbox_image: str = "turing-toolbox:latest"
+    code_executor_sandbox_memory_mb: int = 512
+    # Timeout for the docker code run. Defaults higher than the host
+    # ``code_executor_timeout`` because a cold container start adds latency.
+    code_executor_sandbox_timeout: int = 60
+    # Host path mounted read-write at ``code_executor_sandbox_workdir_dest``
+    # inside the container so a script's ``results/<file>`` writes persist. Empty
+    # → resolves to ``results_root()`` at call time (the agent's RESULTS_ROOT).
+    code_executor_results_mount: str = ""
+    # Container path where the results mount lands. Paired with
+    # ``working_dir=/workspace`` so a relative ``results/foo.md`` resolves to the
+    # mounted host results dir — the same contract the host subprocess honors.
+    code_executor_sandbox_workdir_dest: str = "/workspace/results"
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 # ─── Budget Settings ────────────────────────────────────────────────
 
 
@@ -1060,6 +1103,7 @@ class Settings(BaseSettings):
     reasoning: ReasoningControlSettings = ReasoningControlSettings()  # type: ignore[assignment]
     native_structured: NativeStructuredSettings = NativeStructuredSettings()  # type: ignore[assignment]
     tools: ToolLimitsSettings = ToolLimitsSettings()  # type: ignore[assignment]
+    tool_sandbox: ToolSandboxSettings = ToolSandboxSettings()  # type: ignore[assignment]
     eval: EvalSettings = EvalSettings()  # type: ignore[assignment]
     search: SearchSettings = SearchSettings()  # type: ignore[assignment]
     worker: WorkerSettings = WorkerSettings()  # type: ignore[assignment]

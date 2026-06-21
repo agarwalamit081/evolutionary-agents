@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import shutil
+import sys
+import types
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from src.sandbox.executor import SandboxExecutor, SandboxResult
+from src.sandbox.executor import SandboxExecutor, SandboxResult, SandboxUnavailable
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -238,3 +242,215 @@ async def test_subprocess_writes_tempfile_fixture() -> None:
 
     assert result.success is True, f"stderr={result.stderr}"
     assert "fixture-ok" in result.stdout
+
+
+# ── execute_runtime_code (Phase 2c — runtime code_executor docker isolation) ──
+#
+# Module-level fake ``docker`` exception classes so tests can construct instances
+# (e.g. _FakeImageNotFound()) and hand them to _install_fake_docker as the
+# behavior the fake client.containers.run should exhibit.
+
+
+class _FakeDockerException(Exception):
+    pass
+
+
+class _FakeImageNotFound(_FakeDockerException):
+    pass
+
+
+class _FakeContainerError(_FakeDockerException):
+    def __init__(self, exit_status: int = 1, stderr: bytes = b"") -> None:
+        super().__init__("container error")
+        self.exit_status = exit_status
+        self.stderr = stderr
+
+
+class _FakeContainer:
+    """A container-like object returned by the fake client on the success path."""
+
+    def wait(self) -> dict[str, int]:
+        return {"StatusCode": 0}
+
+    def logs(self, stdout: bool = True, stderr: bool = False) -> bytes:
+        return b"hello-from-container" if stdout else b""
+
+    def remove(self, force: bool = True) -> None:
+        del force
+
+
+def _docker_settings() -> object:
+    """Settings configured for docker mode + the turing-toolbox image."""
+
+    class _Settings:
+        evolution_sandbox_mode = "docker"
+        evolution_sandbox_image = "turing-toolbox:latest"
+        evolution_sandbox_memory_mb = 512
+        evolution_sandbox_timeout = 30
+
+    return _Settings()
+
+
+def _install_fake_docker(
+    monkeypatch: pytest.MonkeyPatch, run_behavior: object
+) -> dict[str, object]:
+    """Install a fake ``docker`` package into ``sys.modules`` for hermetic testing.
+
+    ``run_behavior`` controls ``client.containers.run``:
+      - a container-like object (has .wait/.logs/.remove) → success path;
+      - an exception INSTANCE → raised as-is (infra or ContainerError).
+
+    Returns the ``capture`` dict whose ``["kwargs"]`` holds the run kwargs.
+    """
+    errors: Any = types.ModuleType("docker.errors")
+    errors.DockerException = _FakeDockerException
+    errors.ContainerError = _FakeContainerError
+    errors.ImageNotFound = _FakeImageNotFound
+    errors.APIError = _FakeDockerException
+
+    capture: dict[str, object] = {"kwargs": None}
+
+    class _FakeContainers:
+        def run(self, **kwargs: object) -> _FakeContainer:
+            capture["kwargs"] = kwargs
+            if isinstance(run_behavior, BaseException):
+                raise run_behavior
+            assert not isinstance(run_behavior, type), "pass an instance, not a class"
+            return run_behavior  # type: ignore[return-value]
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+        def close(self) -> None:
+            pass
+
+    docker: Any = types.ModuleType("docker")
+    docker.from_env = lambda: _FakeClient()
+    docker.errors = errors
+
+    monkeypatch.setitem(sys.modules, "docker", docker)
+    monkeypatch.setitem(sys.modules, "docker.errors", errors)
+    return capture
+
+
+@pytest.mark.asyncio
+async def test_execute_runtime_code_requires_docker_mode() -> None:
+    """execute_runtime_code refuses to run when the executor isn't docker-mode.
+
+    The runtime path gates UNVALIDATED code; silently running it in a host
+    subprocess (the evolution path's degrade behavior) would re-open the
+    sandbox-bypass gap. It must raise SandboxUnavailable instead.
+    """
+    executor = SandboxExecutor(_subprocess_settings())  # mode=subprocess
+    with pytest.raises(SandboxUnavailable):
+        await executor.execute_runtime_code(
+            "print('x')", workdir="/tmp", workdir_dest="/workspace/results"
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_runtime_code_mounts_results_rw_and_isolates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The runtime container mounts results/ RW (deliverables persist), the
+    script RO, runs network-off + read-only + mem-capped, with working_dir set
+    to the mount's parent so a relative ``results/<file>`` resolves.
+
+    Hermetic: a fake ``docker`` package captures the ``containers.run`` kwargs
+    instead of touching a real daemon.
+    """
+    capture = _install_fake_docker(monkeypatch, _FakeContainer())
+    executor = SandboxExecutor(_docker_settings())
+
+    workdir = tmp_path / "results"
+    workdir.mkdir()
+    result = await executor.execute_runtime_code(
+        "print('hi')",
+        workdir=str(workdir),
+        workdir_dest="/workspace/results",
+    )
+
+    assert result.success is True
+    assert result.exit_code == 0
+    assert "hello-from-container" in result.stdout
+
+    kwargs = capture["kwargs"]
+    assert kwargs is not None
+    volumes = kwargs["volumes"]  # type: ignore[index]
+    # results dir mounted RW at /workspace/results so deliverables persist
+    assert any(
+        str(workdir.resolve()) == src
+        and spec["bind"] == "/workspace/results"
+        and spec["mode"] == "rw"
+        for src, spec in volumes.items()
+    ), f"results dir not mounted RW: {volumes}"
+    # working_dir is the mount's parent so a relative results/<file> resolves
+    assert kwargs["working_dir"] == "/workspace"  # type: ignore[index]
+    # isolation invariants
+    assert kwargs["network_disabled"] is True  # type: ignore[index]
+    assert kwargs["read_only"] is True  # type: ignore[index]
+    assert kwargs["mem_limit"] == "512m"  # type: ignore[index]
+    assert kwargs["tmpfs"] == {"/tmp": "size=50m"}  # type: ignore[index]
+    # the script itself stays read-only
+    assert any(spec["mode"] == "ro" for spec in volumes.values()), volumes
+
+
+@pytest.mark.asyncio
+async def test_execute_runtime_code_propagates_image_not_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A missing turing-toolbox image is INFRASTRUCTURE, not a script failure:
+    execute_runtime_code raises SandboxUnavailable so code_executor falls back to
+    the host subprocess rather than masking the missing image as a failed run.
+    """
+    _install_fake_docker(monkeypatch, _FakeImageNotFound())
+    executor = SandboxExecutor(_docker_settings())
+
+    with pytest.raises(SandboxUnavailable):
+        await executor.execute_runtime_code(
+            "print('hi')",
+            workdir=str(tmp_path),
+            workdir_dest="/workspace/results",
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_runtime_code_returns_result_on_container_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A script that runs but exits non-zero (ContainerError) is a RESULT, not
+    infra: execute_runtime_code returns a failed SandboxResult and does NOT
+    raise. This is the isolation invariant — a failing script must never be
+    re-run on the host (which would defeat the sandbox).
+    """
+    _install_fake_docker(
+        monkeypatch, _FakeContainerError(exit_status=5, stderr=b"script-boom")
+    )
+    executor = SandboxExecutor(_docker_settings())
+
+    result = await executor.execute_runtime_code(
+        "raise RuntimeError('boom')",
+        workdir=str(tmp_path),
+        workdir_dest="/workspace/results",
+    )
+
+    assert result.success is False
+    assert result.exit_code == 5
+
+
+@pytest.mark.asyncio
+async def test_execute_code_swallows_image_not_found_without_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the evolution path: execute_code (propagate_unavailable
+    defaults False) with a missing image returns a failed SandboxResult — it
+    does NOT raise. Evolution code is already statically vetted, so the swallow-
+    and-degrade behavior is correct there (distinct from the runtime path).
+    """
+    _install_fake_docker(monkeypatch, _FakeImageNotFound())
+    executor = SandboxExecutor(_docker_settings())
+
+    result = await executor.execute_code("print('x')")
+
+    assert result.success is False  # swallowed, not raised
+    assert not isinstance(result, Exception)

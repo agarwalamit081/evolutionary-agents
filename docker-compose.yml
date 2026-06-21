@@ -127,6 +127,17 @@ services:
       - turing-net
     restart: unless-stopped
 
+  # Phase 2c — the code_executor sandbox image (NOT a running service). Gated
+  # behind the `sandbox` profile so it never starts with the default stack; an
+  # operator builds it on demand to opt into CODE_EXECUTOR_MODE=docker:
+  #   docker compose --profile sandbox build toolbox
+  toolbox:
+    profiles: ["sandbox"]
+    build:
+      context: .
+      dockerfile: Dockerfile.toolbox
+    image: turing-toolbox:latest
+
 volumes:
   pgdata:
   redisdata:

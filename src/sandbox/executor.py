@@ -32,6 +32,18 @@ class SandboxResult:
     timed_out: bool
 
 
+class SandboxUnavailable(Exception):
+    """Docker/runner infrastructure is unavailable for isolated execution.
+
+    Raised ONLY for infrastructure problems (docker package missing, daemon
+    down, image absent) — NOT for a script that runs and exits non-zero or
+    raises. Callers that gate UNVALIDATED runtime code (the ``code_executor``
+    builtin) use this to decide their own host-subprocess fallback policy,
+    unlike the evolution path which silently degrades to subprocess because its
+    code is already statically vetted. See ``execute_runtime_code``.
+    """
+
+
 class SandboxExecutor:
     """Execute code in an isolated sandbox environment.
 
@@ -101,6 +113,62 @@ class SandboxExecutor:
         """
         effective_timeout = timeout if timeout is not None else self._default_timeout
         return await self._run_subprocess(code, None, effective_timeout)
+
+    async def execute_runtime_code(
+        self,
+        code: str,
+        timeout: int | None = None,
+        *,
+        workdir: str,
+        workdir_dest: str,
+    ) -> SandboxResult:
+        """Run UNVALIDATED runtime one-off code in docker isolation (Phase 2c).
+
+        This is the entry point the ``code_executor`` builtin uses to close the
+        T2-high sandbox-bypass gap: untrusted LLM-generated one-off scripts run
+        with network disabled, a read-only rootfs, a memory cap, and a writable
+        ``workdir`` mount so ``results/<file>`` deliverables persist to disk.
+
+        Distinct from ``execute_code`` in TWO ways:
+        1. It mounts the host ``workdir`` read-write at ``workdir_dest`` and runs
+           with ``working_dir`` set to that dest's PARENT, so a script's relative
+           ``results/<file>`` path resolves to the mounted host results dir — the
+           same contract the host ``code_executor`` subprocess honors.
+        2. It does NOT silently degrade to a subprocess on a missing daemon
+           (``execute_code`` does, which is fine for already-vetted evolution
+           code). Instead it RAISES ``SandboxUnavailable`` on any infrastructure
+           problem so ``code_executor`` can apply its own fallback policy. A
+           script that runs but exits non-zero / raises returns a normal
+           (failed) ``SandboxResult`` — it is never re-run on the host.
+
+        Args:
+            code: Unvalidated Python source (already wrapped in any bootstrap).
+            timeout: Max seconds. Defaults to the executor's configured timeout.
+            workdir: Host directory to mount read-write (the agent results dir).
+            workdir_dest: Container path where ``workdir`` is mounted. The
+                container's ``working_dir`` is set to this path's parent so a
+                relative ``results/…`` path resolves into the mount.
+
+        Raises:
+            SandboxUnavailable: docker package missing / daemon down / image
+                absent — infrastructure only, never a script failure.
+
+        Returns:
+            SandboxResult of the isolated run.
+        """
+        effective_timeout = timeout if timeout is not None else self._default_timeout
+        if self._mode != "docker":
+            raise SandboxUnavailable(
+                f"sandbox mode is {self._mode!r}, not 'docker' — cannot isolate runtime code"
+            )
+        return await self._run_docker(
+            code,
+            None,
+            effective_timeout,
+            workdir=workdir,
+            workdir_dest=workdir_dest,
+            propagate_unavailable=True,
+        )
 
     async def execute_test(
         self,
@@ -211,14 +279,39 @@ class SandboxExecutor:
         code: str,
         test_script: str | None,
         timeout: int,
+        *,
+        workdir: str | None = None,
+        workdir_dest: str | None = None,
+        propagate_unavailable: bool = False,
     ) -> SandboxResult:
-        """Run code inside a Docker container with resource limits."""
+        """Run code inside a Docker container with resource limits.
+
+        Args:
+            code/test_script/timeout: as above.
+            workdir: optional host dir mounted read-write inside the container
+                (the runtime ``code_executor`` path mounts the agent results dir
+                so ``results/<file>`` writes persist). ``None`` = no mount (the
+                evolution materialization path — handler code under test).
+            workdir_dest: container path where ``workdir`` is mounted. The
+                container ``working_dir`` is this path's parent so a relative
+                ``results/…`` path resolves into the mount.
+            propagate_unavailable: when True (runtime path only), raise
+                ``SandboxUnavailable`` on infra problems (missing docker package,
+                daemon down, image absent) instead of silently degrading to a
+                subprocess. Script failures (container ran, non-zero exit) always
+                return a normal ``SandboxResult``.
+        """
         start = time.monotonic()
 
         try:
             import docker
             import docker.errors as docker_errors
         except ImportError:
+            if propagate_unavailable:
+                # Runtime path: let code_executor apply its OWN host fallback
+                # (with the results-dir CWD + bootstrap) rather than this
+                # executor's stripped sys.executable subprocess.
+                raise SandboxUnavailable("docker package is not installed")
             logger.warning(
                 "docker package not installed — falling back to subprocess mode"
             )
@@ -239,11 +332,18 @@ class SandboxExecutor:
 
             container_script_path = "/sandbox/script.py"
 
+            # Runtime path: mount the host results dir RW at workdir_dest and run
+            # with working_dir = workdir_dest's parent, so a script's relative
+            # ``results/<file>`` write lands in the mounted host results dir.
+            workdir_parent: str | None = None
+            if workdir and workdir_dest:
+                workdir_parent = str(Path(workdir_dest).parent)
+
             def _run_container() -> tuple[int, str, str]:
                 client = docker.from_env()
                 try:
                     # Use detach=True so we can fetch logs before the container is removed
-                    container = client.containers.run(
+                    run_kwargs: dict[str, Any] = dict(
                         image=self._image,
                         command=["python", container_script_path],
                         volumes={
@@ -260,6 +360,13 @@ class SandboxExecutor:
                         stderr=True,
                         detach=True,
                     )
+                    if workdir and workdir_dest:
+                        run_kwargs["volumes"][str(Path(workdir).resolve())] = {
+                            "bind": workdir_dest,
+                            "mode": "rw",
+                        }
+                        run_kwargs["working_dir"] = workdir_parent
+                    container = client.containers.run(**run_kwargs)
                     # Wait for container to finish
                     result = container.wait()
                     exit_code = result.get("StatusCode", 1)
@@ -276,11 +383,32 @@ class SandboxExecutor:
                         out_bytes.decode("utf-8", errors="replace") if isinstance(out_bytes, bytes) else str(out_bytes),
                         err_bytes.decode("utf-8", errors="replace") if isinstance(err_bytes, bytes) else str(err_bytes),
                     )
+                except docker_errors.ContainerError as exc:
+                    # The container RAN and exited non-zero — that's a script
+                    # RESULT, not infrastructure. Surface it as a normal failed
+                    # result so the caller never re-runs the code on the host.
+                    raw = getattr(exc, "stderr", None) or b""
+                    out = (
+                        raw.decode("utf-8", errors="replace")
+                        if isinstance(raw, bytes)
+                        else str(raw)
+                    )
+                    return (int(getattr(exc, "exit_status", 1)), "", out)
                 except Exception as exc:
-                    # Try to extract ContainerError details
+                    # APIError / ImageNotFound / ConnectionError / daemon-down =
+                    # INFRASTRUCTURE. For the runtime path, re-raise so the outer
+                    # handler turns it into SandboxUnavailable (→ host fallback,
+                    # e.g. turing-toolbox not yet built). For the evolution path
+                    # swallow into a failed result (code already vetted).
+                    if propagate_unavailable:
+                        raise
                     exit_status = getattr(exc, "exit_status", 1)
                     raw = getattr(exc, "stderr", None) or b""
-                    out = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+                    out = (
+                        raw.decode("utf-8", errors="replace")
+                        if isinstance(raw, bytes)
+                        else str(raw)
+                    )
                     return (exit_status, "", out)
                 finally:
                     client.close()
@@ -314,6 +442,8 @@ class SandboxExecutor:
                 )
 
         except docker_errors.DockerException as exc:
+            if propagate_unavailable:
+                raise SandboxUnavailable(f"docker infrastructure error: {exc}") from exc
             duration = time.monotonic() - start
             logger.error("Docker error in sandbox: {}", exc)
             return SandboxResult(
@@ -325,7 +455,11 @@ class SandboxExecutor:
                 memory_mb=None,
                 timed_out=False,
             )
+        except SandboxUnavailable:
+            raise
         except Exception as exc:
+            if propagate_unavailable:
+                raise SandboxUnavailable(f"docker infrastructure error: {exc}") from exc
             duration = time.monotonic() - start
             logger.error("Unexpected error in Docker sandbox: {}", exc)
             return SandboxResult(

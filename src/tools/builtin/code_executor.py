@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
-from src.config.settings import get_settings
-from src.tools._paths import project_root
+from src.config.settings import ToolSandboxSettings, get_settings
+from src.sandbox.executor import SandboxUnavailable
+from src.tools._paths import project_root, results_root
+
+if TYPE_CHECKING:
+    from src.sandbox.executor import SandboxResult
 
 # Execution timeout is operator-configurable via ToolLimitsSettings
 # (CODE_EXECUTOR_TIMEOUT). The schema display default below mirrors the settings
@@ -21,6 +25,11 @@ _SCHEMA_DEFAULT_TIMEOUT = 30  # mirrors ToolLimitsSettings.code_executor_timeout
 def _tool_limits():
     """Call-time accessor — never capture get_settings() at module import."""
     return get_settings().tools
+
+
+def _tool_sandbox() -> ToolSandboxSettings:
+    """Call-time accessor for the runtime code-exec sandbox settings (Phase 2c)."""
+    return get_settings().tool_sandbox
 
 
 # Prepended to every executed script. The subprocess CWD is already the results
@@ -43,29 +52,69 @@ _WRITE_BOOTSTRAP = (
 
 
 async def code_executor(code: str, timeout: Optional[int] = None) -> str:
-    """Execute Python code in a subprocess and return the output.
+    """Execute Python code and return the output.
 
-    The subprocess working directory is the **project root** (parent of
-    ``results_root``) — the same root ``file_writer``/``terminal_command`` use —
-    so a path like ``results/foo.md`` resolves identically whether written here,
-    read via ``file_reader``, or globbed in this script. Write deliverables
-    explicitly to ``results/<file>`` (the bootstrap auto-creates parent dirs);
-    read existing deliverables as ``results/<file>`` (e.g.
-    ``glob('results/*.md')``). Aligning cwd here fixes the double-nest
-    (``results/results/*.md``) that previously left scripts finding nothing.
+    Two execution modes (Phase 2c):
+
+    - **subprocess** (default): runs in a host subprocess with CWD = project
+      root (parent of ``results_root``) — the same root ``file_writer``/
+      ``terminal_command`` use — so a path like ``results/foo.md`` resolves
+      identically whether written here, read via ``file_reader``, or globbed in
+      this script. Write deliverables explicitly to ``results/<file>`` (the
+      bootstrap auto-creates parent dirs); read existing deliverables as
+      ``results/<file>`` (e.g. ``glob('results/*.md')``).
+    - **docker** (opt-in via ``CODE_EXECUTOR_MODE=docker``): runs the SAME code
+      in an isolated container — network disabled, read-only rootfs, a memory
+      cap — with the agent results dir mounted read-write so ``results/<file>``
+      deliverables still persist. Closes the T2-high sandbox-bypass gap: the
+      host subprocess ran untrusted one-off LLM code with full host access.
+      Docker mode keeps the ``results/<file>`` contract (only ``results/`` is
+      writable inside the container). If Docker is unavailable it logs a WARNING
+      and falls back to the host subprocess so a run never hard-fails.
 
     Args:
         code: Python source code to execute.
         timeout: Maximum execution time in seconds. ``None`` resolves to
-            ``CODE_EXECUTOR_TIMEOUT`` (ToolLimitsSettings, default 30).
+            ``CODE_EXECUTOR_TIMEOUT`` (subprocess) or
+            ``CODE_EXECUTOR_SANDBOX_TIMEOUT`` (docker).
 
     Returns:
         Stdout + stderr from the execution.
     """
+    ts = _tool_sandbox()
     if timeout is None:
-        timeout = _tool_limits().code_executor_timeout
-    logger.info(f"Executing code ({len(code)} chars, timeout={timeout}s)")
+        timeout = (
+            ts.code_executor_sandbox_timeout
+            if ts.code_executor_mode == "docker"
+            else _tool_limits().code_executor_timeout
+        )
+    logger.info(
+        "Executing code ({} chars, mode={}, timeout={}s)",
+        len(code), ts.code_executor_mode, timeout,
+    )
 
+    if ts.code_executor_mode == "docker":
+        try:
+            return await _run_in_docker_sandbox(code, timeout)
+        except SandboxUnavailable as exc:
+            # Infrastructure-only (docker missing / daemon down / image absent).
+            # A script that ran + failed does NOT take this branch — it returns
+            # its own result and is never re-run on the host.
+            logger.warning(
+                "docker code_executor sandbox unavailable ({}); "
+                "falling back to host subprocess",
+                exc,
+            )
+    return await _run_host_subprocess(code, timeout)
+
+
+async def _run_host_subprocess(code: str, timeout: int) -> str:
+    """Execute Python in a host subprocess with CWD = project root.
+
+    The default, non-isolated path — also the fallback when the docker sandbox
+    is unavailable. Relative ``results/<file>`` writes persist (the bootstrap
+    auto-creates parent dirs).
+    """
     # Subprocess CWD = project root (parent of results_root), shared with
     # file_writer/terminal_command so ``results/<file>`` resolves uniformly.
     cwd_dir = project_root()
@@ -104,6 +153,57 @@ async def code_executor(code: str, timeout: Optional[int] = None) -> str:
         return f"ERROR: {exc}"
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def _format_sandbox_output(result: SandboxResult) -> str:
+    """Render a ``SandboxResult`` in the same shape as the host-subprocess output."""
+    output = ""
+    if result.stdout:
+        output += result.stdout
+    if result.stderr:
+        output += f"\nSTDERR:\n{result.stderr}"
+    if result.timed_out:
+        output += f"\nERROR: Execution timed out after {result.duration_seconds}s"
+    elif result.exit_code is not None and result.exit_code != 0:
+        output += f"\nExit code: {result.exit_code}"
+    return output or "(no output)"
+
+
+async def _run_in_docker_sandbox(code: str, timeout: int) -> str:
+    """Execute Python in the isolated docker sandbox (network-off, read-only FS,
+    memory cap) with the agent results dir mounted read-write.
+
+    Raises ``SandboxUnavailable`` on infrastructure problems (docker missing /
+    daemon down / image absent) so ``code_executor`` can fall back to the host
+    subprocess. A script that runs but exits non-zero / raises returns a normal
+    formatted result — it is NEVER re-run on the host (that would defeat the
+    isolation an operator opted into).
+    """
+    from types import SimpleNamespace
+
+    from src.sandbox.executor import SandboxExecutor
+
+    ts = _tool_sandbox()
+    mount_src = ts.code_executor_results_mount or str(results_root())
+    # Ensure the host mount target exists so Docker can bind it and a script
+    # writing results/<file> has somewhere to land.
+    Path(mount_src).mkdir(parents=True, exist_ok=True)
+
+    sandbox = SandboxExecutor(
+        SimpleNamespace(
+            evolution_sandbox_mode="docker",
+            evolution_sandbox_image=ts.code_executor_sandbox_image,
+            evolution_sandbox_memory_mb=ts.code_executor_sandbox_memory_mb,
+            evolution_sandbox_timeout=timeout,
+        )
+    )
+    result = await sandbox.execute_runtime_code(
+        _WRITE_BOOTSTRAP + code,
+        timeout=timeout,
+        workdir=mount_src,
+        workdir_dest=ts.code_executor_sandbox_workdir_dest,
+    )
+    return _format_sandbox_output(result)
 
 
 # Tool definition for registry

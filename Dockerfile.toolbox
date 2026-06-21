@@ -1,0 +1,39 @@
+# turing-toolbox — the runtime code_executor sandbox image (Phase 2c).
+#
+# Used by src/sandbox/executor.py (execute_runtime_code) when an operator opts
+# into CODE_EXECUTOR_MODE=docker: untrusted one-off LLM code run via the
+# code_executor builtin executes here with network DISABLED, a read-only
+# rootfs, and a memory cap. This image is NOT a long-running service — it is
+# built once and referenced as an ad-hoc exec target.
+#
+# The third-party deps below mirror src/tools/dynamic/allowlist.py
+# (ALLOWED_MODULES + get_materializer_namespace) 1:1, so a runtime script that
+# imports an allowlisted dep resolves in the container too (the host subprocess
+# path already has them via the agent venv). Network stays off at run time —
+# these are present so import-only code (no egress) works.
+#
+# Build:
+#   docker build -f Dockerfile.toolbox -t turing-toolbox:latest .
+#   (or: docker compose --profile sandbox build toolbox)
+#
+# NOTE: keep this list in sync with ALLOWED_MODULES whenever the allowlist
+# changes (Phase 2d adds scipy/sklearn/openpyxl/tabulate/aiofiles/trafilatura/libcst).
+
+FROM python:3.12-slim
+
+# /workspace is the container working_dir parent; the agent results dir is bind-
+# mounted RW at /workspace/results so a script's relative results/<file> writes
+# persist to the host (read-only rootfs otherwise).
+RUN mkdir -p /workspace
+
+RUN pip install --no-cache-dir \
+    httpx aiohttp requests \
+    beautifulsoup4 lxml feedparser xmltodict \
+    pandas numpy pyyaml jinja2 Pillow \
+    sympy \
+    pydantic pydantic-settings orjson json-repair \
+    markdown-it-py \
+    redis \
+    python-dateutil jsonschema tenacity loguru
+
+CMD ["python"]

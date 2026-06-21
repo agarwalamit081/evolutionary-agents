@@ -1162,6 +1162,14 @@ class WorkerSettings(BaseSettings):
     # store self-cleans instead of growing unbounded. Env: WORKER_STATUS_TTL_S.
     status_ttl_s: int = 86400  # Env: WORKER_STATUS_TTL_S
 
+    # Dead-letter cap: after this many failed delivery attempts a run is XACKed +
+    # marked FAILED permanently (NOT redelivered). Guards against infinite
+    # poison-message redelivery — a DETERMINISTIC executor failure (e.g. a missing
+    # dep crashing graph build) would otherwise be re-handed to a worker every
+    # ``reclaim_min_idle_ms`` forever (Bug B). Transient failures still retry up to
+    # this many times before dead-lettering. Env: WORKER_DEAD_LETTER_MAX_ATTEMPTS.
+    dead_letter_max_attempts: int = 3  # Env: WORKER_DEAD_LETTER_MAX_ATTEMPTS
+
     model_config = SettingsConfigDict(
         # env_prefix makes the documented WORKER_* vars (see .env.example) map to
         # these fields: WORKER_CONSUMER_NAME → consumer_name, etc. Without it, the

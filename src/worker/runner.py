@@ -56,9 +56,13 @@ class RunConsumer:
         """Run one job. Returns True iff the entry was acked (terminal).
 
         On a successful run: mirror the result to the status store, XACK, return
-        True. On an executor exception: mark FAILED and DO NOT ack — the entry
-        stays pending and is redelivered (reclaim_stale) so the run is retried /
-        resumed. (Poison-message/dead-letter capping is a Phase 5 concern.)
+        True. On an executor exception: count the attempt; below
+        ``dead_letter_max_attempts`` mark FAILED and DO NOT ack — the entry stays
+        pending and is redelivered (reclaim_stale) so a TRANSIENT failure is
+        retried / resumed from the last checkpoint. AT the cap (a deterministic /
+        poison failure) XACK + mark FAILED permanently so it is NOT retried
+        infinitely (Bug B: without this a deterministic crash — e.g. a missing dep
+        at graph build — was redelivered every ``reclaim_min_idle_ms`` forever).
         """
         thread_id = self.thread_id_for(job.run_id)
         await self._status.mark(job.run_id, thread_id, JobStatus.RUNNING)
@@ -66,7 +70,29 @@ class RunConsumer:
         try:
             result = await self._executor(job)
         except Exception as exc:
-            logger.warning(f"Run {job.run_id} executor raised; leaving for redelivery: {exc}")
+            # Dead-letter cap (Bug B). ``record_attempt`` is keyed by run_id, so
+            # the count is stable across XAUTOCLAIM redelivery (same consumer or a
+            # reclaimed peer). At the cap the entry is acked (removed from the PEL)
+            # so reclaim_stale can never hand it out again.
+            attempts = await self._queue.record_attempt(job.run_id)
+            if attempts >= self._s.dead_letter_max_attempts:
+                logger.error(
+                    f"Run {job.run_id} dead-lettered after {attempts} failed "
+                    f"attempts (cap={self._s.dead_letter_max_attempts}); acking to "
+                    f"stop redelivery: {exc}"
+                )
+                await self._status.mark(
+                    job.run_id,
+                    thread_id,
+                    JobStatus.FAILED,
+                    error=f"{exc} (dead-lettered after {attempts} attempts)",
+                )
+                acked = await self._queue.ack([entry_id])
+                return acked > 0  # terminal — NOT redelivered
+            logger.warning(
+                f"Run {job.run_id} executor raised (attempt {attempts}/"
+                f"{self._s.dead_letter_max_attempts}); leaving for redelivery: {exc}"
+            )
             await self._status.mark(
                 job.run_id, thread_id, JobStatus.FAILED, error=str(exc)
             )

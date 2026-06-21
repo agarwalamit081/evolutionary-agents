@@ -154,6 +154,34 @@ class RunsQueue:
         except (TypeError, IndexError, KeyError, ValueError):
             return 0
 
+    async def record_attempt(self, run_id: str) -> int:
+        """Increment + return the per-run delivery-attempt count (dead-letter gate).
+
+        Keyed by ``run_id`` (stable across XAUTOCLAIM redelivery —
+        ``thread_id = api-{run_id}``), so a job that keeps failing accumulates
+        attempts whether it's retried by the same consumer or reclaimed by a peer.
+        The consumer compares the returned count to
+        ``dead_letter_max_attempts``: at the cap it XACKs + marks FAILED
+        permanently instead of leaving the entry pending for yet another identical
+        retry (Bug B — without this a DETERMINISTIC crash redelivered forever).
+        TTL-bounded by ``status_ttl_s`` so the counter self-cleans with the run's
+        status hash. Non-fatal best-effort: an INCR hiccup returns 0 (under-count
+        → at worst one extra retry, never an infinite loop, because the executor
+        exception itself is the retry signal).
+        """
+        key = f"{self._stream}:attempts:{run_id}"
+        try:
+            count = await self._redis.incr(key)
+            # status_ttl_s == 0 means "no TTL" (the convention the status store uses
+            # for tests): EXPIRE 0 would DELETE the key, resetting the counter every
+            # call. Only set a TTL when one is actually configured.
+            if self._s.status_ttl_s > 0:
+                await self._redis.expire(key, self._s.status_ttl_s)
+            return int(count)
+        except Exception as exc:  # noqa: BLE001 — best-effort; redelivery still bounded by caller
+            logger.warning(f"record_attempt INCR failed for {run_id}: {exc}")
+            return 0
+
 
 def _flatten(raw: Any) -> list[StreamEntry]:
     """Normalize an ``XREADGROUP`` response into ``[(entry_id, RunJob), …]``.

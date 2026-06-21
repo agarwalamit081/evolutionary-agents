@@ -250,6 +250,7 @@ class TestWorkerSettings:
         monkeypatch.setenv("WORKER_BLOCK_MS", "1111")
         monkeypatch.setenv("WORKER_RECLAIM_MIN_IDLE_MS", "2222")
         monkeypatch.setenv("WORKER_STATUS_TTL_S", "333")
+        monkeypatch.setenv("WORKER_DEAD_LETTER_MAX_ATTEMPTS", "7")
         w = WorkerSettings(_env_file=None)
         assert w.runs_stream == "s:stream"
         assert w.group == "s-group"
@@ -258,6 +259,7 @@ class TestWorkerSettings:
         assert w.block_ms == 1111
         assert w.reclaim_min_idle_ms == 2222
         assert w.status_ttl_s == 333
+        assert w.dead_letter_max_attempts == 7
 
     def test_consumer_name_round_trip(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """WORKER_CONSUMER_NAME populates consumer_name — the __main__ opt-in path."""
@@ -279,6 +281,7 @@ class TestWorkerSettings:
             "WORKER_BLOCK_MS",
             "WORKER_RECLAIM_MIN_IDLE_MS",
             "WORKER_STATUS_TTL_S",
+            "WORKER_DEAD_LETTER_MAX_ATTEMPTS",
         ):
             monkeypatch.delenv(var, raising=False)
         w = WorkerSettings(_env_file=None)
@@ -292,4 +295,7 @@ class TestWorkerSettings:
         assert w.block_ms == 5000
         assert w.reclaim_min_idle_ms == 30000
         assert w.status_ttl_s == 86400
+        # Default dead-letter cap (Bug B): 3 failed attempts before a poison run is
+        # acked + marked FAILED permanently (stops infinite redelivery).
+        assert w.dead_letter_max_attempts == 3
 

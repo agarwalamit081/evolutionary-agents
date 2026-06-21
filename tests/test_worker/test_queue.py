@@ -131,3 +131,31 @@ def test_entry_to_job_decodes_bytes_fields() -> None:
     )
     assert entry_id == "1-0"
     assert job.run_id == "r9"
+
+
+class TestRecordAttempt:
+    """``record_attempt`` — the per-run delivery counter that drives the dead-letter
+    cap (Bug B). Keyed by ``run_id`` (stable across XAUTOCLAIM redelivery)."""
+
+    async def test_increments_and_returns_count(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """Each call increments a per-run counter; the count gates dead-lettering."""
+        q = RunsQueue(fake_redis, worker_settings)
+        assert await q.record_attempt("r1") == 1
+        assert await q.record_attempt("r1") == 2
+        assert await q.record_attempt("r1") == 3
+        # distinct run_ids keep independent counters
+        assert await q.record_attempt("r2") == 1
+        assert await q.record_attempt("r1") == 4  # r1 unaffected by r2's calls
+
+    async def test_persists_with_zero_ttl(self, fake_redis, worker_settings) -> None:
+        """status_ttl_s=0 means "no TTL" (the test convention): the counter must NOT
+        be deleted by an EXPIRE 0, so the dead-letter cap can actually be reached.
+        Guards the ``status_ttl_s > 0`` guard in record_attempt (a bare
+        ``expire(key, 0)`` would reset the counter to 1 on every call → cap never
+        hit → the infinite poison loop would survive the "fix")."""
+        assert worker_settings.status_ttl_s == 0
+        q = RunsQueue(fake_redis, worker_settings)
+        await q.record_attempt("r0")
+        assert await q.record_attempt("r0") == 2  # survived — no self-delete

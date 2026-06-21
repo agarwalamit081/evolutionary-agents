@@ -207,3 +207,48 @@ class TestRunConsumerServeLoop:
             await task
         assert await queue.pending_count() == 1  # not acked → left for redelivery
 
+
+class TestRunConsumerDeadLetter:
+    """Bug B: a DETERMINISTIC executor failure must dead-letter after
+    ``dead_letter_max_attempts`` retries instead of redelivering forever.
+
+    Without the cap, ``reclaim_stale`` (XAUTOCLAIM, every ``reclaim_min_idle_ms``)
+    re-hands the same pending entry to a worker for an identical failure — an
+    infinite poison loop (observed live: 15+ identical retries over 7+ min for a
+    missing-dep crash). At the cap the entry is acked (removed from the PEL) so it
+    can never be redelivered again. Transient failures still retry up to the cap.
+    """
+
+    async def test_retries_below_cap_then_dead_letters(
+        self, fake_redis, worker_settings
+    ) -> None:
+        s = worker_settings.model_copy(update={"dead_letter_max_attempts": 2})
+        queue = RunsQueue(fake_redis, s)
+        store = RunStatusStore(fake_redis, s)
+        job = RunJob(run_id="poison", goal="g")
+
+        async def always_raise(_j: RunJob) -> dict[str, Any]:
+            raise RuntimeError("deterministic boom")
+
+        consumer = RunConsumer(queue, store, always_raise, s)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()  # claim into the PEL so pending_count reflects it
+
+        # attempt 1 (< cap 2): FAILED, NOT acked → left for redelivery.
+        assert await consumer._process(entry_id, job) is False
+        assert await queue.pending_count() == 1
+        rec1 = await store.get("poison")
+        assert rec1 is not None
+        assert rec1.status is JobStatus.FAILED
+        assert "deterministic boom" in (rec1.error or "")
+        assert "dead-lettered" not in (rec1.error or "")  # pre-cap: raw error only
+
+        # attempt 2 (>= cap 2): DEAD-LETTERED — acked (terminal), NOT redelivered.
+        assert await consumer._process(entry_id, job) is True
+        assert await queue.pending_count() == 0
+        rec2 = await store.get("poison")
+        assert rec2 is not None
+        assert rec2.status is JobStatus.FAILED
+        assert "dead-lettered after 2 attempts" in (rec2.error or "")
+

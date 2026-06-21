@@ -1,0 +1,62 @@
+# turing-runner — the remote no-DinD code-execution runner (Phase 3b/c, #218/#219).
+#
+# Runs src/sandbox/runner_server.py: a tiny HTTP server that executes submitted
+# Python as a constrained subprocess IN THIS CONTAINER. It is the agent's single
+# sink for generated code (both the code_executor builtin and the evolution
+# sandbox POST here). It has NO Docker socket (no Docker-in-Docker), NO
+# DATABASE/REDIS/search credentials, and (via compose) NO internet egress — it
+# sits on an internal-only network. The disposable container itself is the
+# isolation boundary (per-invocation gVisor/Kata hardening is a Phase-5 doc item).
+#
+# LEAST-PRIVILEGE IMAGE: only runner_server.py is copied in — NOT the rest of
+# src/. The server module is self-contained (no src.* imports), so it runs
+# standalone and this no-creds image holds NEITHER the DB models, the gateway,
+# NOR Settings-with-DB-URLs. The third-party package set mirrors
+# src/tools/dynamic/allowlist.py + Dockerfile.toolbox 1:1 so an executed script
+# importing an allowlisted dep resolves here too (network stays off in compose,
+# these are present for import-only / no-egress code).
+#
+# Build:
+#   docker compose build runner
+#   (or: docker build -f Dockerfile.runner -t turing-runner:latest .)
+#
+# NOTE: keep this package list in sync with ALLOWED_MODULES / Dockerfile.toolbox
+# whenever the allowlist changes.
+
+FROM python:3.12-slim
+
+# /app holds the standalone server script; /home/turing/.turing/results is the
+# shared results dir (the worker's turing-workspace volume is bind-mounted RW
+# here) so a script's relative results/<file> writes are visible to the worker.
+RUN mkdir -p /app /home/turing/.turing/results /home/turing/logs
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    httpx aiohttp requests \
+    beautifulsoup4 lxml feedparser xmltodict \
+    pandas numpy pyyaml jinja2 Pillow \
+    sympy \
+    pydantic pydantic-settings orjson json-repair \
+    markdown-it-py \
+    redis \
+    python-dateutil jsonschema tenacity loguru \
+    scipy scikit-learn openpyxl tabulate aiofiles trafilatura libcst
+
+# ONLY the self-contained server module (no intra-src imports → runs standalone,
+# keeping DB models / gateway / Settings-with-DB-URLs out of this no-creds image).
+COPY src/sandbox/runner_server.py /app/runner_server.py
+
+# Non-root user mirroring the main image so shared-volume writes match perms.
+RUN useradd -m -r turing && \
+    chown -R turing:turing /app /home/turing/.turing /home/turing/logs
+
+USER turing
+
+ENV PYTHONUNBUFFERED=1
+ENV RUNNER_RESULTS_ROOT=/home/turing/.turing/results
+
+EXPOSE 8090
+
+# Standalone (not ``python -m src...``) — the script has no package deps.
+CMD ["python", "/app/runner_server.py"]

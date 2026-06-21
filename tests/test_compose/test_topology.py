@@ -179,3 +179,30 @@ def test_meilisearch_healthcheck_uses_ipv4_loopback(compose: dict) -> None:
         f"meilisearch healthcheck uses 'localhost' (IPv6 ::1 refused vs IPv4-only "
         f"bind → perpetual unhealthy → blocks dependent roles): {test_cmd}"
     )
+
+
+# ── API host-port: avoid the 8000 conflict magnet ────────────────────────
+
+
+def test_api_host_port_is_not_the_conflict_magnet_8000(compose: dict) -> None:
+    """The api maps a HOST port other than 8000.
+
+    8000 is a magnet for conflicts with other dev apps (another project's API
+    already collided on it during bring-up). The non-default host port matches
+    the stack's pattern (5433/6380/8081/7701 all avoid the canonic port). The
+    container still LISTENS on 8000 internally (uvicorn ``--port 8000``); only
+    the HOST side of the mapping is non-8000 — so this asserts the left (host)
+    side, not the right (container) side.
+    """
+    api = compose["services"]["api"]
+    ports = api.get("ports") or []
+    assert ports, "api has no host port mapping"
+    mapping = ports[0]
+    if isinstance(mapping, dict):
+        host = str(mapping.get("published", ""))
+        container = str(mapping.get("target", ""))
+    else:
+        host, _, container = str(mapping).partition(":")
+    assert container == "8000", f"api container port drifted from uvicorn 8000: {mapping}"
+    assert host, "api host port is empty/unmapped"
+    assert host != "8000", f"api host port is still 8000 (conflict magnet): {mapping}"

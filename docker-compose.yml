@@ -26,6 +26,14 @@ x-agent-common: &agent-common
     CODE_EXECUTOR_MODE: runner
     EVOLUTION_SANDBOX_MODE: runner
     RUNNER_URL: http://runner:8090
+    # Replicated workers (deploy.replicas: 2 below) MUST each own a UNIQUE Redis
+    # consumer name or they share one pending-entries list and break XAUTOCLAIM
+    # crash-recovery. Forcing WORKER_CONSUMER_NAME empty here makes every worker
+    # auto-derive worker-{hostname}-{pid} regardless of what .env sets — the
+    # canonic example-config default (worker-1) would otherwise make BOTH
+    # replicas collide on it. Harmless for the api/agent roles (they don't read
+    # it). See src/worker/__main__.py:_resolve_consumer_name.
+    WORKER_CONSUMER_NAME: ""
   depends_on:
     postgres:
       condition: service_healthy
@@ -158,8 +166,14 @@ services:
         "--port",
         "8000",
       ]
+    # HOST port 8800 (not the default 8000): 8000 is a magnet for conflicts with
+    # other dev apps (another project's API already collided on it during
+    # bring-up). The non-default host port matches the stack's pattern
+    # (5433/6380/8081/7701 all avoid the canonic port). The container still
+    # LISTENS on 8000 internally (uvicorn --port 8000 above); only the HOST side
+    # of the mapping is non-8000, so nothing in-container references 8000 as a host.
     ports:
-      - "8000:8000"
+      - "8800:8000"
 
   worker:
     <<: *agent-common

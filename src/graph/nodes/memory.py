@@ -115,6 +115,27 @@ async def retrieve_memory_node(
                 logger.info(f"Loaded {len(facts)} fact(s) from the semantic tier")
         except Exception as e:
             logger.debug(f"Fact recall skipped: {e}")
+
+        # Recall crystallized skills/procedures/workflows, ranked semantically
+        # against the goal when possible (findings-05 C). Skills carry real
+        # capability embeddings (store() persists them for every type), so this
+        # is the recall counterpart to fact recall — ranked by cosine distance,
+        # not just fitness. Distinct from facts (procedural HOW vs entity-ish
+        # WHAT) and from folded-memory episode summaries.
+        try:
+            skills = await memory.retrieve_skills(query=goal_text, limit=3)
+            for entry in skills:
+                retrieved.append({
+                    "content": entry.get("content", ""),
+                    "tier": "skill",
+                    "score": entry.get("fitness_score", 0.5),
+                })
+            if skills:
+                logger.info(
+                    f"Loaded {len(skills)} skill(s) from the semantic tier"
+                )
+        except Exception as e:
+            logger.debug(f"Skill recall skipped: {e}")
     else:
         logger.debug("No MemoryManager available, returning empty memories")
 

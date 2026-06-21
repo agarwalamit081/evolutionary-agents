@@ -215,6 +215,23 @@ class MemoryManager:
         """
         return await self.warm.retrieve_facts(query=query, limit=limit)
 
+    async def retrieve_skills(
+        self,
+        query: str = "",
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Recall skills/procedures/workflows, ranked semantically when a query is given.
+
+        Args:
+            query: Natural-language query; empty → fitness-ordered fallback.
+            limit: Maximum skills to return.
+
+        Returns:
+            List of skill dicts (id, type, name, content, tags, fitness_score,
+            access_count, similarity?).
+        """
+        return await self.warm.retrieve_skills(query=query, limit=limit)
+
     async def extract_and_store_facts(
         self,
         gateway: Any,

@@ -64,6 +64,7 @@ class TestRetrieveMemoryNode:
         memory.retrieve_context = AsyncMock(return_value=[])
         memory.warm = MagicMock()
         memory.warm.retrieve = AsyncMock(return_value=[])  # evolved/folded empty
+        memory.retrieve_skills = AsyncMock(return_value=[])  # skills empty
         memory.retrieve_facts = AsyncMock(
             return_value=[
                 {"key": "row_count", "value": "1024 rows", "confidence": 0.9},
@@ -77,6 +78,34 @@ class TestRetrieveMemoryNode:
         assert len(fact_entries) == 1
         assert fact_entries[0]["content"] == "row_count: 1024 rows"
         assert fact_entries[0]["score"] == pytest.approx(0.9)
+
+    @pytest.mark.asyncio
+    async def test_retrieve_recalls_skills_into_memories(self) -> None:
+        """findings-05 C: skills are recalled semantically and surfaced with tier='skill'."""
+        memory = MagicMock()
+        memory.retrieve_context = AsyncMock(return_value=[])
+        memory.warm = MagicMock()
+        memory.warm.retrieve = AsyncMock(return_value=[])  # evolved/folded empty
+        memory.retrieve_facts = AsyncMock(return_value=[])  # facts empty
+        memory.retrieve_skills = AsyncMock(
+            return_value=[
+                {
+                    "type": "skill",
+                    "name": "utc_normalize",
+                    "content": "pd.to_datetime(ts, utc=True)",
+                    "fitness_score": 0.8,
+                },
+            ]
+        )
+        state = initial_state("convert timestamps to UTC", "thread-skills")
+        result = await retrieve_memory_node(state, memory=memory)
+
+        assert result["phase"] == Phase.EXECUTE
+        skill_entries = [m for m in result["retrieved_memories"] if m.get("tier") == "skill"]
+        assert len(skill_entries) == 1
+        assert skill_entries[0]["content"] == "pd.to_datetime(ts, utc=True)"
+        assert skill_entries[0]["score"] == pytest.approx(0.8)
+
 
 
 class TestStoreMemoryNode:

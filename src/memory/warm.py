@@ -264,6 +264,104 @@ class WarmMemoryStore:
             for entry in entries
         ]
 
+    async def retrieve_skills(
+        self,
+        query: str = "",
+        limit: int = 5,
+        min_fitness: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Recall skills/procedures/workflows, ranked semantically when possible.
+
+        Mirrors :meth:`retrieve_facts` but spans the three capability-shaped
+        memory types (skill/procedure/workflow). When a query and an injected
+        generator are available, ranks by cosine distance against their
+        ``memory_embeddings`` vectors (semantic recall — the recall layer
+        findings-05 found dead: ``capability_embedding`` and the warm embedding
+        index fed dedup/curation only, never ranked recall). Otherwise falls
+        back to fitness-ordered retrieval across the same three types.
+
+        Args:
+            query: Natural-language query; empty → fitness-ordered fallback.
+            limit: Maximum skills to return.
+            min_fitness: Minimum fitness_score threshold.
+
+        Returns:
+            List of skill dicts: ``{id, type, name, content, tags,
+            fitness_score, access_count, similarity?}``.
+        """
+        skill_types = ["skill", "procedure", "workflow"]
+
+        # Semantic path: embed the query and rank skills by vector similarity.
+        # Requires a generator (so the query embeds) AND query text. Best-effort
+        # — an embedding failure drops to the fitness fallback below.
+        if query and self._generator is not None:
+            try:
+                query_embedding = await self._generator.generate(query)
+            except Exception as e:  # embedding failure must not block recall
+                logger.debug(f"Skill query embedding failed: {e}")
+            else:
+                distance = MemoryEmbedding.embedding.cosine_distance(query_embedding)
+                stmt = (
+                    sa.select(WarmMemory, distance.label("distance"))
+                    .join(
+                        MemoryEmbedding,
+                        MemoryEmbedding.memory_id == WarmMemory.id,
+                    )
+                    .where(
+                        WarmMemory.memory_type.in_(skill_types),
+                        WarmMemory.fitness_score >= min_fitness,
+                        WarmMemory.expires_at.is_(None),
+                        MemoryEmbedding.embedding.isnot(None),
+                    )
+                    .order_by(distance)
+                    .limit(limit)
+                )
+                result = await self._session.execute(stmt)
+                rows = result.all()
+                if rows:
+                    return [
+                        {
+                            "id": str(row[0].id),
+                            "type": row[0].memory_type,
+                            "name": row[0].title,
+                            "content": row[0].content,
+                            "tags": row[0].tags,
+                            "fitness_score": row[0].fitness_score,
+                            "access_count": row[0].access_count,
+                            "similarity": 1.0 - float(row[1]),
+                        }
+                        for row in rows
+                    ]
+                    # No embedded skills matched — fall through to fitness fallback.
+
+        # Fallback: fitness-ordered skills (no generator, empty query, or no
+        # embedded skills). ``retrieve()`` takes a single memory_type, so query
+        # across all three capability types in one fitness-ordered pass.
+        fallback = (
+            sa.select(WarmMemory)
+            .where(
+                WarmMemory.memory_type.in_(skill_types),
+                WarmMemory.fitness_score >= min_fitness,
+                WarmMemory.expires_at.is_(None),
+            )
+            .order_by(WarmMemory.fitness_score.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(fallback)
+        entries = result.scalars().all()
+        return [
+            {
+                "id": str(entry.id),
+                "type": entry.memory_type,
+                "name": entry.title,
+                "content": entry.content,
+                "tags": entry.tags,
+                "fitness_score": entry.fitness_score,
+                "access_count": entry.access_count,
+            }
+            for entry in entries
+        ]
+
     async def update_fitness(self, memory_id: str, success: bool) -> None:
         """Update fitness score after a usage event.
 

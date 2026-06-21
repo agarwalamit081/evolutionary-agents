@@ -1,0 +1,54 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Turing Agent SearXNG"
+  contact_url: ""
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+  plugins:
+    # Server-side dedup collapses the same URL returned by multiple engines so
+    # the agent's own _clean_results dedup sees a tighter candidate set.
+    - deduplicate
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  # JSON API must be reachable from the agent service (keyless, internal
+  # network). Disable the bot limiter so programmatic /search?format=json calls
+  # are not challenged; the agent is the only caller on turing-net.
+  limiter: false
+  image_proxy: false
+  secret_key: "turing-agent-searxng-change-in-production"
+
+ui:
+  infinite_scroll: true
+
+outgoing:
+  request_timeout: 3.0
+  max_request_timeout: 10.0
+  pool_connections: 100
+  pool_maxsize: 10
+  http2: true
+
+engines:
+  - name: google
+    engine: google
+    shortcut: go
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+  - name: brave
+    engine: brave
+    shortcut: br
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+
+doi_resolver:
+  default: "https://doi.org/"

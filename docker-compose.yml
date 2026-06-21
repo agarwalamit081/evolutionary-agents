@@ -39,6 +39,44 @@ services:
       - turing-net
     restart: unless-stopped
 
+  searxng:
+    # Primary keyless live-search service (Phase 1). JSON API enabled + bot
+    # limiter disabled in the mounted settings.yml so the agent can call
+    # /search?format=json over the internal network without keys.
+    image: searxng/searxng:latest
+    container_name: turing-searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - turing-net
+    restart: unless-stopped
+
+  meilisearch:
+    # Corpus keyword/hybrid index (Phase 1). BM25 + filterable attrs; the
+    # agent's corpus_search fuses these hits with pgvector semantic hits via
+    # Reciprocal Rank Fusion. Master key from .env (MEILISEARCH_KEY).
+    image: getmeili/meilisearch:v1.12
+    container_name: turing-meilisearch
+    command: ["meilisearch", "--http-addr", "0.0.0.0:7700"]
+    environment:
+      MEILI_ENV: ${MEILI_ENV:-development}
+      MEILI_MASTER_KEY: ${MEILISEARCH_KEY:-turing-meili-dev-key}
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "7700:7700"
+    volumes:
+      - meilidata:/meili_data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - turing-net
+    restart: unless-stopped
+
   agent:
     build:
       context: .
@@ -48,6 +86,11 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/turing_agent
       REDIS_URL: redis://redis:6379/0
+      # Phase 1 search stack: point the in-container agent at the internal
+      # service hostnames (override the localhost defaults in .env).
+      SEARXNG_URL: http://searxng:8080
+      MEILISEARCH_URL: http://meilisearch:7700
+      MEILISEARCH_KEY: ${MEILISEARCH_KEY:-}
       # Persist deliverables + workspace across container restarts. Both land on
       # the already-mounted turing-workspace volume (/home/turing/.turing), so no
       # new volume is needed. Without these overrides the relative defaults
@@ -62,6 +105,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      searxng:
+        condition: service_started
+      meilisearch:
+        condition: service_healthy
     volumes:
       - turing-workspace:/home/turing/.turing
       - turing-logs:/home/turing/logs
@@ -72,6 +119,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  meilidata:
   turing-workspace:
   turing-logs:
 

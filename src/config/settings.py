@@ -932,6 +932,62 @@ class EvalSettings(BaseSettings):
     )
 
 
+# ─── Search Settings (Phase 1: SearXNG + Meilisearch corpus stack) ────
+
+
+class SearchSettings(BaseSettings):
+    """Web-search + corpus-search configuration (Phase 1 overhaul).
+
+    The search stack runs SearXNG (:8080) as the primary keyless live-search
+    service and Meilisearch (:7700) as the corpus keyword/hybrid index. Paid
+    providers are an automatic fallback behind SearXNG; heavy providers
+    (Firecrawl/Apify) are provisioned-only (explicit ``deep_crawl`` opt-in).
+    All URLs/keys resolve from ``.env``; compose overrides point the
+    in-container agent at the internal service hostnames
+    (``http://searxng:8080`` / ``http://meilisearch:7700``).
+    """
+
+    # Primary live-search service (SearXNG, keyless/self-hosted).
+    search_primary: str = "searxng"  # Env: SEARCH_PRIMARY
+    searxng_url: str = "http://localhost:8080"  # Env: SEARXNG_URL
+    searxng_timeout: float = 10.0  # Env: SEARXNG_TIMEOUT
+    searxng_max_results_per_query: int = 10  # Env: SEARXNG_MAX_RESULTS_PER_QUERY
+
+    # Corpus index service (Meilisearch, BM25 + hybrid).
+    meilisearch_url: str = "http://localhost:7700"  # Env: MEILISEARCH_URL
+    meilisearch_key: str = ""  # Env: MEILISEARCH_KEY (master key; empty disables auth in dev)
+    meilisearch_index: str = "turing_corpus"  # Env: MEILISEARCH_INDEX
+    meilisearch_timeout: float = 10.0  # Env: MEILISEARCH_TIMEOUT
+
+    # Lightweight paid providers tried in order when SearXNG fails/throttles.
+    # Each is only attempted if its API key is set. Heavy providers are excluded
+    # from this chain (provisioned-only, see deep_crawl_enabled).
+    search_fallback_providers: str = "tavily,serper,brave,serpapi,serpstack,llmlayer"  # Env: SEARCH_FALLBACK_PROVIDERS
+
+    # Batch/parallel fan-out control (web_search(queries) + corpus_search(queries)).
+    search_batch_concurrency: int = 5  # Env: SEARCH_BATCH_CONCURRENCY
+
+    # AI-format extraction / chunking (web_scraper -> corpus index).
+    chunk_size: int = 1200  # Env: CHUNK_SIZE (target chars per chunk)
+    chunk_overlap: int = 150  # Env: CHUNK_OVERLAP
+
+    # Heavy providers (Firecrawl/Apify): provisioned in .env but OFF by default.
+    # Set True to allow the deep_crawl tool flag to engage them.
+    deep_crawl_enabled: bool = False  # Env: DEEP_CRAWL_ENABLED
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    @property
+    def fallback_providers(self) -> list[str]:
+        """Ordered fallback provider list (whitespace-trimmed, lowercased)."""
+        return [p.strip().lower() for p in self.search_fallback_providers.split(",") if p.strip()]
+
+
 # ─── Root Settings ──────────────────────────────────────────────────
 
 
@@ -958,6 +1014,7 @@ class Settings(BaseSettings):
     native_structured: NativeStructuredSettings = NativeStructuredSettings()  # type: ignore[assignment]
     tools: ToolLimitsSettings = ToolLimitsSettings()  # type: ignore[assignment]
     eval: EvalSettings = EvalSettings()  # type: ignore[assignment]
+    search: SearchSettings = SearchSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

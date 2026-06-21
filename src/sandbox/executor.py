@@ -60,6 +60,9 @@ class SandboxExecutor:
         self._image: str = getattr(settings, "evolution_sandbox_image", "python:3.12-slim")
         self._memory_mb: int = getattr(settings, "evolution_sandbox_memory_mb", 256)
         self._default_timeout: int = getattr(settings, "evolution_sandbox_timeout", 30)
+        # Lazily-built RunnerClient for runner mode (Phase 3b/c). Typed Any to
+        # avoid a circular top-level import (runner_client imports this module).
+        self._runner: Any = None
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -81,6 +84,8 @@ class SandboxExecutor:
         effective_timeout = timeout if timeout is not None else self._default_timeout
         if self._mode == "docker":
             return await self._run_docker(code, None, effective_timeout)
+        if self._mode == "runner":
+            return await self._run_runner(code, None, effective_timeout)
         return await self._run_subprocess(code, None, effective_timeout)
 
     async def execute_code_subprocess(
@@ -157,17 +162,25 @@ class SandboxExecutor:
             SandboxResult of the isolated run.
         """
         effective_timeout = timeout if timeout is not None else self._default_timeout
-        if self._mode != "docker":
-            raise SandboxUnavailable(
-                f"sandbox mode is {self._mode!r}, not 'docker' — cannot isolate runtime code"
+        if self._mode == "docker":
+            return await self._run_docker(
+                code,
+                None,
+                effective_timeout,
+                workdir=workdir,
+                workdir_dest=workdir_dest,
+                propagate_unavailable=True,
             )
-        return await self._run_docker(
-            code,
-            None,
-            effective_timeout,
-            workdir=workdir,
-            workdir_dest=workdir_dest,
-            propagate_unavailable=True,
+        if self._mode == "runner":
+            # The runner uses its OWN configured results dir (the shared
+            # turing-workspace volume); the docker workdir/workdir_dest bind-mount
+            # concepts do not apply, so they are ignored here.
+            return await self._run_runner(
+                code, None, effective_timeout, propagate_unavailable=True
+            )
+        raise SandboxUnavailable(
+            f"sandbox mode is {self._mode!r}, not 'docker' or 'runner' — "
+            "cannot isolate runtime code"
         )
 
     async def execute_test(
@@ -189,10 +202,12 @@ class SandboxExecutor:
         Returns:
             SandboxResult with test execution results.
         """
-        combined = f"{code}\n\n# --- test ---\n{test_code}"
         effective_timeout = timeout if timeout is not None else self._default_timeout
         if self._mode == "docker":
             return await self._run_docker(code, test_code, effective_timeout)
+        if self._mode == "runner":
+            return await self._run_runner(code, test_code, effective_timeout)
+        combined = f"{code}\n\n# --- test ---\n{test_code}"
         return await self._run_subprocess(combined, None, effective_timeout)
 
     async def execute_with_packages(
@@ -234,6 +249,12 @@ class SandboxExecutor:
 
         if self._mode == "docker":
             return await self._run_docker_with_packages(code, packages, effective_timeout)
+        if self._mode == "runner":
+            # The runner image mirrors the allowlist (incl. these validated
+            # packages) 1:1, so they are already importable there — no pip step
+            # is needed (unlike docker mode's pip-prepend or subprocess venv).
+            # The allowlist was validated above; just run the code remotely.
+            return await self._run_runner(code, None, effective_timeout)
         return await self._run_subprocess_with_packages(code, packages, effective_timeout)
 
     async def ensure_image(self) -> None:
@@ -271,6 +292,70 @@ class SandboxExecutor:
         Currently a no-op; retained for forward compatibility.
         """
         logger.debug("SandboxExecutor cleanup — nothing to clean")
+
+    # ── Runner mode (remote no-DinD container; Phase 3b/c) ────────────
+
+    def _get_runner(self) -> Any:
+        """Lazily build the RunnerClient used by runner mode.
+
+        The runner endpoint is process-global config, so when the injected
+        settings carry no ``.runner`` (e.g. code_executor's SimpleNamespace, or
+        a bare EvolutionSettings) we read the canonical ``Settings.runner``.
+        Tests that need to avoid the network inject a ``.runner`` (or patch this
+        method).
+        """
+        if self._runner is None:
+            from src.sandbox.runner_client import RunnerClient
+
+            injected = getattr(self._settings, "runner", None)
+            if injected is not None and hasattr(injected, "runner_url"):
+                self._runner = RunnerClient.from_settings(injected)
+            else:
+                from src.config import get_settings
+
+                self._runner = RunnerClient.from_settings(get_settings().runner)
+        return self._runner
+
+    async def _run_runner(
+        self,
+        code: str,
+        test_script: str | None,
+        timeout: int,
+        *,
+        propagate_unavailable: bool = False,
+    ) -> SandboxResult:
+        """Run code via the remote no-DinD runner (Phase 3b/c).
+
+        Mirrors ``_run_docker``'s isolation intent (a separate no-creds
+        container) but over HTTP — no ``docker.from_env()``, so the worker needs
+        NO Docker socket. The runner executes the script as a subprocess in its
+        OWN disposable container (network off, no DB creds).
+
+        The ``propagate_unavailable`` policy mirrors ``_run_docker`` EXACTLY:
+
+        - True (the runtime / ``code_executor`` path): RAISE
+          :class:`SandboxUnavailable` on any connection problem so
+          ``code_executor`` applies its OWN host-subprocess fallback (with the
+          results-dir CWD + bootstrap) rather than this executor's stripped
+          ``sys.executable`` subprocess.
+        - False (the evolution path — already statically SafetyPipeline-vetted
+          code): log + degrade to ``_run_subprocess`` so evolution never
+          hard-fails on a briefly-down runner.
+
+        A script that runs and exits non-zero / raises is a normal (failed)
+        :class:`SandboxResult` in BOTH paths — it is NEVER re-run on the host
+        (re-running untrusted code would defeat the isolation).
+        """
+        client = self._get_runner()
+        try:
+            return await client.execute(code, timeout=timeout, test_code=test_script)
+        except SandboxUnavailable:
+            if propagate_unavailable:
+                raise
+            logger.warning(
+                "runner unavailable; degrading to subprocess for vetted code"
+            )
+            return await self._run_subprocess(code, test_script, timeout)
 
     # ── Docker mode ───────────────────────────────────────────────────
 

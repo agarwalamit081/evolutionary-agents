@@ -1,16 +1,17 @@
-"""Phase 2c — code_executor docker-vs-subprocess routing + fallback policy.
+"""Phase 2c (docker) + Phase 3b/c (runner) — code_executor sandbox routing + fallback.
 
-These tests pin the DISPATCHER contract: which collaborator runs, and when the
-docker path falls back to the host. The collaborators themselves —
-``_run_host_subprocess`` and ``_run_in_docker_sandbox`` (→
+These tests pin the DISPATCHER contract: which collaborator runs, and when an
+isolated-sandbox path falls back to the host. The collaborators themselves —
+``_run_host_subprocess`` and ``_run_in_sandbox`` (→
 ``SandboxExecutor.execute_runtime_code``) — are exercised directly elsewhere
 (``test_builtin_tools.py`` for host; ``test_sandbox/test_executor.py`` for the
-docker isolation), so here they are stubbed to isolate the routing decision.
+docker/runner isolation), so here they are stubbed to isolate the routing
+decision.
 
-Key invariant under test: a docker run that fails at the SCRIPT level returns its
-own result and is NEVER re-run on the host; only ``SandboxUnavailable``
-(infrastructure) triggers the host fallback. Re-running untrusted code on the
-host would defeat the isolation an operator opted into.
+Key invariant under test: an isolated run (docker OR runner) that fails at the
+SCRIPT level returns its own result and is NEVER re-run on the host; only
+``SandboxUnavailable`` (infrastructure) triggers the host fallback. Re-running
+untrusted code on the host would defeat the isolation an operator opted into.
 """
 
 from __future__ import annotations
@@ -37,20 +38,25 @@ def _sandbox_settings(mode: str) -> SimpleNamespace:
 class _Spies:
     def __init__(self) -> None:
         self.host_called = False
-        self.docker_called = False
+        self.sandbox_called = False
         self.host_timeout: int | None = None
-        self.docker_timeout: int | None = None
+        self.sandbox_timeout: int | None = None
+        self.sandbox_mode: str | None = None
 
 
 def _install(
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
     *,
-    docker_returns: str | None = None,
-    docker_raises: BaseException | None = None,
+    sandbox_returns: str | None = None,
+    sandbox_raises: BaseException | None = None,
     host_returns: str = "HOST-OUT",
 ) -> _Spies:
-    """Wire fake settings + stubbed collaborators onto the code_executor module."""
+    """Wire fake settings + stubbed collaborators onto the code_executor module.
+
+    ``mode`` flows through to the stubbed ``_run_in_sandbox`` so tests can assert
+    the dispatcher passed the right mode ("docker" or "runner").
+    """
     spies = _Spies()
     monkeypatch.setattr(ce, "_tool_sandbox", lambda: _sandbox_settings(mode))
     monkeypatch.setattr(
@@ -63,16 +69,17 @@ def _install(
         spies.host_timeout = timeout
         return host_returns
 
-    async def _docker(code: str, timeout: int) -> str:
+    async def _sandbox(code: str, timeout: int, m: str) -> str:
         del code
-        spies.docker_called = True
-        spies.docker_timeout = timeout
-        if docker_raises is not None:
-            raise docker_raises
-        return docker_returns if docker_returns is not None else "DOCKER"
+        spies.sandbox_called = True
+        spies.sandbox_timeout = timeout
+        spies.sandbox_mode = m
+        if sandbox_raises is not None:
+            raise sandbox_raises
+        return sandbox_returns if sandbox_returns is not None else f"{m.upper()}-OUT"
 
     monkeypatch.setattr(ce, "_run_host_subprocess", _host)
-    monkeypatch.setattr(ce, "_run_in_docker_sandbox", _docker)
+    monkeypatch.setattr(ce, "_run_in_sandbox", _sandbox)
     return spies
 
 
@@ -83,16 +90,18 @@ async def test_subprocess_mode_uses_host_subprocess(monkeypatch: pytest.MonkeyPa
     out = await ce.code_executor("print('x')")
     assert out == "HOST-OUT"
     assert spies.host_called is True
-    assert spies.docker_called is False
+    assert spies.sandbox_called is False
 
 
 @pytest.mark.asyncio
 async def test_docker_mode_uses_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Opt-in docker mode routes to the sandbox and never runs on the host."""
-    spies = _install(monkeypatch, "docker", docker_returns="DOCKER-OUT")
+    """Opt-in docker mode routes to the sandbox with mode='docker' and never runs
+    on the host."""
+    spies = _install(monkeypatch, "docker", sandbox_returns="DOCKER-OUT")
     out = await ce.code_executor("print('x')")
     assert out == "DOCKER-OUT"
-    assert spies.docker_called is True
+    assert spies.sandbox_called is True
+    assert spies.sandbox_mode == "docker"
     assert spies.host_called is False
 
 
@@ -105,12 +114,12 @@ async def test_docker_mode_falls_back_on_unavailable(
     spies = _install(
         monkeypatch,
         "docker",
-        docker_raises=SandboxUnavailable("no daemon"),
+        sandbox_raises=SandboxUnavailable("no daemon"),
         host_returns="HOST-OUT",
     )
     out = await ce.code_executor("print('x')")
     assert out == "HOST-OUT"
-    assert spies.docker_called is True
+    assert spies.sandbox_called is True
     assert spies.host_called is True  # fell back
 
 
@@ -122,11 +131,57 @@ async def test_docker_mode_does_not_fall_back_on_script_failure(
     host — the failed result is passed through. This is the isolation invariant
     that distinguishes a script failure from an infrastructure failure."""
     spies = _install(
-        monkeypatch, "docker", docker_returns="SCRIPT-FAILED-EXIT-1"
+        monkeypatch, "docker", sandbox_returns="SCRIPT-FAILED-EXIT-1"
     )
     out = await ce.code_executor("raise RuntimeError('boom')")
     assert out == "SCRIPT-FAILED-EXIT-1"
-    assert spies.docker_called is True
+    assert spies.sandbox_called is True
+    assert spies.host_called is False  # no fallback for a script failure
+
+
+@pytest.mark.asyncio
+async def test_runner_mode_uses_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt-in runner mode routes to the remote runner with mode='runner' and never
+    runs on the host (Phase 3b/c)."""
+    spies = _install(monkeypatch, "runner", sandbox_returns="RUNNER-OUT")
+    out = await ce.code_executor("print('x')")
+    assert out == "RUNNER-OUT"
+    assert spies.sandbox_called is True
+    assert spies.sandbox_mode == "runner"
+    assert spies.host_called is False
+
+
+@pytest.mark.asyncio
+async def test_runner_mode_falls_back_on_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A down/unreachable runner (SandboxUnavailable) falls back to the host
+    subprocess so a run never hard-fails when the runner service is absent."""
+    spies = _install(
+        monkeypatch,
+        "runner",
+        sandbox_raises=SandboxUnavailable("runner unreachable"),
+        host_returns="HOST-OUT",
+    )
+    out = await ce.code_executor("print('x')")
+    assert out == "HOST-OUT"
+    assert spies.sandbox_called is True
+    assert spies.host_called is True  # fell back
+
+
+@pytest.mark.asyncio
+async def test_runner_mode_does_not_fall_back_on_script_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner run that RETURNS (script exited non-zero) is NOT re-run on the
+    host — the failed result is passed through, same isolation invariant as
+    docker mode."""
+    spies = _install(
+        monkeypatch, "runner", sandbox_returns="SCRIPT-FAILED-EXIT-1"
+    )
+    out = await ce.code_executor("raise RuntimeError('boom')")
+    assert out == "SCRIPT-FAILED-EXIT-1"
+    assert spies.sandbox_called is True
     assert spies.host_called is False  # no fallback for a script failure
 
 
@@ -134,24 +189,28 @@ async def test_docker_mode_does_not_fall_back_on_script_failure(
 async def test_timeout_resolves_per_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """``timeout=None`` resolves to the mode-appropriate default:
     ToolLimits.code_executor_timeout (subprocess) or
-    ToolSandbox.code_executor_sandbox_timeout (docker)."""
+    ToolSandbox.code_executor_sandbox_timeout (docker / runner)."""
     sp_sub = _install(monkeypatch, "subprocess")
     await ce.code_executor("print('x')")
     assert sp_sub.host_timeout == 42  # ToolLimits default (mocked)
 
     sp_docker = _install(monkeypatch, "docker")
     await ce.code_executor("print('x')")
-    assert sp_docker.docker_timeout == 99  # ToolSandbox default (mocked)
+    assert sp_docker.sandbox_timeout == 99  # ToolSandbox default (mocked)
+
+    sp_runner = _install(monkeypatch, "runner")
+    await ce.code_executor("print('x')")
+    assert sp_runner.sandbox_timeout == 99  # same sandbox-timeout default as docker
 
 
 @pytest.mark.asyncio
 async def test_explicit_timeout_overrides_mode_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An explicit timeout wins over the mode default for both modes."""
+    """An explicit timeout wins over the mode default for both isolated modes."""
     sp = _install(monkeypatch, "docker")
     await ce.code_executor("print('x')", timeout=7)
-    assert sp.docker_timeout == 7
+    assert sp.sandbox_timeout == 7
 
 
 def test_tool_sandbox_returns_settings_group() -> None:

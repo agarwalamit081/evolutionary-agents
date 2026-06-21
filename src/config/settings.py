@@ -563,7 +563,7 @@ class ToolSandboxSettings(BaseSettings):
     dep resolves in the container too.
     """
 
-    code_executor_mode: Literal["subprocess", "docker"] = "subprocess"
+    code_executor_mode: Literal["subprocess", "docker", "runner"] = "subprocess"
     code_executor_sandbox_image: str = "turing-toolbox:latest"
     code_executor_sandbox_memory_mb: int = 512
     # Timeout for the docker code run. Defaults higher than the host
@@ -681,7 +681,7 @@ class EvolutionSettings(BaseSettings):
     evolution_require_human_approval: bool = True
     evolution_sandbox_memory_mb: int = 256
     evolution_sandbox_image: str = "python:3.12-slim"
-    evolution_sandbox_mode: Literal["docker", "subprocess"] = "docker"
+    evolution_sandbox_mode: Literal["docker", "subprocess", "runner"] = "docker"
     evolution_shadow_repo_path: str = ".turing/evolution-repo"
     evolution_source_dir: str = "src"
     # Max regeneration attempts after a validation failure (0 = single attempt,

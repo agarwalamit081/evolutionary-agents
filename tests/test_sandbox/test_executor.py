@@ -454,3 +454,276 @@ async def test_execute_code_swallows_image_not_found_without_propagate(
 
     assert result.success is False  # swallowed, not raised
     assert not isinstance(result, Exception)
+
+
+# ── Runner mode (Phase 3b/c — remote no-DinD container) ───────────────
+#
+# The runner routes code over HTTP to a dedicated container. These pin the
+# ROUTING decisions (which _run_* collaborator fires) + the propagate_unavailable
+# policy (mirrors _run_docker) + _get_runner config resolution. The runner client
+# itself is covered in test_sandbox/test_runner_client.py; the server in
+# test_sandbox/test_runner_server.py.
+
+
+def _runner_settings() -> object:
+    """Settings configured for runner mode."""
+
+    class _Settings:
+        evolution_sandbox_mode = "runner"
+        evolution_sandbox_image = "turing-toolbox:latest"
+        evolution_sandbox_memory_mb = 512
+        evolution_sandbox_timeout = 30
+
+    return _Settings()
+
+
+class _RaisingRunnerClient:
+    """A fake runner client whose execute always raises SandboxUnavailable."""
+
+    async def execute(
+        self, code: str, *, timeout: float | None = None, test_code: str | None = None
+    ) -> SandboxResult:
+        del code, timeout, test_code
+        raise SandboxUnavailable("runner down")
+
+
+@pytest.mark.asyncio
+async def test_runner_mode_routes_execute_code_to_run_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute_code in runner mode calls _run_runner (NOT _run_docker /
+    _run_subprocess) with the evolution-path default propagate=False."""
+    executor = SandboxExecutor(_runner_settings())
+    assert executor._mode == "runner"
+
+    captured: dict[str, object] = {}
+
+    async def fake_runner(
+        code: str, test_script: object, timeout: int, *, propagate_unavailable: bool = False
+    ) -> SandboxResult:
+        captured.update(
+            code=code, test_script=test_script, timeout=timeout, propagate=propagate_unavailable
+        )
+        return SandboxResult(True, 0, "runner-out", "", 0.0, None, False)
+
+    async def fail_docker(*a: object, **k: object) -> SandboxResult:
+        raise AssertionError("runner mode must not call _run_docker")
+
+    async def fail_subprocess(*a: object, **k: object) -> SandboxResult:
+        raise AssertionError("runner mode must not call _run_subprocess")
+
+    monkeypatch.setattr(executor, "_run_runner", fake_runner)
+    monkeypatch.setattr(executor, "_run_docker", fail_docker)
+    monkeypatch.setattr(executor, "_run_subprocess", fail_subprocess)
+
+    result = await executor.execute_code("print('x')")
+
+    assert result.success is True
+    assert captured["code"] == "print('x')"
+    assert captured["test_script"] is None
+    assert captured["propagate"] is False  # execute_code = evolution-path default
+
+
+@pytest.mark.asyncio
+async def test_runner_mode_routes_execute_test_to_run_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute_test in runner mode passes code + test_code through to the runner
+    (the SERVER concatenates), never the host subprocess."""
+    executor = SandboxExecutor(_runner_settings())
+    captured: dict[str, object] = {}
+
+    async def fake_runner(
+        code: str, test_script: object, timeout: int, *, propagate_unavailable: bool = False
+    ) -> SandboxResult:
+        captured.update(code=code, test_script=test_script, timeout=timeout)
+        return SandboxResult(True, 0, "ok", "", 0.0, None, False)
+
+    async def fail_subprocess(code: str, test_script: object, timeout: int) -> SandboxResult:
+        raise AssertionError("runner execute_test must not concatenate+subprocess")
+
+    monkeypatch.setattr(executor, "_run_runner", fake_runner)
+    monkeypatch.setattr(executor, "_run_subprocess", fail_subprocess)
+
+    result = await executor.execute_test("def f():\n    return 1\n", "assert f() == 1\n")
+
+    assert result.success is True
+    assert captured["code"] == "def f():\n    return 1\n"
+    assert captured["test_script"] == "assert f() == 1\n"  # passed through, server concatenates
+
+
+@pytest.mark.asyncio
+async def test_runner_mode_routes_with_packages_no_pip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute_with_packages in runner mode runs the code directly on the runner
+    — the runner image mirrors the allowlist 1:1, so NO pip/venv step is taken
+    (unlike docker's pip-prepend or subprocess's venv)."""
+    executor = SandboxExecutor(_runner_settings())
+    captured: dict[str, object] = {}
+
+    async def fake_runner(
+        code: str, test_script: object, timeout: int, *, propagate_unavailable: bool = False
+    ) -> SandboxResult:
+        captured.update(code=code, test_script=test_script, timeout=timeout)
+        return SandboxResult(True, 0, "ok", "", 0.0, None, False)
+
+    async def fail_docker_pkgs(*a: object, **k: object) -> SandboxResult:
+        raise AssertionError("runner mode must not pip-install via docker")
+
+    async def fail_subprocess_pkgs(*a: object, **k: object) -> SandboxResult:
+        raise AssertionError("runner mode must not create a venv")
+
+    monkeypatch.setattr(executor, "_run_runner", fake_runner)
+    monkeypatch.setattr(executor, "_run_docker_with_packages", fail_docker_pkgs)
+    monkeypatch.setattr(executor, "_run_subprocess_with_packages", fail_subprocess_pkgs)
+
+    # numpy is allowlisted; this proves the allowlist gate still runs in runner mode
+    result = await executor.execute_with_packages("import numpy", ["numpy"])
+
+    assert result.success is True
+    assert captured["code"] == "import numpy"
+    assert captured["test_script"] is None
+
+
+@pytest.mark.asyncio
+async def test_runner_mode_runtime_code_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """execute_runtime_code in runner mode routes to _run_runner with
+    propagate_unavailable=True (the runtime code_executor path raises on a down
+    runner so code_executor applies its OWN host fallback). The docker
+    workdir/workdir_dest args are accepted by the signature but ignored here."""
+    executor = SandboxExecutor(_runner_settings())
+    captured: dict[str, object] = {}
+
+    async def fake_runner(
+        code: str, test_script: object, timeout: int, *, propagate_unavailable: bool = False
+    ) -> SandboxResult:
+        captured.update(propagate=propagate_unavailable, code=code, test_script=test_script)
+        return SandboxResult(True, 0, "ok", "", 0.0, None, False)
+
+    monkeypatch.setattr(executor, "_run_runner", fake_runner)
+
+    result = await executor.execute_runtime_code(
+        "print('x')", workdir="/tmp/r", workdir_dest="/workspace/results"
+    )
+
+    assert result.success is True
+    assert captured["propagate"] is True
+    assert captured["test_script"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_runner_propagate_false_degrades_to_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Evolution path (propagate=False): a down runner logs + degrades to
+    _run_subprocess so evolution never hard-fails on a briefly-down runner."""
+    executor = SandboxExecutor(_runner_settings())
+    monkeypatch.setattr(executor, "_get_runner", lambda: _RaisingRunnerClient())
+
+    async def fake_subprocess(
+        code: str, test_script: object, timeout: int
+    ) -> SandboxResult:
+        return SandboxResult(True, 0, "degraded-host", "", 0.0, None, False)
+
+    monkeypatch.setattr(executor, "_run_subprocess", fake_subprocess)
+
+    result = await executor._run_runner("print('x')", None, 10, propagate_unavailable=False)
+
+    assert result.success is True
+    assert "degraded-host" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_run_runner_propagate_true_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime path (propagate=True): a down runner RAISES SandboxUnavailable so
+    code_executor falls back to its host subprocess (never silently degrades)."""
+    executor = SandboxExecutor(_runner_settings())
+    monkeypatch.setattr(executor, "_get_runner", lambda: _RaisingRunnerClient())
+
+    with pytest.raises(SandboxUnavailable):
+        await executor._run_runner("print('x')", None, 10, propagate_unavailable=True)
+
+
+def test_get_runner_reads_injected_runner_settings() -> None:
+    """_get_runner builds the client from an injected ``.runner`` (the
+    code_executor SimpleNamespace path), reading its runner_url/timeouts."""
+    injected_runner = types.SimpleNamespace(
+        runner_url="http://my-runner:9999",
+        runner_connect_timeout_s=2.5,
+        runner_max_timeout_s=120,
+    )
+    settings = types.SimpleNamespace(
+        evolution_sandbox_mode="runner",
+        evolution_sandbox_image="x",
+        evolution_sandbox_memory_mb=256,
+        evolution_sandbox_timeout=30,
+        runner=injected_runner,
+    )
+    executor = SandboxExecutor(settings)
+
+    client = executor._get_runner()
+
+    assert client._base_url == "http://my-runner:9999"
+    assert client._connect_timeout_s == 2.5
+    assert client._max_timeout_s == 120
+
+
+def test_get_runner_caches_client() -> None:
+    """_get_runner caches the client on the executor (two calls, one client)."""
+    settings = types.SimpleNamespace(
+        evolution_sandbox_mode="runner",
+        evolution_sandbox_image="x",
+        evolution_sandbox_memory_mb=256,
+        evolution_sandbox_timeout=30,
+        runner=types.SimpleNamespace(
+            runner_url="http://runner:8090",
+            runner_connect_timeout_s=5.0,
+            runner_max_timeout_s=300,
+        ),
+    )
+    executor = SandboxExecutor(settings)
+
+    a = executor._get_runner()
+    b = executor._get_runner()
+
+    assert a is b
+
+
+def test_get_runner_falls_back_to_settings_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No injected ``.runner`` → _get_runner reads get_settings().runner
+    (the evolution path, where EvolutionSettings has no .runner)."""
+    fake_root_runner = types.SimpleNamespace(
+        runner_url="http://fallback:8090",
+        runner_connect_timeout_s=5.0,
+        runner_max_timeout_s=300,
+    )
+    monkeypatch.setattr(
+        "src.config.get_settings",
+        lambda: types.SimpleNamespace(runner=fake_root_runner),
+    )
+    # Settings WITHOUT a .runner attribute → triggers the fallback branch.
+    settings = types.SimpleNamespace(
+        evolution_sandbox_mode="runner",
+        evolution_sandbox_image="x",
+        evolution_sandbox_memory_mb=256,
+        evolution_sandbox_timeout=30,
+    )
+    executor = SandboxExecutor(settings)
+
+    client = executor._get_runner()
+
+    assert client._base_url == "http://fallback:8090"
+
+
+@pytest.mark.asyncio
+async def test_runner_mode_ensure_image_is_noop() -> None:
+    """ensure_image short-circuits in runner mode (no docker image to pull) —
+    mirroring the subprocess-mode guard, never touching a docker daemon."""
+    executor = SandboxExecutor(_runner_settings())
+    # Must not raise and must not attempt any docker.from_env().
+    await executor.ensure_image()

@@ -54,7 +54,7 @@ _WRITE_BOOTSTRAP = (
 async def code_executor(code: str, timeout: Optional[int] = None) -> str:
     """Execute Python code and return the output.
 
-    Two execution modes (Phase 2c):
+    Three execution modes (Phase 2c docker; Phase 3b/c runner):
 
     - **subprocess** (default): runs in a host subprocess with CWD = project
       root (parent of ``results_root``) — the same root ``file_writer``/
@@ -71,39 +71,47 @@ async def code_executor(code: str, timeout: Optional[int] = None) -> str:
       Docker mode keeps the ``results/<file>`` contract (only ``results/`` is
       writable inside the container). If Docker is unavailable it logs a WARNING
       and falls back to the host subprocess so a run never hard-fails.
+    - **runner** (opt-in via ``CODE_EXECUTOR_MODE=runner``, Phase 3b/c): POSTs
+      the code to the remote no-DinD runner container over HTTP. The worker
+      needs NO Docker socket (no Docker-in-Docker); the runner executes the
+      script in its OWN isolated container (network off, no DB/Redis creds),
+      writing ``results/<file>`` deliverables to the shared turing-workspace
+      volume. Like docker mode, it falls back to the host subprocess if the
+      runner is unreachable, so a run never hard-fails.
 
     Args:
         code: Python source code to execute.
         timeout: Maximum execution time in seconds. ``None`` resolves to
             ``CODE_EXECUTOR_TIMEOUT`` (subprocess) or
-            ``CODE_EXECUTOR_SANDBOX_TIMEOUT`` (docker).
+            ``CODE_EXECUTOR_SANDBOX_TIMEOUT`` (docker / runner).
 
     Returns:
         Stdout + stderr from the execution.
     """
     ts = _tool_sandbox()
+    mode = ts.code_executor_mode
     if timeout is None:
         timeout = (
             ts.code_executor_sandbox_timeout
-            if ts.code_executor_mode == "docker"
+            if mode in ("docker", "runner")
             else _tool_limits().code_executor_timeout
         )
     logger.info(
         "Executing code ({} chars, mode={}, timeout={}s)",
-        len(code), ts.code_executor_mode, timeout,
+        len(code), mode, timeout,
     )
 
-    if ts.code_executor_mode == "docker":
+    if mode in ("docker", "runner"):
         try:
-            return await _run_in_docker_sandbox(code, timeout)
+            return await _run_in_sandbox(code, timeout, mode)
         except SandboxUnavailable as exc:
-            # Infrastructure-only (docker missing / daemon down / image absent).
-            # A script that ran + failed does NOT take this branch — it returns
-            # its own result and is never re-run on the host.
+            # Infrastructure-only (docker missing / daemon down / image absent /
+            # runner down). A script that ran + failed does NOT take this branch
+            # — it returns its own result and is never re-run on the host.
             logger.warning(
-                "docker code_executor sandbox unavailable ({}); "
+                "{} code_executor sandbox unavailable ({}); "
                 "falling back to host subprocess",
-                exc,
+                mode, exc,
             )
     return await _run_host_subprocess(code, timeout)
 
@@ -169,15 +177,30 @@ def _format_sandbox_output(result: SandboxResult) -> str:
     return output or "(no output)"
 
 
-async def _run_in_docker_sandbox(code: str, timeout: int) -> str:
-    """Execute Python in the isolated docker sandbox (network-off, read-only FS,
-    memory cap) with the agent results dir mounted read-write.
+async def _run_in_sandbox(code: str, timeout: int, mode: str) -> str:
+    """Execute Python in the isolated sandbox — a docker container OR the remote
+    runner (Phase 3b/c).
+
+    Both modes isolate untrusted one-off LLM code:
+
+    - **docker** (``mode="docker"``): network-off, read-only rootfs, memory cap,
+      with the agent results dir bind-mounted read-write so ``results/<file>``
+      writes persist.
+    - **runner** (``mode="runner"``): POSTs to the remote no-DinD runner
+      container (network off, no DB/Redis creds) over HTTP. The runner writes to
+      its OWN results dir under the shared turing-workspace volume, so the
+      docker workdir/workdir_dest bind-mount concepts are ignored by
+      ``execute_runtime_code`` in this mode.
+
+    The write-bootstrap is prepended in both so relative ``results/<file>``
+    parent dirs are auto-created (docker via the bind mount; runner via the
+    shared volume).
 
     Raises ``SandboxUnavailable`` on infrastructure problems (docker missing /
-    daemon down / image absent) so ``code_executor`` can fall back to the host
-    subprocess. A script that runs but exits non-zero / raises returns a normal
-    formatted result — it is NEVER re-run on the host (that would defeat the
-    isolation an operator opted into).
+    daemon down / image absent / runner down) so ``code_executor`` can fall back
+    to the host subprocess. A script that runs but exits non-zero / raises
+    returns a normal formatted result — it is NEVER re-run on the host (that
+    would defeat the isolation an operator opted into).
     """
     from types import SimpleNamespace
 
@@ -186,12 +209,14 @@ async def _run_in_docker_sandbox(code: str, timeout: int) -> str:
     ts = _tool_sandbox()
     mount_src = ts.code_executor_results_mount or str(results_root())
     # Ensure the host mount target exists so Docker can bind it and a script
-    # writing results/<file> has somewhere to land.
+    # writing results/<file> has somewhere to land. (For runner mode the runner
+    # writes to its OWN results dir under the shared volume; this host dir is
+    # the bind source docker mode uses — harmless to ensure-exist for runner.)
     Path(mount_src).mkdir(parents=True, exist_ok=True)
 
     sandbox = SandboxExecutor(
         SimpleNamespace(
-            evolution_sandbox_mode="docker",
+            evolution_sandbox_mode=mode,
             evolution_sandbox_image=ts.code_executor_sandbox_image,
             evolution_sandbox_memory_mb=ts.code_executor_sandbox_memory_mb,
             evolution_sandbox_timeout=timeout,

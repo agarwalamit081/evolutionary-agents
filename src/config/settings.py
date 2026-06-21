@@ -992,6 +992,49 @@ class SearchSettings(BaseSettings):
         return [p.strip().lower() for p in self.search_fallback_providers.split(",") if p.strip()]
 
 
+class WorkerSettings(BaseSettings):
+    """Redis-Streams queue seam configuration (Phase 2b overhaul).
+
+    The API role enqueues run requests to a Redis Stream; worker processes
+    consume them via a consumer group. This decouples request ingestion
+    (stateless, scales horizontally) from run execution (heavy, one at a time
+    per worker). At-least-once delivery: a worker XACKs only after the run's
+    checkpoint is durable, so a mid-run crash leaves the message in the group's
+    pending-entries list for another worker to reclaim (``reclaim_min_idle_ms``
+    gates how long a stuck entry must idle before ``XAUTOCLAIM`` reassigns it).
+    """
+
+    # Stream + consumer-group names. The stream is created on first XADD (or via
+    # MKSTREAM on group creation). Env: WORKER_RUNS_STREAM / WORKER_GROUP.
+    runs_stream: str = "turing:runs"  # Env: WORKER_RUNS_STREAM
+    worker_group: str = "turing-workers"  # Env: WORKER_GROUP
+
+    # This consumer's name within the group (for PEL ownership / XAUTOCLAIM).
+    consumer_name: str = "worker-1"  # Env: WORKER_CONSUMER_NAME
+
+    # How many messages to pull per XREADGROUP sweep.
+    read_batch_size: int = 5  # Env: WORKER_READ_BATCH_SIZE
+
+    # XREADGROUP block timeout (ms): how long to wait for new messages before
+    # looping back to reclaim-stale. 0 = non-blocking. Env: WORKER_BLOCK_MS.
+    block_ms: int = 5000  # Env: WORKER_BLOCK_MS
+
+    # Min idle time (ms) before a pending entry is eligible for XAUTOCLAIM by
+    # another consumer (crash recovery). Env: WORKER_RECLAIM_MIN_IDLE_MS.
+    reclaim_min_idle_ms: int = 30000  # Env: WORKER_RECLAIM_MIN_IDLE_MS
+
+    # TTL (s) on per-run status hashes (``turing:run:{run_id}``) so the status
+    # store self-cleans instead of growing unbounded. Env: WORKER_STATUS_TTL_S.
+    status_ttl_seconds: int = 86400  # Env: WORKER_STATUS_TTL_S
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 # ─── Root Settings ──────────────────────────────────────────────────
 
 
@@ -1019,6 +1062,7 @@ class Settings(BaseSettings):
     tools: ToolLimitsSettings = ToolLimitsSettings()  # type: ignore[assignment]
     eval: EvalSettings = EvalSettings()  # type: ignore[assignment]
     search: SearchSettings = SearchSettings()  # type: ignore[assignment]
+    worker: WorkerSettings = WorkerSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

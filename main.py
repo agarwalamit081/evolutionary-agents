@@ -150,7 +150,7 @@ def main(
     click.echo(f"   Completed: {result.get('is_complete', False)}")
 
 
-def _thread_id_for_run(run_id: str | None, goal_text: str) -> str:
+def _thread_id_for_run(run_id: str | None, goal_text: str, *, origin: str = "cli") -> str:
     """Resolve the LangGraph thread_id for a run.
 
     Keyed on ``run_id`` when provided so a later ``--resume <run_id>`` can reuse
@@ -160,13 +160,16 @@ def _thread_id_for_run(run_id: str | None, goal_text: str) -> str:
     Args:
         run_id: Optional run identifier.
         goal_text: The goal (used only for the fallback key).
+        origin: Origin prefix (``"cli"`` for the CLI, ``"api"`` for queue-routed
+            runs) so an API run and a CLI run sharing a run_id do NOT collide on
+            the same checkpoint thread. The worker executor passes ``"api"``.
 
     Returns:
         A stable thread_id string.
     """
     if run_id is not None:
-        return f"cli-{run_id}"
-    return f"cli-{os.getpid()}-{id(goal_text)}"
+        return f"{origin}-{run_id}"
+    return f"{origin}-{os.getpid()}-{id(goal_text)}"
 
 
 def _new_attempt_id() -> str:
@@ -280,6 +283,7 @@ async def _run_agent(
     run_id: str | None = None,
     model: str | None = None,
     resume: bool = False,
+    origin: str = "cli",
 ) -> dict:
     """Run the agent graph to completion.
 
@@ -297,6 +301,9 @@ async def _run_agent(
             its last checkpoint instead of starting fresh. Requires a
             checkpointer and an existing checkpoint for the thread; refuses
             with a clear error otherwise. Threads the CLI ``--resume`` flag.
+        origin: Checkpoint thread_id prefix (``"cli"`` default). The queue worker
+            passes ``"api"`` so an API-routed run never collides with a CLI run
+            sharing the same run_id on the checkpointer.
 
     Returns:
         Final agent state as a dict.
@@ -332,7 +339,7 @@ async def _run_agent(
 
     # Create initial state. thread_id is keyed on run_id when given so a later
     # --resume <run_id> reuses the same thread and continues from its checkpoint.
-    thread_id = _thread_id_for_run(run_id, goal_text)
+    thread_id = _thread_id_for_run(run_id, goal_text, origin=origin)
     # Phase 7: bind the run_id so file_writer/execute route this run's
     # deliverables under results_root/<run_id>/ and reads fall back to flat.
     # None (no --run-id) leaves resolution flat — legacy, non-regressing.

@@ -39,8 +39,8 @@ def create_app() -> FastAPI:
     app.include_router(health_router, tags=["health"])
 
     try:
-        from src.api.routes.agent import router as agent_router
-        app.include_router(agent_router, prefix="/api/v1/agent", tags=["agent"])
+        from src.api.routes.agent import API_PREFIX, router as agent_router
+        app.include_router(agent_router, prefix=API_PREFIX, tags=["agent"])
     except ImportError:
         logger.warning("Agent routes not available yet")
 

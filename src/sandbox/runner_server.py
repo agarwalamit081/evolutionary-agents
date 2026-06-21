@@ -152,19 +152,23 @@ async def handle_execute(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except json.JSONDecodeError:
+        logger.warning("POST /execute rejected: request body is not JSON")
         raise web.HTTPBadRequest(text="request body must be JSON")
 
     if not isinstance(body, dict) or not isinstance(body.get("code"), str):
+        logger.warning("POST /execute rejected: missing or non-string 'code'")
         raise web.HTTPBadRequest(text="missing or non-string 'code'")
 
     code: str = body["code"]
     test_code = body.get("test_code")
     if test_code is not None and not isinstance(test_code, str):
+        logger.warning("POST /execute rejected: 'test_code' is not a string")
         raise web.HTTPBadRequest(text="'test_code' must be a string")
 
     try:
         timeout = float(body.get("timeout", 60))
     except (TypeError, ValueError):
+        logger.warning("POST /execute rejected: 'timeout' is not a number")
         raise web.HTTPBadRequest(text="'timeout' must be a number")
     # Server-side cap (defense in depth; the client also caps). Floor at 0.1s.
     timeout = max(0.1, min(timeout, float(settings.runner_max_timeout_s)))
@@ -172,7 +176,27 @@ async def handle_execute(request: web.Request) -> web.Response:
     full_script = (
         code if test_code is None else f"{code}\n\n# --- test ---\n{test_code}"
     )
+    # Per-execute audit trace (observability): the runner is the agent's single
+    # sink for LLM-generated code, so each execution MUST be attributable — both
+    # to prove the no-DinD path fired (vs a silent host-subprocess fallback in
+    # the worker's code_executor) and to make a sandbox that runs untrusted code
+    # auditable. Logs METADATA only (code size + outcome), never the code body,
+    # which can be large / may echo tool input.
+    logger.info(
+        "POST /execute → running (code_chars={}, has_test={}, timeout={:.1f}s)",
+        len(code),
+        test_code is not None,
+        timeout,
+    )
     result = await _run_subprocess(settings, full_script, timeout)
+    logger.info(
+        "POST /execute ← done (success={}, exit_code={}, duration={:.3f}s, "
+        "timed_out={})",
+        result.get("success"),
+        result.get("exit_code"),
+        float(result.get("duration_seconds", 0.0)),
+        result.get("timed_out"),
+    )
     return web.json_response(result)
 
 

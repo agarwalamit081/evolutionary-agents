@@ -17,8 +17,19 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from loguru import logger
 
 from src.sandbox.runner_server import RunnerServerSettings, build_app
+
+
+class _LogSink:
+    """Collects formatted loguru records for assertion."""
+
+    def __init__(self) -> None:
+        self.records: list[str] = []
+
+    def __call__(self, message: object) -> None:
+        self.records.append(str(message))
 
 
 @pytest.fixture
@@ -170,3 +181,52 @@ def test_build_app_registers_both_routes() -> None:
     routes = {(r.method, r.resource.canonical) for r in app.router.routes()}
     assert ("POST", "/execute") in routes
     assert ("GET", "/health") in routes
+
+
+@pytest.mark.asyncio
+async def test_execute_emits_inbound_and_outbound_audit_trace(
+    client: TestClient,
+) -> None:
+    """Each /execute logs an inbound ('running …') + outbound ('done …') record.
+
+    The runner is the agent's single sink for LLM-generated code, so executions
+    MUST be attributable — both to prove the no-DinD path fired (vs a silent
+    host-subprocess fallback in the worker's code_executor, which only warns on
+    ``SandboxUnavailable``) and to make a sandbox that runs untrusted code
+    auditable. The trace logs METADATA only — the submitted code body must NEVER
+    appear (it can be large / may echo tool input).
+    """
+    sink = _LogSink()
+    handler_id = logger.add(sink, level="INFO")
+    try:
+        resp = await client.post(
+            "/execute",
+            json={"code": "SECRET_TOKEN = 'leak-me'\nprint(2 + 2)", "timeout": 10},
+        )
+    finally:
+        logger.remove(handler_id)
+
+    assert resp.status == 200
+    joined = "\n".join(sink.records)
+    # Inbound trace: code size + timeout are present.
+    assert "POST /execute" in joined and "running" in joined
+    assert "code_chars=" in joined and "timeout=" in joined
+    # Outbound trace: outcome (success/exit/duration) is present.
+    assert "done" in joined and "exit_code=0" in joined
+    # The code BODY (incl. a planted secret) must NEVER be logged.
+    assert "SECRET_TOKEN" not in joined
+    assert "leak-me" not in joined
+
+
+@pytest.mark.asyncio
+async def test_execute_bad_request_emits_rejection_trace(client: TestClient) -> None:
+    """A malformed /execute is rejected with a WARNING audit trace (not silent)."""
+    sink = _LogSink()
+    handler_id = logger.add(sink, level="WARNING")
+    try:
+        resp = await client.post("/execute", json={"timeout": 5})  # no 'code'
+    finally:
+        logger.remove(handler_id)
+
+    assert resp.status == 400
+    assert any("rejected" in r and "code" in r for r in sink.records)

@@ -810,8 +810,15 @@ async def _create_checkpointer(settings: Settings):
         from src.graph.checkpoint import create_checkpointer
 
         return await create_checkpointer(settings.database.database_url)
-    except Exception:
-        logger.debug("Checkpointer not available, running without persistence")
+    except Exception as e:
+        # Visibility: a bare swallow here previously hid a real regression
+        # (from_conn_string API misuse) for the entire overhaul — every CLI run
+        # silently ran without persistence and --resume was a no-op. Surface the
+        # cause at WARNING so future checkpoint failures are diagnosable.
+        logger.warning(
+            f"Checkpointer not available, running without persistence: "
+            f"{type(e).__name__}: {e}"
+        )
         return None
 
 

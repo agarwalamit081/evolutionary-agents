@@ -29,12 +29,20 @@ async def create_checkpointer(database_url: str) -> Any:
     # Convert asyncpg URL to psycopg format if needed
     psycopg_url = database_url.replace("+asyncpg", "")
 
-    # from_conn_string returns an async context manager; we enter it
-    # to call setup(), then return the initialized checkpointer.
-    checkpointer = AsyncPostgresSaver.from_conn_string(psycopg_url)
-    # The object returned by from_conn_string is both usable directly
-    # and as a context manager. Use it directly for non-scoped usage.
-    await checkpointer.setup()  # type: ignore[union-attr]
+    # In langgraph-checkpoint-postgres 3.x, ``from_conn_string`` is an
+    # ``@asynccontextmanager`` that yields the saver (owning its connection
+    # pool) on enter and closes the pool on exit — it does NOT return a saver
+    # directly. Enter it to obtain the saver, call ``setup()`` to create the
+    # checkpoint tables, then return the detached saver so its backing pool is
+    # reused across checkpoint writes for the process. If ``setup()`` fails,
+    # close the pool via the CM's ``__aexit__`` before propagating.
+    cm = AsyncPostgresSaver.from_conn_string(psycopg_url)
+    checkpointer = await cm.__aenter__()
+    try:
+        await checkpointer.setup()
+    except BaseException:
+        await cm.__aexit__(None, None, None)
+        raise
 
     logger.info("AsyncPostgresSaver checkpointer initialized")
     return checkpointer

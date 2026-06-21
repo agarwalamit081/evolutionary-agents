@@ -32,6 +32,7 @@ from src.graph.nodes.verify import (
     _extract_goal_deliverables,
     _force_complete_on_evidence,
     _goal_deliverables_satisfied,
+    _has_alpha_extension,
     _placeholder_leak_reason,
 )
 
@@ -310,6 +311,70 @@ class TestExtractDeliverablePaths:
         _evidence_text, missing, empty, _malformed = _check_deliverables(paths)
         assert missing == []
         assert empty == []
+
+
+class TestNumericRangePhantomExclusion:
+    """Numeric-range / version shorthand in prose ("1..100", "v1.2.3", "1.5") is
+    NOT a deliverable. The save-verb regex mis-captures range shorthand as a path
+    (its "extension" — "100", "3", "5" — is all digits), but such a "file" can
+    never exist on disk, so treating it as a declared deliverable loops
+    verify→plan until MAX_ITERATIONS. Regression for the complex3 Collatz run,
+    which ran the iteration cap reporting "1..100" missing on every verify cycle.
+    """
+
+    def test_has_alpha_extension_helper(self) -> None:
+        """Real file extensions contain letters; numeric/version tails do not."""
+        # Real deliverables — letters in the extension → True (kept).
+        assert _has_alpha_extension("collatz.csv") is True
+        assert _has_alpha_extension("results/q02/scorecard.json") is True
+        assert _has_alpha_extension("summary.md") is True
+        assert _has_alpha_extension("report.txt") is True
+        # Numeric-range / version shorthand — all-digit tail → False (dropped).
+        assert _has_alpha_extension("1..100") is False
+        assert _has_alpha_extension("v1.2.3") is False
+        assert _has_alpha_extension("1.5") is False
+        # A bare name with no dot (plausible deliverable) keeps its letters → True.
+        assert _has_alpha_extension("output") is True
+
+    def test_phantom_excluded_from_plan_prose(self) -> None:
+        """Plan-step prose with range shorthand + a real deliverable: only the
+        real deliverable is declared; the "1..100" phantom is dropped.
+        """
+        state = initial_state(
+            "Compute Collatz and write five deliverable files.",
+            "thread-range-phantom",
+        )
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description=(
+                    "Iterate 1..100 and write primes.csv, then dump 1..100 peak "
+                    "values."
+                ),
+                tool_name="file_writer",
+                tool_input={},
+                status="completed",
+                result="",
+            ),
+        ]
+        state["completed_steps"] = []
+        paths = _extract_deliverable_paths(state)
+        assert "primes.csv" in paths  # real deliverable survives
+        assert "1..100" not in paths  # numeric-range phantom dropped
+
+    def test_phantom_excluded_from_goal_deliverables(self) -> None:
+        """Goal text naming a real deliverable alongside a numeric-range phantom:
+        only the real deliverable is a goal deliverable; "1..100" is dropped.
+        """
+        state = initial_state(
+            "Write summary.json and dump 1..100 peak values.",
+            "thread-goal-phantom",
+        )
+        state["plan_steps"] = []
+        state["completed_steps"] = []
+        goal_paths = _extract_goal_deliverables(state)
+        assert "summary.json" in goal_paths  # real goal deliverable survives
+        assert "1..100" not in goal_paths  # numeric-range phantom dropped
 
 
 class TestGoalDeliverableSufficiencyFH:

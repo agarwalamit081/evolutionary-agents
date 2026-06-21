@@ -92,6 +92,24 @@ _PATH_NOISE_TOKENS = frozenset({
     "e.g", "eg", "i.e", "ie", "etc", "mixed", "human",
 })
 
+
+def _has_alpha_extension(candidate: str) -> bool:
+    """True if the candidate's final path extension contains a letter.
+
+    Real deliverable extensions (``.csv``, ``.json``, ``.md``, ``.txt``, ``.py``)
+    contain letters. A trailing all-digit suffix is almost always numeric-range
+    shorthand ("1..100", "n=1.5") or a version fragment ("v1.2.3") that the
+    deliverable regex mis-captures as a file path. Such a phantom can never exist
+    on disk, so verify reports it missing and loops verify→plan until the
+    iteration hard-cap (observed: complex3 Collatz ran the cap looping on a
+    phantom "1..100" pulled from a plan step's "for each n from 1..100" prose).
+    Used in ``_add`` to reject these before a capture becomes an expected
+    deliverable. A candidate with no dot returns True (bare names like "output"
+    are plausible deliverables; a bare number is caught by the digit-only ext).
+    """
+    return any(c.isalpha() for c in candidate.rsplit(".", 1)[-1])
+
+
 # Minimum iterations before a goal-satisfied run force-completes. Guards against
 # force-completing on stale deliverables (left from a prior, uncleaned run) that
 # happen to satisfy the goal on the very first verify of a fresh run. See
@@ -757,6 +775,14 @@ def _extract_deliverable_paths(state: AgentState) -> list[str]:
             return
         if len(cleaned) < 2 or cleaned.lower() in _PATH_NOISE_TOKENS:
             return
+        # Numeric-range / version shorthand the regex mis-captures as a path
+        # ("1..100", "v1.2.3", "1.5"): a final extension with no letter can never
+        # be a real deliverable, and treating it as one loops verify→plan until
+        # the iteration hard-cap (complex3 Collatz phantom "1..100" from plan
+        # prose). Real extensions (.csv/.json/.md/.txt) all contain letters, so
+        # this only drops phantoms.
+        if not _has_alpha_extension(cleaned):
+            return
         seen.add(cleaned)
         paths.append(cleaned)
 
@@ -841,6 +867,14 @@ def _extract_goal_deliverables(state: AgentState) -> list[str]:
         if cleaned.rsplit("/", 1)[-1].startswith("."):
             return
         if len(cleaned) < 2 or cleaned.lower() in _PATH_NOISE_TOKENS:
+            return
+        # Numeric-range / version shorthand the regex mis-captures as a path
+        # ("1..100", "v1.2.3", "1.5"): a final extension with no letter can never
+        # be a real deliverable, and treating it as one loops verify→plan until
+        # the iteration hard-cap. Real extensions (.csv/.json/.md/.txt) all
+        # contain letters, so this only drops phantoms. Mirrors the guard in
+        # ``_extract_deliverable_paths._add``.
+        if not _has_alpha_extension(cleaned):
             return
         seen.add(cleaned)
         paths.append(cleaned)

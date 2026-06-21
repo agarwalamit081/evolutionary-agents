@@ -223,3 +223,70 @@ class TestAgentSettings:
         assert agent.retire_min_runs == 50
         assert agent.retire_success_floor == 0.10
         assert agent.retire_recency_days == 7
+
+
+class TestWorkerSettings:
+    """The documented ``WORKER_*`` env vars (see ``.env.example``) MUST map.
+
+    Regression for a Phase-2b bug surfaced in Phase 3: ``WorkerSettings`` had no
+    ``env_prefix``, so only the accidental bare forms (``CONSUMER_NAME`` …) were
+    honored and every documented ``WORKER_*`` var was silently ignored — e.g.
+    ``WORKER_CONSUMER_NAME=foo`` left ``consumer_name='worker-1'``, which broke the
+    worker entrypoint's explicit-name opt-in. The fix is ``env_prefix='worker_'``
+    (+ ``worker_group``/``status_ttl_seconds`` renamed to ``group``/``status_ttl_s``
+    so the generated names match ``.env.example`` exactly).
+    """
+
+    def test_documented_worker_env_vars_all_map(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All 7 WORKER_* vars documented in .env.example map to their fields."""
+        from src.config.settings import WorkerSettings
+
+        monkeypatch.setenv("WORKER_RUNS_STREAM", "s:stream")
+        monkeypatch.setenv("WORKER_GROUP", "s-group")
+        monkeypatch.setenv("WORKER_CONSUMER_NAME", "s-consumer")
+        monkeypatch.setenv("WORKER_READ_BATCH_SIZE", "42")
+        monkeypatch.setenv("WORKER_BLOCK_MS", "1111")
+        monkeypatch.setenv("WORKER_RECLAIM_MIN_IDLE_MS", "2222")
+        monkeypatch.setenv("WORKER_STATUS_TTL_S", "333")
+        w = WorkerSettings(_env_file=None)
+        assert w.runs_stream == "s:stream"
+        assert w.group == "s-group"
+        assert w.consumer_name == "s-consumer"
+        assert w.read_batch_size == 42
+        assert w.block_ms == 1111
+        assert w.reclaim_min_idle_ms == 2222
+        assert w.status_ttl_s == 333
+
+    def test_consumer_name_round_trip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """WORKER_CONSUMER_NAME populates consumer_name — the __main__ opt-in path."""
+        from src.config.settings import WorkerSettings
+
+        monkeypatch.setenv("WORKER_CONSUMER_NAME", "pinned-worker")
+        w = WorkerSettings(_env_file=None)
+        assert w.consumer_name == "pinned-worker"
+
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Code defaults match .env.example when no WORKER_* vars are set."""
+        from src.config.settings import WorkerSettings
+
+        for var in (
+            "WORKER_RUNS_STREAM",
+            "WORKER_GROUP",
+            "WORKER_CONSUMER_NAME",
+            "WORKER_READ_BATCH_SIZE",
+            "WORKER_BLOCK_MS",
+            "WORKER_RECLAIM_MIN_IDLE_MS",
+            "WORKER_STATUS_TTL_S",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        w = WorkerSettings(_env_file=None)
+        assert w.runs_stream == "turing:runs"
+        assert w.group == "turing-workers"
+        assert w.consumer_name == "worker-1"
+        assert w.read_batch_size == 5
+        assert w.block_ms == 5000
+        assert w.reclaim_min_idle_ms == 30000
+        assert w.status_ttl_s == 86400
+

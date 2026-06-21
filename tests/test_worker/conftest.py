@@ -22,17 +22,17 @@ def worker_settings() -> WorkerSettings:
 
     ``block_ms`` low so an empty ``XREADGROUP`` returns quickly (no test hang);
     ``reclaim_min_idle_ms=0`` so ``XAUTOCLAIM`` reclaims a just-delivered entry
-    (the crash-recovery test needs no wall-clock wait); ``status_ttl_seconds=0``
+    (the crash-recovery test needs no wall-clock wait); ``status_ttl_s=0``
     disables the status-hash TTL so records live for assertions.
     """
     return WorkerSettings(
         runs_stream="turing:runs:test",
-        worker_group="turing-workers-test",
+        group="turing-workers-test",
         consumer_name="worker-test",
         read_batch_size=5,
         block_ms=10,
         reclaim_min_idle_ms=0,
-        status_ttl_seconds=0,
+        status_ttl_s=0,
     )
 
 

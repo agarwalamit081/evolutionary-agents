@@ -3,7 +3,7 @@
 The worker writes each run's lifecycle (queued → running → completed/failed) to
 ``turing:run:{run_id}``; the API reads it for ``GET /runs/{run_id}`` so a client
 can poll without the worker holding an open HTTP connection. Hash TTL bounded by
-``WorkerSettings.status_ttl_seconds`` so the store self-cleans (Redis rule: never
+``WorkerSettings.status_ttl_s`` so the store self-cleans (Redis rule: never
 unbounded growth). All values are str (Redis hashes have no nested types).
 """
 
@@ -31,7 +31,7 @@ class RunStatusStore:
         settings: WorkerSettings,
     ) -> None:
         self._redis = redis_client
-        self._ttl = settings.status_ttl_seconds
+        self._ttl = settings.status_ttl_s
 
     def _key(self, run_id: str) -> str:
         return f"{self._KEY_PREFIX}{run_id}"

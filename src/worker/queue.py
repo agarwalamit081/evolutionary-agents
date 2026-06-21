@@ -58,7 +58,7 @@ class RunsQueue:
         self._redis = redis_client
         self._s = settings
         self._stream = settings.runs_stream
-        self._group = settings.worker_group
+        self._group = settings.group
 
     @property
     def stream(self) -> str:

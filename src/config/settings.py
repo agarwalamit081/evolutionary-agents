@@ -1092,7 +1092,7 @@ class WorkerSettings(BaseSettings):
     # Stream + consumer-group names. The stream is created on first XADD (or via
     # MKSTREAM on group creation). Env: WORKER_RUNS_STREAM / WORKER_GROUP.
     runs_stream: str = "turing:runs"  # Env: WORKER_RUNS_STREAM
-    worker_group: str = "turing-workers"  # Env: WORKER_GROUP
+    group: str = "turing-workers"  # Env: WORKER_GROUP
 
     # This consumer's name within the group (for PEL ownership / XAUTOCLAIM).
     consumer_name: str = "worker-1"  # Env: WORKER_CONSUMER_NAME
@@ -1110,9 +1110,14 @@ class WorkerSettings(BaseSettings):
 
     # TTL (s) on per-run status hashes (``turing:run:{run_id}``) so the status
     # store self-cleans instead of growing unbounded. Env: WORKER_STATUS_TTL_S.
-    status_ttl_seconds: int = 86400  # Env: WORKER_STATUS_TTL_S
+    status_ttl_s: int = 86400  # Env: WORKER_STATUS_TTL_S
 
     model_config = SettingsConfigDict(
+        # env_prefix makes the documented WORKER_* vars (see .env.example) map to
+        # these fields: WORKER_CONSUMER_NAME → consumer_name, etc. Without it, the
+        # field names map to bare CONSUMER_NAME/RUNS_STREAM/… and every WORKER_*
+        # var in .env.example is silently ignored (Phase-3 fix of a Phase-2b bug).
+        env_prefix="worker_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",

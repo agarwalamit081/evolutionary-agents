@@ -51,7 +51,7 @@ async def test_live_enqueue_claim_ack_roundtrip(live_redis) -> None:
     settings = get_settings().worker.model_copy(
         update={
             "runs_stream": _LIVE_STREAM,
-            "worker_group": _LIVE_GROUP,
+            "group": _LIVE_GROUP,
             "block_ms": 100,
         }
     )
@@ -75,7 +75,7 @@ async def test_live_enqueue_claim_ack_roundtrip(live_redis) -> None:
 
 async def test_live_ensure_group_idempotent(live_redis) -> None:
     settings = get_settings().worker.model_copy(
-        update={"runs_stream": _LIVE_STREAM, "worker_group": _LIVE_GROUP}
+        update={"runs_stream": _LIVE_STREAM, "group": _LIVE_GROUP}
     )
     q = RunsQueue(live_redis, settings)
     await live_redis.delete(_LIVE_STREAM)

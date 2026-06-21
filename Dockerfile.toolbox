@@ -17,7 +17,7 @@
 #   (or: docker compose --profile sandbox build toolbox)
 #
 # NOTE: keep this list in sync with ALLOWED_MODULES whenever the allowlist
-# changes (Phase 2d adds scipy/sklearn/openpyxl/tabulate/aiofiles/trafilatura/libcst).
+# changes (Phase 2d added scipy/sklearn/openpyxl/tabulate/aiofiles/trafilatura/libcst).
 
 FROM python:3.12-slim
 
@@ -34,6 +34,7 @@ RUN pip install --no-cache-dir \
     pydantic pydantic-settings orjson json-repair \
     markdown-it-py \
     redis \
-    python-dateutil jsonschema tenacity loguru
+    python-dateutil jsonschema tenacity loguru \
+    scipy scikit-learn openpyxl tabulate aiofiles trafilatura libcst
 
 CMD ["python"]

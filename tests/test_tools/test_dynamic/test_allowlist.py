@@ -262,6 +262,109 @@ class TestNewPackagesPassSafetyLayer4:
         assert result["issues"] == []
 
 
+class TestPhase2dAllowlist:
+    """Phase 2d (findings-04): installed-but-not-allowed libs now admitted.
+
+    Each new library is bound by BOTH controls — the import name in
+    ALLOWED_MODULES and the pip dist name in SAFE_PIP_PACKAGES — and the
+    importable ones are pre-imported by the materializer namespace. sklearn's
+    import name differs from its dist name (scikit-learn).
+    """
+
+    # (import name, pip dist name) — each dist differs only for sklearn.
+    NEW_PACKAGES: list[tuple[str, str]] = [
+        ("scipy", "scipy"),
+        ("sklearn", "scikit-learn"),
+        ("openpyxl", "openpyxl"),
+        ("tabulate", "tabulate"),
+        ("aiofiles", "aiofiles"),
+        ("trafilatura", "trafilatura"),
+        ("libcst", "libcst"),
+    ]
+
+    def test_each_new_import_name_is_allowed(self) -> None:
+        for import_name, _ in self.NEW_PACKAGES:
+            assert import_name in ALLOWED_MODULES, (
+                f"{import_name} missing from ALLOWED_MODULES"
+            )
+
+    def test_each_new_pip_dist_name_is_installable(self) -> None:
+        for _, dist_name in self.NEW_PACKAGES:
+            assert dist_name in SAFE_PIP_PACKAGES, (
+                f"{dist_name} missing from SAFE_PIP_PACKAGES"
+            )
+
+    def test_sklearn_dist_name_is_scikit_learn(self) -> None:
+        """The import name ``sklearn`` ships under the scikit-learn dist."""
+        assert "scikit-learn" in SAFE_PIP_PACKAGES
+        # and the plain "sklearn" dist name is NOT also present (no shadow dup)
+        assert "sklearn" not in SAFE_PIP_PACKAGES
+
+    def test_no_duplicates_introduced(self) -> None:
+        """Each newly-added import/pip name is unique within its own list."""
+        new_imports = {name for name, _ in self.NEW_PACKAGES}
+        assert len(new_imports) == len(self.NEW_PACKAGES)
+        new_dists = {dist for _, dist in self.NEW_PACKAGES}
+        assert len(new_dists) == len(self.NEW_PACKAGES)
+
+    def test_new_packages_in_materializer_namespace_when_installed(self) -> None:
+        ns = get_materializer_namespace()
+        for import_name, _ in self.NEW_PACKAGES:
+            try:
+                importlib.import_module(import_name)
+            except ImportError:
+                # Not installed in this environment — namespace must omit it.
+                assert import_name not in ns, (
+                    f"{import_name} present in namespace but not importable"
+                )
+            else:
+                assert import_name in ns, (
+                    f"{import_name} installed but missing from materializer namespace"
+                )
+                assert hasattr(ns[import_name], "__name__"), (
+                    f"{import_name} namespace entry is not a module"
+                )
+
+    def test_still_excludes_dangerous_modules(self) -> None:
+        """The Phase 2d expansion must not admit dangerous modules."""
+        for name in ("os", "sys", "subprocess", "socket", "shutil", "ctypes"):
+            assert name not in ALLOWED_MODULES
+
+
+class TestPhase2dPackagesPassSafetyLayer4:
+    """Phase 2d: a generated tool importing each new package clears Layer-4."""
+
+    @pytest.mark.parametrize("import_name", [
+        "scipy", "sklearn", "openpyxl", "tabulate",
+        "aiofiles", "trafilatura", "libcst",
+    ])
+    def test_import_statement_passes_layer4(self, import_name: str) -> None:
+        from src.safety.pipeline import SafetyPipeline
+
+        pipeline = SafetyPipeline()
+        code = f"import {import_name}\n"
+        result = pipeline._check_imports(
+            code, allowlisted=set(ALLOWED_MODULES)
+        )
+        assert result["passed"] is True, result["issues"]
+        assert result["issues"] == []
+
+    @pytest.mark.parametrize("import_name", [
+        "scipy", "sklearn", "openpyxl", "tabulate",
+        "aiofiles", "trafilatura", "libcst",
+    ])
+    def test_from_import_statement_passes_layer4(self, import_name: str) -> None:
+        from src.safety.pipeline import SafetyPipeline
+
+        pipeline = SafetyPipeline()
+        code = f"from {import_name} import something\n"
+        result = pipeline._check_imports(
+            code, allowlisted=set(ALLOWED_MODULES)
+        )
+        assert result["passed"] is True, result["issues"]
+        assert result["issues"] == []
+
+
 class TestBrowserPackagesStayBlocked:
     """Browser-automation packages are deliberately deferred — must stay blocked."""
 

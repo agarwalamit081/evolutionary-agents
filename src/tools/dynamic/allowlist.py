@@ -13,6 +13,14 @@ Safe read-only packages added in this pass: requests (HTTP client),
 dateutil (python-dateutil, date parsing), jsonschema (JSON schema validation),
 and tenacity (retry primitives) — none introduce a managed binary or
 detection-evasion surface.
+
+Phase 2d (findings-04): installed-but-not-allowed libs admitted — scipy/sklearn
+(scientific/numeric+ML; sklearn ← scikit-learn dist), openpyxl (Excel),
+tabulate (table formatting), aiofiles (async file I/O), trafilatura (web
+extraction, same egress contract as httpx/bs4), and libcst (Python AST
+transform — the CODE self-evolution primitive). All pure-compute or
+network-egress-under-contract; none introduce a managed binary or
+detection-evasion surface.
 """
 
 from __future__ import annotations
@@ -86,6 +94,24 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     "dateutil",
     "jsonschema",
     "tenacity",
+    # ── Phase 2d — installed-but-not-allowed libs (findings-04) ─────
+    # ``scipy``/``sklearn``: scientific/numeric + ML (pure compute, no egress);
+    # ``sklearn`` is the import name for the scikit-learn dist. ``openpyxl``:
+    # Excel read/write (file I/O under results/, same contract as ``io``/``csv``).
+    # ``tabulate``: table pretty-printing (pure). ``aiofiles``: async file I/O
+    # (same FS contract as the stdlib ``io`` already allowed). ``trafilatura``:
+    # web-content extraction (network-egress — same contract/responsibility as
+    # httpx/aiohttp/requests/bs4/unstructured above; powers web_scraper).
+    # ``libcst``: Python syntax-tree parse/transform — the CODE self-evolution
+    # primitive (pure, no egress). None introduce a managed binary or
+    # detection-evasion surface (browser-automation stays deferred).
+    "scipy",
+    "sklearn",
+    "openpyxl",
+    "tabulate",
+    "aiofiles",
+    "trafilatura",
+    "libcst",
 })
 
 # Maximum number of tools that can be created per agent run.
@@ -125,6 +151,16 @@ SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     "python-dateutil",
     "jsonschema",
     "tenacity",
+    # ── Phase 2d — installed-but-not-allowed libs (findings-04) ─────
+    # sklearn ← scikit-learn; the other six share their import name. See the
+    # ALLOWED_MODULES Phase-2d note for the egress/policy rationale.
+    "scipy",
+    "scikit-learn",
+    "openpyxl",
+    "tabulate",
+    "aiofiles",
+    "trafilatura",
+    "libcst",
 })
 
 
@@ -206,6 +242,9 @@ def get_materializer_namespace() -> dict[str, Any]:
         "yaml", "lxml", "feedparser", "xmltodict", "jinja2", "PIL",
         "sympy", "pydantic", "pydantic_settings", "orjson", "json_repair",
         "unstructured", "markdown_it", "redis",
+        # Phase 2d additions (findings-04): sklearn ← scikit-learn dist.
+        "scipy", "sklearn", "openpyxl", "tabulate",
+        "aiofiles", "trafilatura", "libcst",
     ):
         try:
             mod = __import__(mod_name)

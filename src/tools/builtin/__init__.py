@@ -1,14 +1,19 @@
-"""Built-in tools package — 14 distinct tools for the agent.
+"""Built-in tools package — 16 distinct tools for the agent.
 
-The 14 tools were audited for true duplicates (M7b). All names and
-descriptions are unique; the similar clusters (listing / reading / fetching)
-are deliberately distinct, not mergeable. ``test_consolidation.py`` locks this
-in — it fails if a future change duplicates a name/description or collapses a
+The original 14 tools were audited for true duplicates (M7b); the 2 corpus
+tools (Phase 1 search stack) are additive — `index_corpus` (write) and
+`corpus_search` (read) are a distinct gather/recall cluster, not a dup of
+`web_search` (live) or `web_scraper` (single page). All names and descriptions
+remain unique; the similar clusters (listing / reading / fetching) are
+deliberately distinct, not mergeable. ``test_consolidation.py`` locks this in
+— it fails if a future change duplicates a name/description or collapses a
 cluster, preventing the B3 capability bloat that dynamic-tool dedup addresses.
 """
 
 from src.tools.builtin.code_executor import TOOL_DEFINITION as CODE_EXECUTOR_DEF
 from src.tools.builtin.code_validator import TOOL_DEFINITION as CODE_VALIDATOR_DEF
+from src.tools.builtin.corpus import TOOL_DEFINITION_INDEX as CORPUS_INDEX_DEF
+from src.tools.builtin.corpus import TOOL_DEFINITION_SEARCH as CORPUS_SEARCH_DEF
 from src.tools.builtin.document_parser import TOOL_DEFINITION as DOCUMENT_PARSER_DEF
 from src.tools.builtin.environment_inspect import TOOL_DEFINITION as ENVIRONMENT_INSPECT_DEF
 from src.tools.builtin.file_reader import TOOL_DEFINITION as FILE_READER_DEF
@@ -25,6 +30,8 @@ from src.tools.builtin.web_search import TOOL_DEFINITION as WEB_SEARCH_DEF
 ALL_TOOL_DEFINITIONS = [
     CODE_EXECUTOR_DEF,
     CODE_VALIDATOR_DEF,
+    CORPUS_INDEX_DEF,
+    CORPUS_SEARCH_DEF,
     DOCUMENT_PARSER_DEF,
     ENVIRONMENT_INSPECT_DEF,
     FILE_READER_DEF,

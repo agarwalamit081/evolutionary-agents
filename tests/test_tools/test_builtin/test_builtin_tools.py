@@ -180,9 +180,9 @@ class TestToolDefinitions:
         for tool_def in ALL_TOOL_DEFINITIONS:
             assert callable(tool_def["handler"]), f"Handler not callable for {tool_def['name']}"
 
-    def test_fourteen_tools_registered(self) -> None:
-        """Exactly 14 built-in tools are registered (7 original + 7 new)."""
-        assert len(ALL_TOOL_DEFINITIONS) == 14
+    def test_sixteen_tools_registered(self) -> None:
+        """Exactly 16 built-in tools are registered (14 audited + 2 corpus tools)."""
+        assert len(ALL_TOOL_DEFINITIONS) == 16
 
 
 class TestCodeExecutorCWD:

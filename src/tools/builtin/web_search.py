@@ -1,7 +1,8 @@
 """Web search tool — SearXNG-primary with automatic lightweight-paid fallback.
 
 Architecture (Phase 1 overhaul):
-  * SearXNG (:8080) is the primary keyless live-search service.
+  * SearXNG (service port 8080; host-mapped to 8081) is the primary keyless
+    live-search service.
   * On failure / empty / throttle, an ordered chain of lightweight paid providers
     is tried automatically (each only if its API key is set):
     tavily -> serper -> brave -> serpapi -> serpstack -> llmlayer.

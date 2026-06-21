@@ -43,10 +43,14 @@ services:
     # Primary keyless live-search service (Phase 1). JSON API enabled + bot
     # limiter disabled in the mounted settings.yml so the agent can call
     # /search?format=json over the internal network without keys.
+    # NOTE: the service still listens on 8080 INSIDE the container (the
+    # in-container agent reaches it at http://searxng:8080); the HOST port is
+    # mapped to 8081 so this stack never clashes with SearXNG containers other
+    # projects may run on the default 8080.
     image: searxng/searxng:latest
     container_name: turing-searxng
     ports:
-      - "8080:8080"
+      - "8081:8080"
     volumes:
       - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
     networks:
@@ -57,15 +61,22 @@ services:
     # Corpus keyword/hybrid index (Phase 1). BM25 + filterable attrs; the
     # agent's corpus_search fuses these hits with pgvector semantic hits via
     # Reciprocal Rank Fusion. Master key from .env (MEILISEARCH_KEY).
+    # NOTE: the service listens on 7700 INSIDE the container (the in-container
+    # agent reaches it at http://meilisearch:7700); the HOST port is mapped to
+    # 7701 so this stack never clashes with Meilisearch containers other
+    # projects may run on the default 7700.
     image: getmeili/meilisearch:v1.12
     container_name: turing-meilisearch
     command: ["meilisearch", "--http-addr", "0.0.0.0:7700"]
     environment:
       MEILI_ENV: ${MEILI_ENV:-development}
-      MEILI_MASTER_KEY: ${MEILISEARCH_KEY:-turing-meili-dev-key}
+      # Empty/unset MEILISEARCH_KEY → no master key → keyless dev (matches the
+      # agent's empty default). Production sets MEILISEARCH_KEY (>=16 bytes) in
+      # .env; Meili then requires it and the agent sends the same value.
+      MEILI_MASTER_KEY: ${MEILISEARCH_KEY:-}
       MEILI_NO_ANALYTICS: "true"
     ports:
-      - "7700:7700"
+      - "7701:7700"
     volumes:
       - meilidata:/meili_data
     healthcheck:

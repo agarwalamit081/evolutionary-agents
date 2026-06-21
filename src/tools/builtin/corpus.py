@@ -7,10 +7,11 @@ and ``corpus_search`` runs a hybrid query over it. This is the agent's
 runs can recall them without re-scraping.
 
 Dual-write store:
-  * **Meilisearch** (:7700) — typo-tolerant BM25 *keyword* index, reached via
-    its REST API over ``httpx`` (no ``meilisearch`` SDK dependency). Configured
-    with ``distinctAttribute = content_hash`` so the same content re-indexed
-    from different URLs collapses to one hit.
+  * **Meilisearch** (service port 7700; host-mapped to 7701) — typo-tolerant
+    BM25 *keyword* index, reached via its REST API over ``httpx`` (no
+    ``meilisearch`` SDK dependency). Configured with
+    ``distinctAttribute = content_hash`` so the same content re-indexed from
+    different URLs collapses to one hit.
   * **pgvector cold memory** — *semantic* index. Reuses the existing
     ``ColdMemory``/``EmbeddingGenerator`` (litellm embeddings + hash fallback).
 

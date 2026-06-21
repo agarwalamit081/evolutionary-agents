@@ -938,23 +938,27 @@ class EvalSettings(BaseSettings):
 class SearchSettings(BaseSettings):
     """Web-search + corpus-search configuration (Phase 1 overhaul).
 
-    The search stack runs SearXNG (:8080) as the primary keyless live-search
-    service and Meilisearch (:7700) as the corpus keyword/hybrid index. Paid
-    providers are an automatic fallback behind SearXNG; heavy providers
-    (Firecrawl/Apify) are provisioned-only (explicit ``deep_crawl`` opt-in).
-    All URLs/keys resolve from ``.env``; compose overrides point the
-    in-container agent at the internal service hostnames
-    (``http://searxng:8080`` / ``http://meilisearch:7700``).
+    The search stack runs SearXNG as the primary keyless live-search service and
+    Meilisearch as the corpus keyword/hybrid index. Paid providers are an
+    automatic fallback behind SearXNG; heavy providers (Firecrawl/Apify) are
+    provisioned-only (explicit ``deep_crawl`` opt-in). Each service listens on
+    its canonical port INSIDE the container (SearXNG 8080, Meilisearch 7700);
+    ``docker-compose.yml`` maps them to non-default HOST ports (8081 / 7701) so
+    this stack never clashes with SearXNG/Meilisearch containers other projects
+    may run on the defaults. These host-run defaults therefore point at
+    ``localhost:8081`` / ``localhost:7701``; the compose ``agent`` service
+    overrides them to the in-container hostnames (``http://searxng:8080`` /
+    ``http://meilisearch:7700``).
     """
 
     # Primary live-search service (SearXNG, keyless/self-hosted).
     search_primary: str = "searxng"  # Env: SEARCH_PRIMARY
-    searxng_url: str = "http://localhost:8080"  # Env: SEARXNG_URL
+    searxng_url: str = "http://localhost:8081"  # Env: SEARXNG_URL
     searxng_timeout: float = 10.0  # Env: SEARXNG_TIMEOUT
     searxng_max_results_per_query: int = 10  # Env: SEARXNG_MAX_RESULTS_PER_QUERY
 
     # Corpus index service (Meilisearch, BM25 + hybrid).
-    meilisearch_url: str = "http://localhost:7700"  # Env: MEILISEARCH_URL
+    meilisearch_url: str = "http://localhost:7701"  # Env: MEILISEARCH_URL
     meilisearch_key: str = ""  # Env: MEILISEARCH_KEY (master key; empty disables auth in dev)
     meilisearch_index: str = "turing_corpus"  # Env: MEILISEARCH_INDEX
     meilisearch_timeout: float = 10.0  # Env: MEILISEARCH_TIMEOUT

@@ -28,10 +28,10 @@ class TestSearchSettings:
 
         s = SearchSettings(_env_file=None)
         assert s.search_primary == "searxng"
-        assert s.searxng_url == "http://localhost:8080"
+        assert s.searxng_url == "http://localhost:8081"
         assert s.searxng_timeout == 10.0
         assert s.searxng_max_results_per_query == 10
-        assert s.meilisearch_url == "http://localhost:7700"
+        assert s.meilisearch_url == "http://localhost:7701"
         assert s.meilisearch_key == ""
         assert s.meilisearch_index == "turing_corpus"
         assert s.search_batch_concurrency == 5

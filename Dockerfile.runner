@@ -25,10 +25,7 @@
 
 FROM python:3.12-slim
 
-# /app holds the standalone server script; /home/turing/.turing/results is the
-# shared results dir (the worker's turing-workspace volume is bind-mounted RW
-# here) so a script's relative results/<file> writes are visible to the worker.
-RUN mkdir -p /app /home/turing/.turing/results /home/turing/logs
+RUN mkdir -p /app
 
 WORKDIR /app
 
@@ -48,7 +45,13 @@ RUN pip install --no-cache-dir \
 COPY src/sandbox/runner_server.py /app/runner_server.py
 
 # Non-root user mirroring the main image so shared-volume writes match perms.
+# Create the turing user BEFORE its home subdirs: `useradd -m` makes /home/turing,
+# then mkdir adds .turing/results + logs under it — this order (same as the main
+# Dockerfile) avoids the "home directory already exists / not copying skel"
+# warning. Pre-create + own the results dir so a script's relative results/<file>
+# writes land in the bind-mounted turing-workspace volume (visible to the worker).
 RUN useradd -m -r turing && \
+    mkdir -p /home/turing/.turing/results /home/turing/logs && \
     chown -R turing:turing /app /home/turing/.turing /home/turing/logs
 
 USER turing

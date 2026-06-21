@@ -32,14 +32,14 @@ _ROOT_BY_NAME = {
     "project": lambda: _project_root(),
 }
 
-# Phase 7: active run identifier. Bound by main.py (``_run_agent``) so the shared
-# resolver routes a run's deliverables under ``results_root / <run_id> / ...``,
+# Phase 7: active run identifier. Bound by the runner (``src.runner.execute_run``)
+# so the shared resolver routes a run's deliverables under ``results_root / <run_id> / ...``,
 # isolating each run on disk. Backed by a ``ContextVar`` (not a process global)
 # so it is scoped per async task: two concurrent runs in the same event loop each
 # see their own run_id. The global it replaced bled the last writer's id into
 # every concurrent run — a horizontal-scaling blocker once the API enqueues runs
 # to a worker (Phase 2b). Async tasks copy their context at creation, so a run_id
-# set inside ``_run_agent`` propagates to every node/tool coroutine it awaits but
+# set inside ``execute_run`` propagates to every node/tool coroutine it awaits but
 # NOT to sibling runs. ``None`` when no run_id is in play → every path resolves
 # flat exactly as before (non-regression for non-run-id runs).
 _active_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(

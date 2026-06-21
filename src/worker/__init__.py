@@ -9,7 +9,7 @@ heavy run execution (workers consume one at a time). Public surface:
   stream (XADD / XREADGROUP / XACK / XAUTOCLAIM).
 - :class:`RunStatusStore` — per-run status hashes for API polling.
 - :class:`RunConsumer` — at-least-once drain loop with an injected executor.
-- :func:`default_agent_executor` — production executor reusing ``main._run_agent``.
+- :func:`default_agent_executor` — production executor reusing ``src.runner.execute_run``.
 """
 
 from __future__ import annotations

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 # A run executor: given a queued job, run the agent and return its final state
 # dict (final_output / is_complete / iteration_count). The default production
-# executor reuses main._run_agent (see src.worker.executors).
+# executor calls src.runner.execute_run (see src.worker.executors).
 RunExecutor = Callable[[RunJob], Awaitable[dict[str, Any]]]
 
 

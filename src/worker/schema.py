@@ -27,7 +27,7 @@ class JobStatus(str, Enum):
 class RunJob(BaseModel):
     """A single agent run request on the ``turing:runs`` stream.
 
-    Mirrors the CLI flags threaded through ``main._run_agent``: ``run_id`` keys
+    Mirrors the CLI flags threaded through ``src.runner.execute_run``: ``run_id`` keys
     the checkpoint thread (``api-{run_id}``) and the per-run results subdir;
     ``model`` optionally pins a model for the whole run; ``no_evolution`` skips
     the evolution phase.

@@ -1,4 +1,4 @@
-"""Bug E regression — main.py capability loaders pass settings so B3 governance runs.
+"""Bug E regression — runner capability loaders pass settings so B3 governance runs.
 
 Before the fix, ``_load_dynamic_tools`` / ``_load_sub_agents`` called the
 persisters WITHOUT ``settings``. Both loaders gate the entire B3 governance
@@ -17,12 +17,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import main as main_mod
+import src.runner as runner
 from src.config.settings import get_settings
 
 
 class TestLoadersPassSettings:
-    """main.py's capability loaders forward settings.agent to the persisters."""
+    """The runner's capability loaders forward settings.agent to the persisters."""
 
     @pytest.mark.asyncio
     async def test_load_sub_agents_passes_settings(self) -> None:
@@ -35,7 +35,7 @@ class TestLoadersPassSettings:
         with patch("src.agents.persister.SubAgentPersister") as persister_cls:
             persister = persister_cls.return_value
             persister.load_active_agents = AsyncMock(return_value=[])
-            await main_mod._load_sub_agents(registry, settings)
+            await runner._load_sub_agents(registry, settings)
 
             persister.load_active_agents.assert_awaited_once()
             _, kwargs = persister.load_active_agents.call_args
@@ -53,7 +53,7 @@ class TestLoadersPassSettings:
         with patch("src.tools.dynamic.persister.ToolPersister") as persister_cls:
             persister = persister_cls.return_value
             persister.load_active_tools = AsyncMock(return_value=[])
-            await main_mod._load_dynamic_tools(tools, settings)
+            await runner._load_dynamic_tools(tools, settings)
 
             persister.load_active_tools.assert_awaited_once()
             _, kwargs = persister.load_active_tools.call_args

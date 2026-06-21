@@ -3,7 +3,7 @@
 ``_clean_run_results`` is the testable unit behind ``--clean``: it removes ONLY
 ``<results_root>/<run_id>``, refuses an unsafe/missing run_id, and is a no-op
 when the subfolder is already absent. The CLI test wires ``--results-dir`` +
-``--clean`` + ``--run-id`` end-to-end (monkeypatching ``_run_agent`` so no live
+``--clean`` + ``--run-id`` end-to-end (monkeypatching ``execute_run`` so no live
 run fires) and asserts the run subdir is cleared before the run starts.
 
 ``get_settings()`` is an ``lru_cache`` singleton, so the ``--results-dir``
@@ -74,8 +74,8 @@ class TestCleanResultsCli:
         _pin_results_root(monkeypatch)
         monkeypatch.setattr(
             main_mod,
-            "_run_agent",
-            _noop_run_agent,
+            "execute_run",
+            _noop_execute_run,
         )
         run_root = tmp_path / "res"
         (run_root / "q01").mkdir(parents=True)
@@ -105,6 +105,6 @@ class TestCleanResultsCli:
         assert "--clean requires --run-id" in result.output
 
 
-async def _noop_run_agent(*_args: object, **_kwargs: object) -> dict[str, object]:
-    """Stand-in for _run_agent so the CLI test never fires a live run."""
+async def _noop_execute_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+    """Stand-in for execute_run so the CLI test never fires a live run."""
     return {"final_output": "ok", "iteration_count": 1, "is_complete": True}

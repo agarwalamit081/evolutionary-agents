@@ -8,6 +8,7 @@ reads — ``src.config.settings.get_settings`` — so these stay hermetic.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -355,3 +356,60 @@ class TestResolveExisting:
         assert _paths.resolve_existing("fixture.csv", base="workspace") == (
             ws / "fixture.csv"
         ).resolve()
+
+
+class TestConcurrentRunIdIsolation:
+    """The run_id ``ContextVar`` must isolate concurrent runs in one loop.
+
+    Regression for the process-global it replaced: the global let the last
+    writer's run_id bleed into every concurrently-running task, so two
+    interleaved runs would route each other's deliverables. That is a
+    horizontal-scaling blocker once the API enqueues runs to a worker (Phase 2b)
+    and two runs share an event loop. ``asyncio`` copies the context at Task
+    creation, so a ``set_active_run_id`` inside one task never reaches a sibling.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_tasks_see_distinct_run_ids(self) -> None:
+        seen: dict[str, str | None] = {}
+
+        async def worker(rid: str) -> None:
+            _paths.set_active_run_id(rid)
+            # Force interleaving with the sibling task so the old global's
+            # last-writer-wins would surface (both reads would coincide).
+            await asyncio.sleep(0.01)
+            seen[rid] = _paths.get_active_run_id()
+
+        await asyncio.gather(worker("run-a"), worker("run-b"))
+        # Each task read its OWN run_id (per-context), not the last writer's.
+        assert seen == {"run-a": "run-a", "run-b": "run-b"}
+
+    @pytest.mark.asyncio
+    async def test_concurrent_runs_route_distinct_results_paths(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        _install_roots(monkeypatch, tmp_path, subdir=True)
+        paths: dict[str, Path] = {}
+
+        async def worker(rid: str) -> None:
+            _paths.set_active_run_id(rid)
+            await asyncio.sleep(0.01)
+            paths[rid] = _paths.normalize("report.md")
+
+        await asyncio.gather(worker("run-a"), worker("run-b"))
+        # Same logical path, but each run resolves it under its own run_id dir.
+        assert str(paths["run-a"]) != str(paths["run-b"])
+        assert paths["run-a"].is_relative_to(tmp_path / "results" / "run-a")
+        assert paths["run-b"].is_relative_to(tmp_path / "results" / "run-b")
+
+    @pytest.mark.asyncio
+    async def test_child_task_inherits_parent_run_id(self) -> None:
+        """A run_id bound in the parent propagates to a child task it spawns."""
+        _paths.set_active_run_id("parent-run")
+
+        async def child() -> str | None:
+            await asyncio.sleep(0)
+            return _paths.get_active_run_id()
+
+        # The child task copies the parent's context at creation → inherits.
+        assert await asyncio.create_task(child()) == "parent-run"

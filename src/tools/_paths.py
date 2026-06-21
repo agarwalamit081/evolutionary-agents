@@ -16,6 +16,7 @@ identically whether written, executed, or cat'd.
 
 from __future__ import annotations
 
+import contextvars
 from pathlib import Path
 
 # Reference the *module object* (not the symbol) so tests can monkeypatch
@@ -31,31 +32,38 @@ _ROOT_BY_NAME = {
     "project": lambda: _project_root(),
 }
 
-# Phase 7: active run identifier. Set by main.py (``_run_agent``) so the shared
+# Phase 7: active run identifier. Bound by main.py (``_run_agent``) so the shared
 # resolver routes a run's deliverables under ``results_root / <run_id> / ...``,
-# isolating each run on disk. Process-global is sufficient — battery queries run
-# one at a time per process. ``None`` when no run_id is in play → every path
-# resolves flat exactly as before (non-regression for non-run-id runs).
-_active_run_id: str | None = None
+# isolating each run on disk. Backed by a ``ContextVar`` (not a process global)
+# so it is scoped per async task: two concurrent runs in the same event loop each
+# see their own run_id. The global it replaced bled the last writer's id into
+# every concurrent run — a horizontal-scaling blocker once the API enqueues runs
+# to a worker (Phase 2b). Async tasks copy their context at creation, so a run_id
+# set inside ``_run_agent`` propagates to every node/tool coroutine it awaits but
+# NOT to sibling runs. ``None`` when no run_id is in play → every path resolves
+# flat exactly as before (non-regression for non-run-id runs).
+_active_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "turing_active_run_id", default=None
+)
 
 
 def set_active_run_id(run_id: str | None) -> None:
     """Bind the active run_id for per-run results subfoldering (main.py entry).
 
-    Pass ``None`` to reset (e.g. between independent runs / in tests).
+    Scopes to the current async context (task). Pass ``None`` to reset (e.g.
+    between independent runs / in tests).
     """
-    global _active_run_id
-    _active_run_id = run_id
+    _active_run_id.set(run_id)
 
 
 def get_active_run_id() -> str | None:
-    """Current active run_id, or ``None`` when no run is bound."""
-    return _active_run_id
+    """Current active run_id for this context, or ``None`` when none is bound."""
+    return _active_run_id.get()
 
 
 def _subdir_active() -> bool:
     """Per-run subfoldering is on only with a run_id AND the setting enabled."""
-    if not _active_run_id:
+    if _active_run_id.get() is None:
         return False
     try:
         return bool(_agent().results_per_run_subdir)  # type: ignore[attr-defined]
@@ -72,7 +80,7 @@ def _maybe_inject_run_subdir(parts: tuple[str, ...], root: Path) -> tuple[str, .
     de-nested) path already starts with the run_id — so a goal that names
     ``results/<run_id>/x`` is NOT double-nested to ``results/<run_id>/<run_id>/x``.
     """
-    run_id = _active_run_id
+    run_id = _active_run_id.get()
     if run_id is None or not _subdir_active():
         return parts
     if root != _results_root():

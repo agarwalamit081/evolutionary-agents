@@ -77,6 +77,16 @@ class AgentState(TypedDict, total=False):
     no_evolution: bool
     evolution_history: Annotated[list[dict[str, Any]], operator.add]
     skills_learned: Annotated[list[SkillDef], operator.add]
+    # Phase 4 E — evolve→execute edge for deployed TOOL mutations.
+    # ``evolve_reexecute_offered`` is a per-cycle routing signal set True when a
+    # TOOL mutation was live-registered in the ToolRegistry this cycle
+    # (route_after_evolve then returns "execute" for one re-execution pass).
+    # ``evolve_reexecute_done`` is the once-per-run guard: set True on the first
+    # successful registration, so a second evolve cycle never re-offers (the run
+    # re-executes at most once). No reducer (overwrite): the last cycle's signal
+    # wins, and ``evolve_reexecute_done`` is monotonic-True (never reset).
+    evolve_reexecute_offered: bool
+    evolve_reexecute_done: bool
 
     # ─── Dynamic Tool Creation ──────────────────────────────────────────
     pending_tool_gaps: list[str]

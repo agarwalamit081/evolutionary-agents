@@ -535,6 +535,33 @@ class TestRouteAfterEvolve:
         result = route_after_evolve(sample_state)
         assert result == "error_handler"
 
+    def test_route_after_evolve_to_execute_when_reexecute_offered(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """Phase 4 E: a live-registered TOOL mutation signals one execute pass."""
+        sample_state["errors"] = []
+        sample_state["evolve_reexecute_offered"] = True
+        result = route_after_evolve(sample_state)
+        assert result == "execute"
+
+    def test_route_after_evolve_errors_precede_reexecute(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """Errors win even when a re-execution was offered (fail-closed)."""
+        sample_state["errors"] = ["evolution mutation failed"]
+        sample_state["evolve_reexecute_offered"] = True
+        result = route_after_evolve(sample_state)
+        assert result == "error_handler"
+
+    def test_route_after_evolve_no_offer_defaults_to_store(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """No offer flag in state → store_memory (regression guard for E)."""
+        sample_state["errors"] = []
+        sample_state.pop("evolve_reexecute_offered", None)
+        result = route_after_evolve(sample_state)
+        assert result == "store_memory"
+
 
 class TestRouteAfterHitl:
     """Tests for route_after_hitl routing function."""

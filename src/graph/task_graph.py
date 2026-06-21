@@ -205,6 +205,7 @@ def build_task_graph(
     graph.add_conditional_edges("evolve", route_after_evolve, {
         "store_memory": "store_memory",
         "error_handler": "error_handler",
+        "execute": "execute",
     })
 
     graph.add_conditional_edges("store_memory", route_after_store, {

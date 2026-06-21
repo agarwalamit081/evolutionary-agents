@@ -342,7 +342,9 @@ def route_after_evolve(state: AgentState) -> str:
     """Route after the evolve node.
 
     Returns:
-        "store_memory" — evolution succeeded
+        "execute" — a TOOL mutation was live-registered this cycle (one
+            re-execution pass so the new tool is reachable in-run; Phase 4 E)
+        "store_memory" — evolution succeeded (or nothing deployed/re-registered)
         "error_handler" — evolution failed
     """
     errors = state.get("errors", [])
@@ -350,6 +352,18 @@ def route_after_evolve(state: AgentState) -> str:
     if errors and "evolution" in str(errors[-1]).lower():
         logger.warning("Evolution failed, routing to error_handler")
         return "error_handler"
+
+    # Phase 4 E: a TOOL mutation was live-registered in the ToolRegistry this
+    # cycle → run ONE execute pass so the run can use the new tool before
+    # terminating. Bounded once per run by ``evolve_reexecute_done`` (set at
+    # registration time in the evolve node), so the next evolve cycle never
+    # re-offers and this branch can't loop.
+    if state.get("evolve_reexecute_offered"):
+        logger.info(
+            "Deployed TOOL mutation live-registered; routing to execute for "
+            "one re-execution pass (Phase 4 E)"
+        )
+        return "execute"
 
     return "store_memory"
 

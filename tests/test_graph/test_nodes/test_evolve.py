@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.graph.enums import Confidence, Phase
+from src.graph.enums import Confidence, MutationType, Phase
 from src.graph.factory import initial_state
 from src.graph.models import ReflectionResult
-from src.graph.nodes.evolve import evolve_node
+from src.graph.nodes.evolve import (
+    _derive_input_schema,
+    _sanitize_tool_name,
+    _try_register_deployed_tool,
+    evolve_node,
+)
 
 
 class TestEvolveNode:
@@ -282,3 +289,307 @@ class TestEvolveNode:
             assert record["mutations_proposed"] == 3
             assert record["mutations_deployed"] == 2
             assert record["commit_hash"] == "beefcafe5678"
+
+
+# A deployed TOOL mutation's runnable artifact: exactly ONE async def (+ helpers),
+# target_path ending in .py — the shape the LLM-gen path emits (see
+# engine._CODE_EMITTING_MUTATIONS). Used by the Phase-4-E node tests below.
+_TOOL_HANDLER = (
+    "async def csv_normalizer(path: str, delimiter: str = ','):\n"
+    "    return path\n"
+)
+_TOOL_TARGET = "evolution/tools/csv_normalizer.py"
+
+
+@contextmanager
+def _patch_engine(cycle_result: dict[str, Any], *, reexecute_flag: bool):
+    """Patch the evolution engine + gates for deterministic node tests.
+
+    Yields ``(engine_instance, mock_settings)``. ``reexecute_flag`` sets the
+    opt-in ``EvolutionSettings.evolution_reexecute_tool`` value the node reads.
+    """
+    with patch("src.evolution.engine.SelfEvolutionEngine") as mock_engine_cls, \
+         patch("src.safety.pipeline.SafetyPipeline"), \
+         patch("src.sandbox.executor.SandboxExecutor", side_effect=Exception("no sandbox")), \
+         patch("src.evolution.git_tracker.GitTracker", side_effect=Exception("no git")), \
+         patch("src.config.get_settings") as mock_settings:
+        instance = MagicMock()
+        instance.run_cycle = AsyncMock(return_value=cycle_result)
+        mock_engine_cls.return_value = instance
+        mock_settings.return_value = MagicMock()
+        mock_settings.return_value.evolution.evolution_reexecute_tool = reexecute_flag
+        yield instance, mock_settings
+
+
+class TestEvolveReexecuteEdge:
+    """Phase 4 E — evolve→execute edge for deployed TOOL mutations."""
+
+    @pytest.mark.asyncio
+    async def test_tool_deploy_live_registers_and_signals_reexecute(self) -> None:
+        """TOOL .py deploy + registered + guard unset → offered & done True."""
+        cycle_result = {
+            "status": "deployed",
+            "deployed": True,
+            "mutations_proposed": 1,
+            "mutations_deployed": 1,
+            "proposal": {
+                "mutation_type": MutationType.TOOL,
+                "target_path": _TOOL_TARGET,
+                "mutated_content": _TOOL_HANDLER,
+                "description": "normalize CSV columns",
+                "rationale": "fill a capability gap",
+            },
+            "deployment": {"commit_hash": "abc123"},
+        }
+        with _patch_engine(cycle_result, reexecute_flag=True), \
+                patch(
+                    "src.graph.nodes.evolve._try_register_deployed_tool",
+                    new=AsyncMock(return_value=True),
+                ) as mock_register:
+            state = initial_state("clean a csv", "thread-reexec-ok")
+            result = await evolve_node(state, gateway=MagicMock(), tools=MagicMock())
+
+        # The deployed tool was handed to the live-registration helper.
+        mock_register.assert_awaited_once()
+        assert result["evolve_reexecute_offered"] is True
+        assert result["evolve_reexecute_done"] is True
+        record = result["evolution_history"][0]
+        assert record["mutation_type"] == "tool"
+        assert record["reexecute_registered_tool"] == _TOOL_TARGET
+
+    @pytest.mark.asyncio
+    async def test_tool_deploy_registration_failure_no_reexecute(self) -> None:
+        """Live registration returns False → no offer, guard stays unset."""
+        cycle_result = {
+            "status": "deployed",
+            "deployed": True,
+            "mutations_proposed": 1,
+            "mutations_deployed": 1,
+            "proposal": {
+                "mutation_type": MutationType.TOOL,
+                "target_path": _TOOL_TARGET,
+                "mutated_content": _TOOL_HANDLER,
+                "description": "normalize CSV columns",
+            },
+            "deployment": {"commit_hash": "abc123"},
+        }
+        with _patch_engine(cycle_result, reexecute_flag=True), \
+                patch(
+                    "src.graph.nodes.evolve._try_register_deployed_tool",
+                    new=AsyncMock(return_value=False),
+                ) as mock_register:
+            state = initial_state("clean a csv", "thread-reexec-fail")
+            result = await evolve_node(state, gateway=MagicMock(), tools=MagicMock())
+
+        mock_register.assert_awaited_once()
+        assert result["evolve_reexecute_offered"] is False
+        assert result["evolve_reexecute_done"] is False
+        assert "reexecute_registered_tool" not in result["evolution_history"][0]
+
+    @pytest.mark.asyncio
+    async def test_prompt_deploy_never_reexecutes(self) -> None:
+        """PROMPT mutations never reach live registration → store_memory path."""
+        cycle_result = {
+            "status": "deployed",
+            "deployed": True,
+            "mutations_proposed": 1,
+            "mutations_deployed": 1,
+            "proposal": {
+                "mutation_type": MutationType.PROMPT,
+                "target_path": "prompts/system_prompt.md",
+                "mutated_content": "refined prompt",
+                "description": "sharpen execute prompt",
+            },
+            "deployment": {"commit_hash": "prompt-hash"},
+        }
+        with _patch_engine(cycle_result, reexecute_flag=True), \
+                patch(
+                    "src.graph.nodes.evolve._try_register_deployed_tool",
+                    new=AsyncMock(return_value=True),
+                ) as mock_register:
+            state = initial_state("any", "thread-prompt")
+            result = await evolve_node(state, gateway=MagicMock(), tools=MagicMock())
+
+        mock_register.assert_not_awaited()
+        assert result["evolve_reexecute_offered"] is False
+        assert result["evolve_reexecute_done"] is False
+        assert result["evolution_history"][0]["mutation_type"] == "prompt"
+
+    @pytest.mark.asyncio
+    async def test_config_json_tool_target_not_py_no_reexecute(self) -> None:
+        """Heuristic TOOL (config-JSON target) is excluded from re-execution."""
+        cycle_result = {
+            "status": "deployed",
+            "deployed": True,
+            "mutations_proposed": 1,
+            "mutations_deployed": 1,
+            "proposal": {
+                "mutation_type": MutationType.TOOL,
+                "target_path": "evolution/tool_config.json",  # not a runnable module
+                "mutated_content": '{"tool": "x"}',
+                "description": "tweak config",
+            },
+            "deployment": {"commit_hash": "cfg-hash"},
+        }
+        with _patch_engine(cycle_result, reexecute_flag=True), \
+                patch(
+                    "src.graph.nodes.evolve._try_register_deployed_tool",
+                    new=AsyncMock(return_value=True),
+                ) as mock_register:
+            state = initial_state("any", "thread-cfgjson")
+            result = await evolve_node(state, gateway=MagicMock(), tools=MagicMock())
+
+        mock_register.assert_not_awaited()
+        assert result["evolve_reexecute_offered"] is False
+        assert result["evolve_reexecute_done"] is False
+
+    @pytest.mark.asyncio
+    async def test_reexecute_done_guard_blocks_second_offer(self) -> None:
+        """Once evolve_reexecute_done is True, a later cycle never re-offers."""
+        cycle_result = {
+            "status": "deployed",
+            "deployed": True,
+            "mutations_proposed": 1,
+            "mutations_deployed": 1,
+            "proposal": {
+                "mutation_type": MutationType.TOOL,
+                "target_path": _TOOL_TARGET,
+                "mutated_content": _TOOL_HANDLER,
+                "description": "normalize CSV columns",
+            },
+            "deployment": {"commit_hash": "abc123"},
+        }
+        with _patch_engine(cycle_result, reexecute_flag=True), \
+                patch(
+                    "src.graph.nodes.evolve._try_register_deployed_tool",
+                    new=AsyncMock(return_value=True),
+                ) as mock_register:
+            state = initial_state("clean a csv", "thread-reexec-done")
+            state["evolve_reexecute_done"] = True  # guard already spent
+            result = await evolve_node(state, gateway=MagicMock(), tools=MagicMock())
+
+        mock_register.assert_not_awaited()
+        assert result["evolve_reexecute_offered"] is False
+        # Guard is monotonic-True: never reset back to False.
+        assert result["evolve_reexecute_done"] is True
+
+    @pytest.mark.asyncio
+    async def test_reexecute_disabled_by_default_flag(self) -> None:
+        """Opt-in flag off (production default) → never live-register."""
+        cycle_result = {
+            "status": "deployed",
+            "deployed": True,
+            "mutations_proposed": 1,
+            "mutations_deployed": 1,
+            "proposal": {
+                "mutation_type": MutationType.TOOL,
+                "target_path": _TOOL_TARGET,
+                "mutated_content": _TOOL_HANDLER,
+                "description": "normalize CSV columns",
+            },
+            "deployment": {"commit_hash": "abc123"},
+        }
+        with _patch_engine(cycle_result, reexecute_flag=False), \
+                patch(
+                    "src.graph.nodes.evolve._try_register_deployed_tool",
+                    new=AsyncMock(return_value=True),
+                ) as mock_register:
+            state = initial_state("clean a csv", "thread-reexec-off")
+            result = await evolve_node(state, gateway=MagicMock(), tools=MagicMock())
+
+        mock_register.assert_not_awaited()
+        assert result["evolve_reexecute_offered"] is False
+        assert result["evolve_reexecute_done"] is False
+
+
+class TestEvolveHelpers:
+    """Unit tests for the Phase-4-E live-registration helpers."""
+
+    def test_sanitize_tool_name(self) -> None:
+        assert _sanitize_tool_name("csv-normalizer.py") == "csv_normalizer_py"
+        assert _sanitize_tool_name("My Tool!") == "my_tool"
+        assert _sanitize_tool_name("") == "evolved_tool"
+        assert _sanitize_tool_name("9ways") == "t_9ways"  # leading-alpha guarantee
+
+    def test_derive_input_schema_respects_defaults_and_self(self) -> None:
+        code = (
+            "async def csv_normalizer(self, path: str, delimiter: str = ','):\n"
+            "    return path\n"
+        )
+        schema = _derive_input_schema(code)
+        assert schema["type"] == "object"
+        # self skipped; path required; delimiter (has default) NOT required.
+        assert set(schema["properties"]) == {"path", "delimiter"}
+        assert schema["required"] == ["path"]
+
+    def test_derive_input_schema_invalid_syntax_falls_back(self) -> None:
+        assert _derive_input_schema("def broken(:") == {
+            "type": "object",
+            "properties": {},
+        }
+
+    @pytest.mark.asyncio
+    async def test_try_register_success_persists_and_returns_true(self) -> None:
+        """Successful validate_and_register → True + best-effort persist."""
+        proposal = {
+            "mutation_type": MutationType.TOOL,
+            "target_path": _TOOL_TARGET,
+            "mutated_content": _TOOL_HANDLER,
+            "description": "normalize CSV columns",
+        }
+        registry = MagicMock()
+        fake_gen = MagicMock()
+        fake_gen.validate_and_register = AsyncMock(
+            return_value={"success": True, "tool_name": "csv_normalizer"}
+        )
+        with patch("src.tools.dynamic.generator.ToolGenerator", return_value=fake_gen), \
+                patch("src.safety.pipeline.SafetyPipeline"), \
+                patch("src.graph.nodes.evolve._persist_deployed_tool", new=AsyncMock()) as mock_persist:
+            ok = await _try_register_deployed_tool(proposal, registry, MagicMock())
+
+        assert ok is True
+        fake_gen.validate_and_register.assert_awaited_once()
+        # The registered tool name is the sanitized module stem (Path.stem
+        # strips the .py, so the name has no extension).
+        gen_tool = fake_gen.validate_and_register.call_args.args[0]
+        assert gen_tool.tool_name == "csv_normalizer"
+        assert gen_tool.handler_code == _TOOL_HANDLER
+        mock_persist.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_try_register_safety_failure_returns_false(self) -> None:
+        """validate_and_register failure → False, no persistence."""
+        proposal = {
+            "mutation_type": MutationType.TOOL,
+            "target_path": _TOOL_TARGET,
+            "mutated_content": _TOOL_HANDLER,
+            "description": "normalize CSV columns",
+        }
+        fake_gen = MagicMock()
+        fake_gen.validate_and_register = AsyncMock(
+            return_value={"success": False, "reason": "Safety validation failed"}
+        )
+        with patch("src.tools.dynamic.generator.ToolGenerator", return_value=fake_gen), \
+                patch("src.safety.pipeline.SafetyPipeline"), \
+                patch("src.graph.nodes.evolve._persist_deployed_tool", new=AsyncMock()) as mock_persist:
+            ok = await _try_register_deployed_tool(proposal, MagicMock(), MagicMock())
+
+        assert ok is False
+        mock_persist.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_try_register_non_py_target_short_circuits(self) -> None:
+        """Config-JSON target → False before constructing any generator."""
+        proposal = {
+            "mutation_type": MutationType.TOOL,
+            "target_path": "evolution/tool_config.json",
+            "mutated_content": '{"tool": "x"}',
+            "description": "tweak config",
+        }
+        with patch("src.tools.dynamic.generator.ToolGenerator") as mock_gen_cls, \
+                patch("src.graph.nodes.evolve._persist_deployed_tool", new=AsyncMock()) as mock_persist:
+            ok = await _try_register_deployed_tool(proposal, MagicMock(), MagicMock())
+
+        assert ok is False
+        mock_gen_cls.assert_not_called()
+        mock_persist.assert_not_awaited()

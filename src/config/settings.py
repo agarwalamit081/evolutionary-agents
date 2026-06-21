@@ -660,6 +660,19 @@ class EvolutionSettings(BaseSettings):
     # Default lives under .turing/ (gitignored scratch), NOT in core src/. Env:
     # EVOLVED_HANDLERS_DIR.
     evolved_handlers_dir: str = ".turing/evolved"
+    # Phase 4 E — evolve→execute edge for deployed TOOL mutations (opt-in,
+    # default off). When true, after a TOOL mutation deploys (it has already
+    # passed the engine's safety + sandbox + post-deploy smoke gates), the
+    # evolve node live-registers its handler in the ToolRegistry and signals
+    # ``route_after_evolve`` to run ONE execute pass so the new tool is
+    # reachable in-run (closes the q3 reliability gap where a deployed TOOL
+    # mutation landed in the shadow repo but the run ended before it executed).
+    # Fail-closed: any materialization/safety hiccup skips re-execution. Bounded
+    # to a single pass per run by ``AgentState.evolve_reexecute_done``. The gate
+    # is TOOL-specific: PROMPT/CODE mutations and config-JSON TOOL templates
+    # (target_path not ending in ``.py``) never re-execute. Env:
+    # EVOLUTION_REEXECUTE_TOOL.
+    evolution_reexecute_tool: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",

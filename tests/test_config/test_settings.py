@@ -284,7 +284,10 @@ class TestWorkerSettings:
         w = WorkerSettings(_env_file=None)
         assert w.runs_stream == "turing:runs"
         assert w.group == "turing-workers"
-        assert w.consumer_name == "worker-1"
+        # EMPTY by default: a replicated worker pool must auto-derive a unique
+        # consumer name per replica (src/worker/__main__._resolve_consumer_name).
+        # A fixed default here would make every replica collide on it.
+        assert w.consumer_name == ""
         assert w.read_batch_size == 5
         assert w.block_ms == 5000
         assert w.reclaim_min_idle_ms == 30000

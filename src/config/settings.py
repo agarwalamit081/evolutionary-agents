@@ -1139,7 +1139,13 @@ class WorkerSettings(BaseSettings):
     group: str = "turing-workers"  # Env: WORKER_GROUP
 
     # This consumer's name within the group (for PEL ownership / XAUTOCLAIM).
-    consumer_name: str = "worker-1"  # Env: WORKER_CONSUMER_NAME
+    # EMPTY by default → src/worker/__main__._resolve_consumer_name derives a
+    # per-process-unique ``worker-{hostname}-{pid}`` so replica workers never
+    # share a pending-entries list (XAUTOCLAIM stays sound). Set an explicit
+    # value ONLY for a single, fixed-name worker; a fixed default here would make
+    # EVERY replica collide on it (the bug this default shipped for years).
+    # Env: WORKER_CONSUMER_NAME.
+    consumer_name: str = ""  # Env: WORKER_CONSUMER_NAME
 
     # How many messages to pull per XREADGROUP sweep.
     read_batch_size: int = 5  # Env: WORKER_READ_BATCH_SIZE

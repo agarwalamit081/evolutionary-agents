@@ -42,16 +42,23 @@ def _resolve_consumer_name(settings_worker: Any) -> str:
     Redis Streams consumer-group semantics require each consumer to have a
     DISTINCT name: a shared name makes multiple processes own the same pending
     list, breaking ``XAUTOCLAIM`` crash-recovery (a peer can't tell a stuck
-    entry belongs to a dead sibling). With ``deploy.replicas``, each container
-    has a unique hostname, so ``worker-{hostname}-{pid}`` is unique across
-    replicas AND across restarts (new pid), yet stable for the process lifetime
-    so pending-entry ownership holds for the whole run.
+    entry belongs to a dead sibling).
 
-    An explicit ``WORKER_CONSUMER_NAME`` env var is respected verbatim (the
-    single-worker fixed-name opt-in) — but for a replicated worker you should
-    leave it unset so each replica auto-derives a unique name.
+    With ``deploy.replicas``, each container has a unique hostname — its short
+    container id (the SAME id ``docker ps`` shows), e.g. ``363d6e8d1e6e`` — so
+    ``worker-{hostname}-{pid}`` is unique across replicas (hostname dimension)
+    AND across restarts (pid dimension), yet stable for the process lifetime so
+    pending-entry ownership holds for the whole run. The hostname also makes the
+    name MEANINGFUL: a Redis consumer seen via ``XINFO CONSUMERS`` ties straight
+    back to a real container (``docker ps | grep <hostname>``).
+
+    An explicit ``WorkerSettings.consumer_name`` (env ``WORKER_CONSUMER_NAME``)
+    is honored verbatim — the single-worker fixed-name opt-in. The default is
+    empty, which selects auto-derivation (the right choice for a replicated
+    worker pool). Set a value ONLY for a single, fixed-name worker; setting one
+    for replicas makes every replica collide on that single name.
     """
-    if os.environ.get("WORKER_CONSUMER_NAME"):
+    if settings_worker.consumer_name:
         return settings_worker.consumer_name
     return f"worker-{socket.gethostname()}-{os.getpid()}"
 

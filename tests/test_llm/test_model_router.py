@@ -319,3 +319,108 @@ class TestModelRouterRouteDiverse:
         models = router.route_diverse(n=3, complexity=TaskComplexity.SIMPLE)
         providers = {ModelRouter._extract_provider(m) for m in models}
         assert "openai" not in providers
+
+
+class TestModelRouterPerNodeRouting:
+    """Tests for per-node routing (findings-05 A): NODE_TIER_MAP overrides, the
+    de-flat (COMPLEX != SIMPLE), and the resurrected route_reasoning caller
+    (verify/reflect on complex/critical goals)."""
+
+    @staticmethod
+    def _all_keyed_router() -> ModelRouter:
+        """A router with every provider key set, so each complexity/node primary
+        resolves to itself (no fallback masking the tier-map choice)."""
+        settings = Settings()
+        for field in _PROVIDER_KEY_FIELDS.values():
+            setattr(settings.llm, field, "test-key")
+        return ModelRouter(settings)
+
+    def test_deflat_complex_ne_simple_for_plan(self) -> None:
+        """De-flat (findings-03 #1): a COMPLEX plan no longer collapses to the
+        same model as a SIMPLE plan. With all providers keyed, COMPLEX→plan
+        resolves to its NODE_TIER_MAP primary (MODERATE glm-4.7) while
+        SIMPLE→plan falls to the COMPLEXITY_TIER_MAP SIMPLE default (CHEAP)."""
+        from src.llm.model_router import NODE_TIER_MAP
+
+        router = self._all_keyed_router()
+        complex_plan = router.route(TaskComplexity.COMPLEX, node="plan")
+        simple_plan = router.route(TaskComplexity.SIMPLE, node="plan")
+        assert complex_plan != simple_plan
+        # COMPLEX+plan hits the NODE_TIER_MAP override primary.
+        assert complex_plan == NODE_TIER_MAP[(TaskComplexity.COMPLEX, "plan")][1]
+
+    def test_execute_stays_cheap_on_complex_goal(self) -> None:
+        """Cost discipline: execute stays CHEAP even on a COMPLEX goal —
+        NODE_TIER_MAP overrides the de-flatted COMPLEX→MODERATE default so
+        tool-calling steps don't overspend. Asserted via the registry tier of
+        the returned model so it tracks the invariant, not a model name."""
+        from src.config.model_registry import MODEL_REGISTRY, ModelTier
+
+        router = self._all_keyed_router()
+        model = router.route(TaskComplexity.COMPLEX, node="execute")
+        assert MODEL_REGISTRY[model].tier in {ModelTier.VERY_CHEAP, ModelTier.CHEAP}
+
+    def test_verify_and_reflect_complex_route_to_reasoning(self) -> None:
+        """Resurrected route_reasoning caller: verify/reflect on a COMPLEX goal
+        prefer the reasoning model (deepseek-v4-pro) when its provider key is
+        set — route_reasoning() previously had zero callers."""
+        settings = Settings()
+        _set_only_provider_key(settings, "deepseek", "test-key")
+        router = ModelRouter(settings)
+        assert router.route(TaskComplexity.COMPLEX, node="verify") == "deepseek-v4-pro"
+        assert router.route(TaskComplexity.COMPLEX, node="reflect") == "deepseek-v4-pro"
+
+    def test_verify_critical_routes_to_reasoning_when_keyed(self) -> None:
+        """CRITICAL verify also prefers the reasoning model when keyed."""
+        settings = Settings()
+        _set_only_provider_key(settings, "deepseek", "test-key")
+        router = ModelRouter(settings)
+        assert router.route(TaskComplexity.CRITICAL, node="verify") == "deepseek-v4-pro"
+
+    def test_verify_falls_back_when_reasoning_key_absent(self) -> None:
+        """When the reasoning model's provider has no key, verify/reflect fall
+        back to the CRITICAL complexity default (NOT deepseek-v4-pro), via
+        route_reasoning → route(CRITICAL) with node=None (no recursion)."""
+        settings = Settings()
+        _set_only_provider_key(settings, "zai", "test-key")  # no deepseek key
+        router = ModelRouter(settings)
+        result = router.route(TaskComplexity.CRITICAL, node="verify")
+        assert result != "deepseek-v4-pro"
+        # route_reasoning falls back to route(CRITICAL) → CRITICAL primary glm-4.7.
+        assert result == "glm-4.7"
+
+    def test_node_tier_map_miss_falls_back_to_complexity_map(self) -> None:
+        """A (complexity, node) pair absent from NODE_TIER_MAP uses the
+        COMPLEXITY_TIER_MAP default. SIMPLE+reflect is not a NODE_TIER_MAP key
+        and SIMPLE is not complex enough for the reasoning branch, so it returns
+        the SIMPLE primary."""
+        from src.llm.model_router import COMPLEXITY_TIER_MAP
+
+        router = self._all_keyed_router()
+        _tier, simple_primary = COMPLEXITY_TIER_MAP[TaskComplexity.SIMPLE]
+        assert router.route(TaskComplexity.SIMPLE, node="reflect") == simple_primary
+
+    def test_node_param_none_preserves_existing_behavior(self) -> None:
+        """Regression guard: route(complexity) with no node behaves exactly as
+        before — node-aware branches are skipped, COMPLEXITY_TIER_MAP wins."""
+        from src.llm.model_router import COMPLEXITY_TIER_MAP
+
+        router = self._all_keyed_router()
+        for complexity in (
+            TaskComplexity.SIMPLE,
+            TaskComplexity.COMPLEX,
+            TaskComplexity.CRITICAL,
+        ):
+            _tier, primary = COMPLEXITY_TIER_MAP[complexity]
+            assert router.route(complexity) == primary
+
+    def test_node_tier_map_keys_are_registered_and_chained(self) -> None:
+        """Cross-cutting invariant: every NODE_TIER_MAP chain key is a real
+        registered model with a fallback chain — mirrors the COMPLEXITY_TIER_MAP
+        guard so a per-node override can never name an unroutable model."""
+        from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY
+        from src.llm.model_router import NODE_TIER_MAP
+
+        for (_complexity, _node), (_tier, chain_key) in NODE_TIER_MAP.items():
+            assert chain_key in MODEL_REGISTRY, f"{chain_key} not in MODEL_REGISTRY"
+            assert chain_key in FALLBACK_CHAINS, f"{chain_key} not in FALLBACK_CHAINS"

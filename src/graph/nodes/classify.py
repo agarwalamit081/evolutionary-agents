@@ -128,6 +128,9 @@ async def _llm_classify(
         ]
         response = await gateway.acompletion(
             messages=messages,
+            # node identity for per-node routing (findings-05 A); classify has
+            # no complexity yet so this is documentary + future-proof.
+            node="classify",
         )
 
         extractor = StructuredOutputManager()

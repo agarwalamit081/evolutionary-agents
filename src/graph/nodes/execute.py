@@ -533,6 +533,12 @@ async def _llm_execute(
                 messages=payload,
                 tools=tool_defs,
                 tool_choice=forced_tool_choice,
+                # Node identity → NODE_TIER_MAP: execute stays CHEAP
+                # (deepseek-v4-flash) even on a COMPLEX/CRITICAL goal, since
+                # individual steps are simple tool-calling (cost discipline,
+                # findings-05 A). Overrides the de-flatted COMPLEX→MODERATE
+                # default.
+                node=NODE_EXECUTE,
             )
 
             # Process tool calls if present. gather preserves order, so each

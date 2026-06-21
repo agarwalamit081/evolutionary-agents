@@ -9,20 +9,49 @@ from src.config.settings import Settings
 from src.graph.enums import TaskComplexity
 
 
-# Mapping from TaskComplexity to model tier and fallback chain key.
-# SIMPLE/COMPLEX primary is deepseek-v4-flash (Cheap) — swapped off
+# Mapping from TaskComplexity to model tier and fallback chain key — the
+# DEFAULT used when no per-node override applies (see NODE_TIER_MAP) and by
+# callers that pass no node identity.
+#
+# De-flat (findings-03 #1 / findings-05): SIMPLE and COMPLEX previously both
+# resolved to deepseek-v4-flash (CHEAP), so every non-trivial task paid for —
+# and got — a Cheap model. COMPLEX now maps to glm-4.7 (MODERATE) so a complex
+# goal's no-node default is stronger than a simple one. Per-node overrides in
+# NODE_TIER_MAP refine this further (e.g. execute stays CHEAP even on a complex
+# goal — individual steps are simple tool-calling).
+#
+# SIMPLE primary is deepseek-v4-flash (Cheap) — swapped off
 # claude-haiku-4-5-20251001 after that Anthropic key hit an account usage cap
 # (blocked until 2026-07-01): the key stayed present so route() kept returning
-# Haiku as primary, and every SIMPLE/COMPLEX call failed before falling through
-# the chain (89 wasted attempts in one run). deepseek-v4-flash is the registered
+# Haiku as primary, and every SIMPLE call failed before falling through the
+# chain (89 wasted attempts in one run). deepseek-v4-flash is the registered
 # CHEAP-tier peer and was already Haiku's first fallback, so this removes the
 # dead attempt with no behavior change on a funded key. Haiku stays registered
 # + as deepseek-v4-flash's first chain fallback.
 COMPLEXITY_TIER_MAP: dict[TaskComplexity, tuple[ModelTier, str]] = {
     TaskComplexity.TRIVIAL: (ModelTier.VERY_CHEAP, "qwen3.5-flash"),
     TaskComplexity.SIMPLE: (ModelTier.CHEAP, "deepseek-v4-flash"),
-    TaskComplexity.COMPLEX: (ModelTier.CHEAP, "deepseek-v4-flash"),
+    TaskComplexity.COMPLEX: (ModelTier.MODERATE, "glm-4.7"),
     TaskComplexity.CRITICAL: (ModelTier.MODERATE, "glm-4.7"),
+}
+
+# Per-node routing overrides keyed by (TaskComplexity, node_name). A node-aware
+# tier lets a complex goal use a stronger model for reasoning-heavy steps
+# (plan/reflect/verify) while keeping execution CHEAP (cost discipline:
+# individual execute steps are simple tool-calling). verify/reflect on
+# complex/critical goals additionally prefer the reasoning model via
+# route_reasoning() (chain-of-verification payoff) — handled in route(), not
+# here. Missing (complexity, node) keys fall back to COMPLEXITY_TIER_MAP. All
+# upgrades land in MODERATE (glm-4.7 / deepseek-v4-pro) — never a
+# flagship/Opus/GPT-5 (guardrails).
+NODE_TIER_MAP: dict[tuple[TaskComplexity, str], tuple[ModelTier, str]] = {
+    # Planning a complex/critical goal benefits from a stronger model.
+    (TaskComplexity.COMPLEX, "plan"): (ModelTier.MODERATE, "glm-4.7"),
+    (TaskComplexity.CRITICAL, "plan"): (ModelTier.MODERATE, "glm-4.7"),
+    # Execution steps stay CHEAP even on complex/critical goals — overrides the
+    # de-flatted COMPLEX→MODERATE default so tool-calling steps don't overspend.
+    (TaskComplexity.COMPLEX, "execute"): (ModelTier.CHEAP, "deepseek-v4-flash"),
+    (TaskComplexity.CRITICAL, "execute"): (ModelTier.CHEAP, "deepseek-v4-flash"),
 }
 
 
@@ -43,20 +72,40 @@ class ModelRouter:
     def route(
         self,
         complexity: TaskComplexity,
+        node: str | None = None,
         exclude_providers: set[str] | None = None,
     ) -> str:
-        """Select the best model for a given complexity level.
+        """Select the best model for a given complexity (optionally per-node).
 
         Args:
             complexity: The task complexity classification.
+            node: Optional graph-node name (e.g. "plan", "execute", "verify").
+                When set, NODE_TIER_MAP may override the complexity default, and
+                verify/reflect on complex/critical goals prefer the reasoning
+                model (``route_reasoning``).
             exclude_providers: Providers to skip (e.g., unhealthy ones).
 
         Returns:
             A model identifier string (litellm format).
         """
-        tier, chain_key = COMPLEXITY_TIER_MAP.get(
-            complexity, DEFAULT_COMPLEXITY_TIER
-        )
+        # Verify/reflect on complex/critical goals → reasoning model. This also
+        # resurrects route_reasoning() (previously zero callers): chain-of-
+        # verification / self-reflection pay off most on hard goals. Falls back
+        # to CRITICAL routing when the reasoning model's provider has no key
+        # (and that fallback passes node=None, so it cannot recurse here).
+        if (
+            node in {"verify", "reflect"}
+            and complexity in {TaskComplexity.COMPLEX, TaskComplexity.CRITICAL}
+        ):
+            return self.route_reasoning()
+
+        # Per-node override, else the complexity default.
+        if node is not None and (complexity, node) in NODE_TIER_MAP:
+            tier, chain_key = NODE_TIER_MAP[(complexity, node)]
+        else:
+            tier, chain_key = COMPLEXITY_TIER_MAP.get(
+                complexity, DEFAULT_COMPLEXITY_TIER
+            )
         excluded = (exclude_providers or set()) | self._exclude_providers
 
         # The complexity's primary model (the chain_key itself) is the intended
@@ -128,6 +177,7 @@ class ModelRouter:
         self,
         n: int,
         complexity: TaskComplexity,
+        node: str | None = None,
         exclude_providers: set[str] | None = None,
     ) -> list[str]:
         """Return *n* models from different providers for a given complexity.
@@ -139,15 +189,22 @@ class ModelRouter:
         Args:
             n: Number of distinct models to return.
             complexity: Task complexity level for tier selection.
+            node: Optional graph-node name for per-node tier override
+                (mirrors ``route``). ``None`` for sub-agent fan-out, which is
+                the common caller.
             exclude_providers: Providers to skip.
 
         Returns:
             List of *n* model identifiers, one per provider where possible.
         """
         excluded = (exclude_providers or set()) | self._exclude_providers
-        tier, chain_key = COMPLEXITY_TIER_MAP.get(
-            complexity, DEFAULT_COMPLEXITY_TIER
-        )
+        # Per-node override, else the complexity default — mirrors route().
+        if node is not None and (complexity, node) in NODE_TIER_MAP:
+            tier, chain_key = NODE_TIER_MAP[(complexity, node)]
+        else:
+            tier, chain_key = COMPLEXITY_TIER_MAP.get(
+                complexity, DEFAULT_COMPLEXITY_TIER
+            )
 
         # Collect one model per provider at the target tier
         provider_to_model: dict[str, str] = {}
@@ -174,8 +231,9 @@ class ModelRouter:
         candidates = list(provider_to_model.values())
 
         if not candidates:
-            # Absolute fallback: just repeat the default route
-            return [self.route(complexity, exclude_providers)] * max(1, n)
+            # Absolute fallback: just repeat the default route (keyword so the
+            # positional node slot is not accidentally filled by exclude_providers).
+            return [self.route(complexity, exclude_providers=exclude_providers)] * max(1, n)
 
         # Cycle through candidates to fill n slots
         result: list[str] = []

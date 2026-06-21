@@ -429,6 +429,10 @@ async def _llm_reflect(
             # Thread the *classified* complexity (§5 C.1). Falls back to COMPLEX
             # when unclassified — reflection is inherently analytical.
             complexity=reflect_complexity,
+            # Node identity → on a COMPLEX/CRITICAL goal, reflect prefers the
+            # reasoning model (route_reasoning) via NODE_TIER_MAP/reasoning
+            # branch (findings-05 A).
+            node=NODE_REFLECT,
         )
 
         extractor = StructuredOutputManager()

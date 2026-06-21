@@ -243,6 +243,9 @@ async def _llm_plan(
             # Thread the *classified* complexity so a CRITICAL goal routes to a
             # stronger planning model instead of always SIMPLE (§5 C.1).
             complexity=plan_complexity,
+            # Node identity → NODE_TIER_MAP: a COMPLEX/CRITICAL plan routes to
+            # a MODERATE model (glm-4.7) per-node (findings-05 A).
+            node=NODE_PLAN,
         )
 
         extractor = StructuredOutputManager()

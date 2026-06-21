@@ -159,6 +159,7 @@ class LLMGateway:
         messages: list[dict[str, Any]],
         model: str | None = None,
         complexity: TaskComplexity | None = None,
+        node: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         response_format: dict[str, Any] | None = None,
         tool_choice: dict[str, Any] | None = None,
@@ -179,6 +180,11 @@ class LLMGateway:
             messages: Chat messages in OpenAI format.
             model: Explicit model to use (overrides complexity routing).
             complexity: Task complexity for automatic model routing.
+            node: Optional graph-node name (e.g. ``"plan"``, ``"execute"``,
+                ``"verify"``). Threads into ``ModelRouter.route`` so per-node
+                tier overrides (NODE_TIER_MAP) and reasoning-model selection
+                (verify/reflect on complex/critical) apply. Ignored when
+                ``model`` is given explicitly.
             tools: Optional tool definitions for function calling.
             response_format: Optional response format specification.
             temperature: Sampling temperature (0.0 - 2.0).
@@ -196,9 +202,9 @@ class LLMGateway:
             if self._pinned_model is not None:
                 model = self._pinned_model
             elif complexity is not None:
-                model = self._model_router.route(complexity)
+                model = self._model_router.route(complexity, node=node)
             else:
-                model = self._model_router.route(TaskComplexity.SIMPLE)
+                model = self._model_router.route(TaskComplexity.SIMPLE, node=node)
 
         assert model is not None  # guaranteed by routing logic
 
@@ -375,6 +381,7 @@ class LLMGateway:
         messages: list[dict[str, Any]],
         model: str | None = None,
         complexity: TaskComplexity | None = None,
+        node: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
         metadata: dict[str, Any] | None = None,
@@ -385,6 +392,8 @@ class LLMGateway:
             messages: Chat messages in OpenAI format.
             model: Explicit model to use.
             complexity: Task complexity for automatic routing.
+            node: Optional graph-node name (see ``acompletion``); threads into
+                ``ModelRouter.route`` for per-node tier overrides.
             temperature: Sampling temperature.
             max_tokens: Maximum tokens in the response.
             metadata: Optional metadata for logging.
@@ -396,9 +405,9 @@ class LLMGateway:
             if self._pinned_model is not None:
                 model = self._pinned_model
             elif complexity is not None:
-                model = self._model_router.route(complexity)
+                model = self._model_router.route(complexity, node=node)
             else:
-                model = self._model_router.route(TaskComplexity.SIMPLE)
+                model = self._model_router.route(TaskComplexity.SIMPLE, node=node)
 
         assert model is not None  # guaranteed by routing logic
 
@@ -445,6 +454,7 @@ class LLMGateway:
         tools: list[dict[str, Any]],
         model: str | None = None,
         complexity: TaskComplexity | None = None,
+        node: str | None = None,
         tool_choice: dict[str, Any] | None = None,
         temperature: float | None = None,
         metadata: dict[str, Any] | None = None,
@@ -457,6 +467,8 @@ class LLMGateway:
             tools: Tool definitions for function calling.
             model: Explicit model to use.
             complexity: Task complexity for routing.
+            node: Optional graph-node name (see ``acompletion``); threads into
+                ``ModelRouter.route`` for per-node tier overrides.
             temperature: Sampling temperature.
             metadata: Optional metadata for logging.
 
@@ -467,6 +479,7 @@ class LLMGateway:
             messages=messages,
             model=model,
             complexity=complexity,
+            node=node,
             tools=tools,
             tool_choice=tool_choice,
             temperature=temperature,

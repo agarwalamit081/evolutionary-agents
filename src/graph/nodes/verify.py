@@ -358,6 +358,10 @@ async def _llm_verify(
             # Thread the *classified* complexity so verification of a CRITICAL
             # goal uses a stronger model rather than always SIMPLE (§5 C.1).
             complexity=verify_complexity,
+            # Node identity → on a COMPLEX/CRITICAL goal, verify prefers the
+            # reasoning model (route_reasoning) via NODE_TIER_MAP/reasoning
+            # branch (findings-05 A).
+            node=NODE_VERIFY,
         )
 
         extractor = StructuredOutputManager()

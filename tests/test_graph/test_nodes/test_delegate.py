@@ -718,3 +718,256 @@ class TestDelegateSingleViaNode:
         assert len(result["delegation_results"]) == 1
         assert result["delegation_results"][0]["success"] is False
         assert "Failed to spawn" in result["delegation_results"][0]["errors"][0]
+
+
+class TestTierRouting:
+    """Phase 4 F — sub-agents route by spec.model_tier, not a flat SIMPLE set."""
+
+    @staticmethod
+    def _success(name: str, sub_id: str) -> dict[str, Any]:
+        return {
+            "success": True,
+            "result": "done",
+            "tokens_used": 10,
+            "cost_usd": 0.0,
+            "latency_ms": 5,
+            "iterations": 1,
+            "errors": [],
+            "goal": "subtask",
+            "sub_agent_name": name,
+            "sub_agent_id": sub_id,
+        }
+
+    @pytest.mark.asyncio
+    async def test_critical_spec_routes_at_critical_tier(
+        self,
+        sample_state: dict[str, Any],
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+    ) -> None:
+        """A single CRITICAL sub-agent is routed at its declared tier, not SIMPLE."""
+        from src.graph.enums import TaskComplexity
+
+        spec = SubAgentSpec(
+            name="crit_agent",
+            description="critical specialist",
+            goal="g",
+            parent_thread_id="t",
+            tool_scope="inherit_all",
+            model_tier=TaskComplexity.CRITICAL,
+        )
+        mock_registry.get.return_value = spec
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value=self._success("crit_agent", "id1"))
+        mock_registry.spawn.return_value = mock_runner
+
+        spy = MagicMock(return_value=["glm-4.7"])
+        mock_gateway._model_router.route_diverse = spy
+
+        sample_state["sub_agents_spawned"] = [{"name": "crit_agent", "id": "id1"}]
+        result = await delegate_node(
+            sample_state,
+            gateway=mock_gateway,
+            tools=mock_tools,
+            sub_agent_registry=mock_registry,
+        )
+
+        # Routed at the CRITICAL tier (previously always SIMPLE).
+        spy.assert_called_once()
+        assert spy.call_args.kwargs["complexity"] == TaskComplexity.CRITICAL
+        assert spy.call_args.kwargs["n"] == 1
+        # The tier-resolved model is pinned on the runner.
+        assert mock_runner._model_affinity == "glm-4.7"
+        # Delegation still succeeds.
+        assert result["phase"] == Phase.VERIFY
+
+    @pytest.mark.asyncio
+    async def test_simple_spec_routes_at_simple_tier(
+        self,
+        sample_state: dict[str, Any],
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+        sample_spec: SubAgentSpec,
+    ) -> None:
+        """A SIMPLE sub-agent routes at the SIMPLE (CHEAP) tier."""
+        from src.graph.enums import TaskComplexity
+
+        # sample_spec defaults to model_tier=SIMPLE.
+        mock_registry.get.return_value = sample_spec
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value=self._success("agent", "id"))
+        mock_registry.spawn.return_value = mock_runner
+
+        spy = MagicMock(return_value=["deepseek-v4-flash"])
+        mock_gateway._model_router.route_diverse = spy
+
+        sample_state["sub_agents_spawned"] = [{"name": "agent", "id": "id"}]
+        await delegate_node(
+            sample_state,
+            gateway=mock_gateway,
+            tools=mock_tools,
+            sub_agent_registry=mock_registry,
+        )
+
+        assert spy.call_args.kwargs["complexity"] == TaskComplexity.SIMPLE
+        assert mock_runner._model_affinity == "deepseek-v4-flash"
+
+    @pytest.mark.asyncio
+    async def test_two_critical_siblings_get_distinct_providers(
+        self,
+        sample_state: dict[str, Any],
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+    ) -> None:
+        """Two CRITICAL siblings spread across providers (diversity preserved)."""
+        from src.graph.enums import TaskComplexity
+
+        spec = SubAgentSpec(
+            name="crit",
+            description="d",
+            goal="g",
+            parent_thread_id="t",
+            tool_scope="inherit_all",
+            model_tier=TaskComplexity.CRITICAL,
+        )
+        mock_registry.get.return_value = spec
+        r1, r2 = MagicMock(), MagicMock()
+        r1.run = AsyncMock(return_value=self._success("a", "1"))
+        r2.run = AsyncMock(return_value=self._success("b", "2"))
+        mock_registry.spawn.side_effect = [r1, r2]
+
+        # route_diverse(n=2, CRITICAL) → two distinct-provider MODERATE models.
+        mock_gateway._model_router.route_diverse = MagicMock(
+            return_value=["glm-4.7", "deepseek-v4-pro"]
+        )
+
+        sample_state["sub_agents_spawned"] = [
+            {"name": "a", "id": "1"},
+            {"name": "b", "id": "2"},
+        ]
+        await delegate_node(
+            sample_state,
+            gateway=mock_gateway,
+            tools=mock_tools,
+            sub_agent_registry=mock_registry,
+        )
+
+        assert r1._model_affinity == "glm-4.7"
+        assert r2._model_affinity == "deepseek-v4-pro"
+        assert r1._model_affinity != r2._model_affinity
+
+    @pytest.mark.asyncio
+    async def test_mixed_tiers_route_independently(
+        self,
+        sample_state: dict[str, Any],
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+    ) -> None:
+        """A SIMPLE and a CRITICAL sibling each route at their own tier."""
+        from src.graph.enums import TaskComplexity
+
+        simple_spec = SubAgentSpec(
+            name="s",
+            description="d",
+            goal="g",
+            parent_thread_id="t",
+            tool_scope="inherit_all",
+            model_tier=TaskComplexity.SIMPLE,
+        )
+        crit_spec = SubAgentSpec(
+            name="c",
+            description="d",
+            goal="g",
+            parent_thread_id="t",
+            tool_scope="inherit_all",
+            model_tier=TaskComplexity.CRITICAL,
+        )
+        mock_registry.get.side_effect = [simple_spec, crit_spec]
+        r1, r2 = MagicMock(), MagicMock()
+        r1.run = AsyncMock(return_value=self._success("s", "1"))
+        r2.run = AsyncMock(return_value=self._success("c", "2"))
+        mock_registry.spawn.side_effect = [r1, r2]
+
+        def fake_route_diverse(n: int, complexity: Any, **_: Any) -> list[str]:
+            base = "deepseek-v4-flash" if complexity == TaskComplexity.SIMPLE else "glm-4.7"
+            return [base] * n
+
+        mock_gateway._model_router.route_diverse = fake_route_diverse
+
+        sample_state["sub_agents_spawned"] = [
+            {"name": "s", "id": "1"},
+            {"name": "c", "id": "2"},
+        ]
+        await delegate_node(
+            sample_state,
+            gateway=mock_gateway,
+            tools=mock_tools,
+            sub_agent_registry=mock_registry,
+        )
+
+        # SIMPLE sibling → CHEAP model; CRITICAL sibling → MODERATE model.
+        assert r1._model_affinity == "deepseek-v4-flash"
+        assert r2._model_affinity == "glm-4.7"
+
+    @pytest.mark.asyncio
+    async def test_routing_failure_is_non_fatal(
+        self,
+        sample_state: dict[str, Any],
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+        sample_spec: SubAgentSpec,
+    ) -> None:
+        """A route_diverse exception leaves affinity unset but delegation succeeds."""
+        mock_registry.get.return_value = sample_spec
+        mock_runner = MagicMock()
+        mock_runner._model_affinity = ""  # seed the default the helper would skip
+        mock_runner.run = AsyncMock(return_value=self._success("agent", "id"))
+        mock_registry.spawn.return_value = mock_runner
+        mock_gateway._model_router.route_diverse = MagicMock(
+            side_effect=RuntimeError("router down")
+        )
+
+        sample_state["sub_agents_spawned"] = [{"name": "agent", "id": "id"}]
+        result = await delegate_node(
+            sample_state,
+            gateway=mock_gateway,
+            tools=mock_tools,
+            sub_agent_registry=mock_registry,
+        )
+
+        # Affinity stays at its default; delegation still succeeds.
+        assert mock_runner._model_affinity == ""
+        assert result["phase"] == Phase.VERIFY
+
+    @pytest.mark.asyncio
+    async def test_non_list_route_result_leaves_affinity_unset(
+        self,
+        sample_state: dict[str, Any],
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+        sample_spec: SubAgentSpec,
+    ) -> None:
+        """A non-list route_diverse result (e.g. a bare mock gateway) leaves affinity unset."""
+        mock_registry.get.return_value = sample_spec
+        mock_runner = MagicMock()
+        mock_runner._model_affinity = ""  # seed the default the helper would skip
+        mock_runner.run = AsyncMock(return_value=self._success("agent", "id"))
+        mock_registry.spawn.return_value = mock_runner
+        mock_gateway._model_router.route_diverse = MagicMock(return_value="not-a-list")
+
+        sample_state["sub_agents_spawned"] = [{"name": "agent", "id": "id"}]
+        result = await delegate_node(
+            sample_state,
+            gateway=mock_gateway,
+            tools=mock_tools,
+            sub_agent_registry=mock_registry,
+        )
+
+        assert mock_runner._model_affinity == ""
+        assert result["phase"] == Phase.VERIFY

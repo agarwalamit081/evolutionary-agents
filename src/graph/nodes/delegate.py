@@ -134,24 +134,17 @@ async def delegate_node(
 
     # Phase 2: Execute all runners in parallel
     if runners_with_params:
-        # Assign diverse models when running multiple sub-agents
-        if len(runners_with_params) > 1 and gateway is not None:
-            from src.graph.enums import TaskComplexity
-
-            models = gateway._model_router.route_diverse(
-                n=len(runners_with_params),
-                # Intentionally SIMPLE: this selects *diverse* models across
-                # sibling sub-agents (round-robin over the tier), not the
-                # complexity of any one sub-agent's actual task. Each runner
-                # independently routes its own work by complexity. (§5 C.1)
-                complexity=TaskComplexity.SIMPLE,
-            )
-            for i, (runner, *_) in enumerate(runners_with_params):
-                runner._model_affinity = models[i]
-            logger.debug(
-                f"Assigned diverse models to {len(runners_with_params)} sub-agents: "
-                f"{models}"
-            )
+        # Route each sub-agent to its declared ``spec.model_tier`` (Phase 4 F).
+        # Previously every sibling was forced to a SIMPLE-tier diverse set, so a
+        # CRITICAL sub-agent ran on a CHEAP model — its declared tier was
+        # ignored. Now each runner is pinned to the model its own tier resolves
+        # to, and siblings that SHARE a tier still spread across providers via
+        # route_diverse (load spread / rate-limit avoidance). Fail-safe: any
+        # error or non-list result leaves affinity at its default, so the
+        # subgraph routes each call dynamically instead — delegation never
+        # aborts. runner.py / _ModelOverrideProxy are unchanged; they honor the
+        # now-tier-correct affinity.
+        _assign_tier_models(runners_with_params, runner_specs, gateway)
 
         from src.agents.runner import run_parallel
 
@@ -230,6 +223,62 @@ def _build_delegation_goal(spec: Any, state: dict[str, Any]) -> str:
         f"Main goal context: {main_goal[:300]}\n\n"
         f"Your specialization: {spec.description}\n\n"
         f"Complete the subtask assigned to you."
+    )
+
+
+def _assign_tier_models(
+    runners: list[tuple[Any, str, str, float | None, int]],
+    specs: list[Any],
+    gateway: Any,
+) -> None:
+    """Pin each sub-agent runner to a model for its declared tier (Phase 4 F).
+
+    Runners are grouped by ``spec.model_tier``; within a tier ``route_diverse``
+    returns distinct providers (cross-provider load spread / rate-limit
+    avoidance), so two CRITICAL siblings don't both hammer one provider. A lone
+    sub-agent in a tier is still pinned to that tier's model — a CRITICAL
+    sub-agent no longer silently runs on a CHEAP model.
+
+    Best-effort + fail-safe: a missing router, an exception, or a non-list
+    result leaves ``runner._model_affinity`` at its default (""), so the
+    subgraph routes each call dynamically. Routing never aborts delegation.
+    """
+    router = getattr(gateway, "_model_router", None)
+    if router is None:
+        logger.debug("Sub-agent tier routing skipped: no model router on gateway")
+        return
+
+    from src.graph.enums import TaskComplexity
+
+    # Group runner indices by declared tier so route_diverse spreads siblings
+    # WITHIN a tier across providers, while distinct tiers each resolve to
+    # their own tier-appropriate model.
+    tier_groups: dict[TaskComplexity, list[int]] = {}
+    for idx, spec in enumerate(specs):
+        tier = getattr(spec, "model_tier", None) or TaskComplexity.SIMPLE
+        tier_groups.setdefault(tier, []).append(idx)
+
+    for tier, indices in tier_groups.items():
+        try:
+            models = router.route_diverse(n=len(indices), complexity=tier)
+        except Exception as e:  # routing must never abort delegation
+            logger.debug(f"Sub-agent route_diverse failed for tier {tier}: {e}")
+            continue
+        if not isinstance(models, list) or not models:
+            logger.debug(
+                f"Sub-agent route_diverse returned no models for tier {tier}"
+            )
+            continue
+        for slot, idx in enumerate(indices):
+            runner = runners[idx][0]
+            runner._model_affinity = models[slot % len(models)]
+
+    assigned: list[str] = []
+    for entry in runners:
+        value = getattr(entry[0], "_model_affinity", "")
+        assigned.append(value if isinstance(value, str) else "<unset>")
+    logger.debug(
+        f"Assigned tier-routed models to {len(runners)} sub-agent(s): {assigned}"
     )
 
 

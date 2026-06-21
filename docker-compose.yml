@@ -1,3 +1,38 @@
+# Shared config for all turing agent roles (api/worker/agent-cli). Same image,
+# same env (internal service hostnames + persisted workspace), same network.
+# Each role overrides only `command` (+ ports/replicas). Factored out so the
+# Phase-3 role-split stays DRY and the three services never drift on env.
+x-agent-common: &agent-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file: .env
+  environment:
+    # Internal service hostnames (override the localhost defaults in .env) +
+    # persisted workspace/logs so deliverables survive container restarts.
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/turing_agent
+    REDIS_URL: redis://redis:6379/0
+    SEARXNG_URL: http://searxng:8080
+    MEILISEARCH_URL: http://meilisearch:7700
+    MEILISEARCH_KEY: ${MEILISEARCH_KEY:-}
+    WORKSPACE_ROOT: /home/turing/.turing/workspace
+    RESULTS_ROOT: /home/turing/.turing/results
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    searxng:
+      condition: service_started
+    meilisearch:
+      condition: service_healthy
+  volumes:
+    - turing-workspace:/home/turing/.turing
+    - turing-logs:/home/turing/logs
+  networks:
+    - turing-net
+  restart: unless-stopped
+
 services:
   postgres:
     image: pgvector/pgvector:pg18
@@ -88,44 +123,76 @@ services:
       - turing-net
     restart: unless-stopped
 
-  agent:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: turing-agent
-    env_file: .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/turing_agent
-      REDIS_URL: redis://redis:6379/0
-      # Phase 1 search stack: point the in-container agent at the internal
-      # service hostnames (override the localhost defaults in .env).
-      SEARXNG_URL: http://searxng:8080
-      MEILISEARCH_URL: http://meilisearch:7700
-      MEILISEARCH_KEY: ${MEILISEARCH_KEY:-}
-      # Persist deliverables + workspace across container restarts. Both land on
-      # the already-mounted turing-workspace volume (/home/turing/.turing), so no
-      # new volume is needed. Without these overrides the relative defaults
-      # (".turing/workspace", "results") resolve under /app and are ephemeral —
-      # and the workspace volume above was effectively unused. results_root's
-      # parent (/home/turing/.turing) is the project_root every file tool runs
-      # from, so a written results/<file> survives restarts.
-      WORKSPACE_ROOT: /home/turing/.turing/workspace
-      RESULTS_ROOT: /home/turing/.turing/results
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      searxng:
-        condition: service_started
-      meilisearch:
-        condition: service_healthy
+  # ─── Phase 3 role-split ───────────────────────────────────────────────
+  # Stateless roles scale; stateful services (postgres/redis/searxng/meili)
+  # don't. `api` (FastAPI ingress) enqueues RunJobs to the turing:runs stream;
+  # `worker`(s) drain it via the consumer group and run the LangGraph + evolution
+  # loop. Both reuse the single Dockerfile image, differing only in `command`.
+  api:
+    <<: *agent-common
+    container_name: turing-api
+    # uvicorn factory (src/api/app.py:create_app). The Dockerfile CMD (CLI) is
+    # stale for the API role; run the server directly.
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "src.api.app:create_app",
+        "--factory",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+      ]
+    ports:
+      - "8000:8000"
+
+  worker:
+    <<: *agent-common
+    # NO container_name: deploy.replicas spawns N containers and a fixed name
+    # would collide. Each replica auto-derives a UNIQUE Redis consumer name
+    # (worker-{hostname}-{pid}, src/worker/__main__.py) so replicas don't share a
+    # pending-entries list — XAUTOCLAIM crash-recovery stays sound at scale.
+    command: ["python", "-m", "src.worker"]
+    deploy:
+      replicas: 2
+    # Graceful drain: SIGTERM sets the stop flag; an in-flight job finishes +
+    # XACKs before the loop exits. A run longer than this grace is hard-killed,
+    # which is SAFE — its checkpoint is durable, so the next worker claim
+    # resumes from it (thread_id = api-{run_id} is stable across redelivery).
+    stop_grace_period: 120s
     volumes:
+      # Same persisted workspace/logs as the api (+ agent-cli) so deliverables a
+      # worker writes survive restarts and are visible to the api (explicit list
+      # replaces the anchor's volumes, so both are re-declared here).
       - turing-workspace:/home/turing/.turing
       - turing-logs:/home/turing/logs
-    networks:
-      - turing-net
-    restart: unless-stopped
+      # STAGED (owner 2026-06-21): the worker KEEPS Docker-socket access so
+      # Phase-2c isolated code-exec (CODE_EXECUTOR_MODE=docker) still works — it
+      # spawns ephemeral turing-toolbox sandbox containers. The non-root turing
+      # user needs a supplementary group matching the host docker gid to read
+      # the socket: set DOCKER_GID=$(getent group docker | cut -d: -f3) and the
+      # group_add below grants it. Default code-exec is host-subprocess (no
+      # socket); docker mode is opt-in. The remote no-DinD runner (RunnerClient)
+      # that removes this mount is a deferred follow-up (P3b/c). SECURITY NOTE:
+      # a socket mount ≈ host root, so this is the tradeoff the staged split
+      # accepts — generated code runs inside turing-toolbox (network-off,
+      # read-only, mem-limited), not directly on the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-0}"
+
+  # The CLI-in-container path: one-off / smoke / manual runs via
+  # `docker compose --profile cli run --rm agent --goal "..."`. Profile-gated so
+  # `docker compose up -d` runs api+worker (the production path), not the
+  # interactive monolith. Shares image + env via the anchor.
+  agent:
+    <<: *agent-common
+    profiles: ["cli"]
+    container_name: turing-agent
+    # Inherits the Dockerfile CMD (python main.py --interactive); extra args
+    # pass through on `docker compose --profile cli run agent --goal "..."`.
 
   # Phase 2c — the code_executor sandbox image (NOT a running service). Gated
   # behind the `sandbox` profile so it never starts with the default stack; an

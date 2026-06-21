@@ -40,6 +40,18 @@ def _decode_fields(fields: dict[bytes | str, bytes | str]) -> dict[str, str]:
     return out
 
 
+def _norm_token(value: Any) -> str:
+    """Normalize a stored lease-lock value to ``str`` for token comparison.
+
+    Under ``decode_responses=False`` (this client's mode) ``GET`` returns bytes or
+    ``None``; a missing lock is treated as the empty string so it never equals a
+    real (non-empty) token.
+    """
+    if value is None:
+        return ""
+    return value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+
+
 def _entry_to_job(entry_id: Any, fields: dict[bytes | str, bytes | str]) -> StreamEntry:
     decoded = _decode_fields(fields)
     raw = decoded.get("job", "")
@@ -181,6 +193,96 @@ class RunsQueue:
         except Exception as exc:  # noqa: BLE001 — best-effort; redelivery still bounded by caller
             logger.warning(f"record_attempt INCR failed for {run_id}: {exc}")
             return 0
+
+    # ─── Per-run lease lock (Bug C — concurrent double-claim) ──────────────
+    #
+    # ``reclaim_min_idle_ms`` (XAUTOCLAIM) gates crash recovery: a pending entry
+    # idle past the threshold is reassigned to another consumer. But a normal run
+    # outlasts the threshold, so a peer worker steals a STILL-HEALTHY in-flight
+    # entry and processes the SAME goal a second time concurrently (observed live:
+    # one entry claimed by both workers; acked=1 by the first, acked=0 by the
+    # second). The lease lock is the hard guard: a worker acquires it SET-NX per
+    # run_id before doing any work; a second claimant finds it held and SKIPS
+    # (returns without acking — the rightful owner's XACK removes the entry
+    # group-wide, so a skipped entry does not pile up). Renewed every ttl/3 while
+    # the run is live, released on completion; a crash lets it expire so
+    # ``reclaim_stale`` can then soundly hand the run to a peer.
+    #
+    # No Lua: the lupa-backed EVAL path is unavailable against fakeredis (which
+    # the hermetic tests use), so the compare-and-set on release/renew is a
+    # WATCH/MULTI transaction instead — fakeredis reuses the real ``redis.asyncio``
+    # Pipeline, so the optimistic-lock semantics are faithfully exercised.
+
+    def lock_key(self, run_id: str) -> str:
+        """The per-run lease key, scoped to this stream so distinct streams (and
+        the test stream) never collide."""
+        return f"{self._stream}:lock:{run_id}"
+
+    async def try_lock(self, run_id: str, token: str, ttl_s: int) -> bool:
+        """Acquire the per-run lease atomically (``SET … NX EX``). Returns True
+        iff this caller won the race.
+
+        A single ``SET … NX EX`` is atomic on its own — no WATCH/Lua needed. The
+        ``token`` is a unique-per-attempt secret the holder compares against on
+        release/renew so a stale holder (whose TTL expired) cannot clobber a fresh
+        owner's lock. ``ttl_s <= 0`` disables the lease (legacy single-worker
+        behavior) — never do that in a multi-worker pool.
+        """
+        if ttl_s <= 0:
+            return True  # lease disabled — behave as before the fix
+        ok = await self._redis.set(self.lock_key(run_id), token, ex=int(ttl_s), nx=True)
+        return bool(ok)
+
+    async def renew_lock(self, run_id: str, token: str, ttl_s: int) -> bool:
+        """Extend the lease ONLY while this holder still owns it (compare-and-expire).
+
+        Returns False if the lock was lost (TTL expired + peer reacquired, or
+        already released): the caller logs a WARNING — it does NOT abort the
+        in-flight run, but another worker may then take it over once it ends. The
+        TTL is the ultimate safety net, so a renewal hiccup never corrupts state.
+        """
+        if ttl_s <= 0:
+            return True  # lease disabled
+        from redis.exceptions import WatchError
+
+        key = self.lock_key(run_id)
+        try:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                await pipe.watch(key)
+                if _norm_token(await pipe.get(key)) != token:
+                    await pipe.unwatch()
+                    return False
+                pipe.multi()
+                pipe.expire(key, int(ttl_s))
+                await pipe.execute()
+                return True
+        except WatchError:
+            return False
+
+    async def release_lock(self, run_id: str, token: str) -> bool:
+        """Release the lease ONLY while this holder still owns it (compare-and-del).
+
+        A stale holder (TTL expired, peer reacquired under a different token)
+        returns False and MUST NOT delete the live owner's lock — so a long-since
+        finished run's lingering release can never evict a peer that legitimately
+        took over. Returns True iff this caller's token matched and the key was
+        deleted.
+        """
+        from redis.exceptions import WatchError
+
+        key = self.lock_key(run_id)
+        try:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                await pipe.watch(key)
+                if _norm_token(await pipe.get(key)) != token:
+                    await pipe.unwatch()
+                    return False
+                pipe.multi()
+                pipe.delete(key)
+                await pipe.execute()
+                return True
+        except WatchError:
+            return False
 
 
 def _flatten(raw: Any) -> list[StreamEntry]:

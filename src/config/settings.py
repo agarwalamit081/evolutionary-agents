@@ -1170,6 +1170,18 @@ class WorkerSettings(BaseSettings):
     # this many times before dead-lettering. Env: WORKER_DEAD_LETTER_MAX_ATTEMPTS.
     dead_letter_max_attempts: int = 3  # Env: WORKER_DEAD_LETTER_MAX_ATTEMPTS
 
+    # TTL (s) on the per-run lease lock (Bug C — double-claim).
+    # ``reclaim_min_idle_ms`` (XAUTOCLAIM) is shorter than a normal run, so a peer
+    # worker's reclaim would otherwise steal a still-healthy in-flight entry and
+    # process the SAME goal a second time concurrently. The lease lock is SET-NX
+    # per run_id before any work; the holder renews it every ttl/3 while the run
+    # is live and releases it on completion. A crash lets it expire, after which
+    # ``reclaim_stale`` soundly hands the run to a peer (no double-processing).
+    # Must exceed the longest expected run; renewal keeps it alive. A value of 0
+    # disables the lease (legacy behavior) — do NOT do that in a multi-worker pool.
+    # Env: WORKER_LOCK_TTL_S.
+    lock_ttl_s: int = 120  # Env: WORKER_LOCK_TTL_S
+
     model_config = SettingsConfigDict(
         # env_prefix makes the documented WORKER_* vars (see .env.example) map to
         # these fields: WORKER_CONSUMER_NAME → consumer_name, etc. Without it, the

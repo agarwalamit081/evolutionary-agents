@@ -159,3 +159,70 @@ class TestRecordAttempt:
         q = RunsQueue(fake_redis, worker_settings)
         await q.record_attempt("r0")
         assert await q.record_attempt("r0") == 2  # survived — no self-delete
+
+
+class TestRunsQueueLeaseLock:
+    """Bug C guard: the per-run lease lock primitives themselves (SET-NX acquire,
+    compare-and-del release, compare-and-expire renew). The consumer behavior
+    (skip a run another worker holds) is in test_runner.py::TestRunConsumerLeaseLock.
+    All hermetic against fakeredis — the WATCH/MULTI compare-and-set runs against
+    the real redis.asyncio Pipeline class fakeredis reuses."""
+
+    async def test_try_lock_is_exclusive(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """Only the first ``SET … NX EX`` wins; a second caller (another worker)
+        is refused — the atomic guard against concurrent double-processing."""
+        q = RunsQueue(fake_redis, worker_settings)
+        assert await q.try_lock("run-1", "token-a", 60) is True
+        assert await q.try_lock("run-1", "token-b", 60) is False
+
+    async def test_release_requires_owner_token(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """A release with the WRONG token must NOT free the lock (a stale holder
+        whose TTL expired cannot evict a fresh owner); only the owner's token
+        frees it for the next claimant."""
+        q = RunsQueue(fake_redis, worker_settings)
+        await q.try_lock("run-1", "owner", 60)
+        assert await q.release_lock("run-1", "wrong") is False  # no-op
+        assert await q.try_lock("run-1", "other", 60) is False  # still held
+        assert await q.release_lock("run-1", "owner") is True  # owner frees it
+        assert await q.try_lock("run-1", "other", 60) is True  # now claimable
+
+    async def test_release_missing_lock_is_false(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """Releasing a lock nobody holds is False (GET → None ≠ token)."""
+        q = RunsQueue(fake_redis, worker_settings)
+        assert await q.release_lock("never-held", "any-token") is False
+
+    async def test_renew_extends_ttl_for_owner_only(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """Renew returns True (extends TTL) for the owner, False for a non-owner."""
+        q = RunsQueue(fake_redis, worker_settings)
+        await q.try_lock("run-1", "owner", 2)
+        assert await q.renew_lock("run-1", "owner", 60) is True
+        assert await q.renew_lock("run-1", "wrong", 60) is False
+
+    async def test_lock_key_is_stream_scoped(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """Distinct run_ids (and the per-stream prefix) never collide — one run's
+        lease does not block another."""
+        q = RunsQueue(fake_redis, worker_settings)
+        assert q.lock_key("a") == f"{worker_settings.runs_stream}:lock:a"
+        assert await q.try_lock("run-a", "ta", 60) is True
+        assert await q.try_lock("run-b", "tb", 60) is True
+
+    async def test_ttl_zero_disables_lease(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """``lock_ttl_s <= 0`` disables the lease (legacy single-worker mode):
+        try_lock/renew_lock short-circuit True and are NOT exclusive."""
+        s = worker_settings.model_copy(update={"lock_ttl_s": 0})
+        q = RunsQueue(fake_redis, s)
+        assert await q.try_lock("run-1", "a", 0) is True
+        assert await q.try_lock("run-1", "b", 0) is True  # not exclusive (disabled)
+        assert await q.renew_lock("run-1", "a", 0) is True

@@ -252,3 +252,135 @@ class TestRunConsumerDeadLetter:
         assert rec2.status is JobStatus.FAILED
         assert "dead-lettered after 2 attempts" in (rec2.error or "")
 
+
+class TestRunConsumerLeaseLock:
+    """Bug C — concurrent double-claim. ``reclaim_min_idle_ms`` (XAUTOCLAIM) is
+    shorter than a normal run, so a peer worker steals a still-healthy in-flight
+    entry and runs the SAME goal a second time. The per-run lease makes the second
+    claimant SKIP (return False without acking, without calling the executor). This
+    is the regression the lock exists for."""
+
+    async def test_second_consumer_skips_in_flight_run(
+        self, fake_redis, worker_settings
+    ) -> None:
+        settings_a = worker_settings.model_copy(update={"consumer_name": "wa"})
+        settings_b = worker_settings.model_copy(update={"consumer_name": "wb"})
+        queue_a = RunsQueue(fake_redis, settings_a)
+        queue_b = RunsQueue(fake_redis, settings_b)
+        store = RunStatusStore(fake_redis, worker_settings)
+        job = RunJob(run_id="contended", goal="g")
+
+        started = asyncio.Event()
+        release_a = asyncio.Event()
+        a_calls = 0
+
+        async def slow_executor_a(_j: RunJob) -> dict[str, Any]:
+            nonlocal a_calls
+            a_calls += 1
+            started.set()
+            await release_a.wait()  # hold the lease — run outlasts reclaim_min_idle_ms
+            return _ok_result()
+
+        b_calls = 0
+
+        async def executor_b(_j: RunJob) -> dict[str, Any]:
+            nonlocal b_calls
+            b_calls += 1
+            return _ok_result()
+
+        consumer_a = RunConsumer(queue_a, store, slow_executor_a, settings_a)
+        consumer_b = RunConsumer(queue_b, store, executor_b, settings_b)
+
+        await queue_a.ensure_group()
+        entry_id = await queue_a.enqueue(job)
+        await queue_a.read_new()  # claim into the group PEL so A's ack resolves
+
+        # Worker A claims → acquires the lease → runs (parked in slow_executor).
+        task_a = asyncio.create_task(consumer_a._process(entry_id, job))
+        await started.wait()  # A is mid-run, holding the lease
+
+        # Worker B handed the same entry while A still runs: B must NOT acquire the
+        # lease → it skips (False, no executor call, no ack). The bug, fixed.
+        assert await consumer_b._process(entry_id, job) is False
+        assert b_calls == 0  # B never ran the executor
+
+        # Let A finish; it completes + acks normally.
+        release_a.set()
+        assert await task_a is True
+        assert a_calls == 1  # A ran exactly once
+
+        # A released the lease on completion → a fresh claim can now acquire it.
+        assert (
+            await queue_b.try_lock(job.run_id, "fresh", worker_settings.lock_ttl_s)
+            is True
+        )
+
+    async def test_lease_released_on_executor_exception(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """The lease MUST be released even when the executor raises — otherwise a
+        legitimate redelivery (reclaim_stale) would skip forever behind a lingering
+        lock from the failed attempt."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        job = RunJob(run_id="fails", goal="g")
+
+        async def boom(_j: RunJob) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+        consumer = RunConsumer(queue, store, boom, worker_settings)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()  # claim into the PEL so pending_count reflects it
+
+        assert await consumer._process(entry_id, job) is False  # NOT acked → redelivered
+
+        # Lease released in finally → a new claim can acquire it immediately.
+        assert await queue.try_lock(job.run_id, "x", worker_settings.lock_ttl_s) is True
+
+    async def test_no_skip_when_lease_disabled(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """With ``lock_ttl_s=0`` the lease is disabled: a second consumer does NOT
+        skip — it proceeds (legacy double-processing), exactly the bug the lease
+        (when enabled) prevents. Confirms the skip is solely the lease's doing, not
+        incidental state, and the disabled happy path is unaffected."""
+        s = worker_settings.model_copy(update={"lock_ttl_s": 0})
+        sa = s.model_copy(update={"consumer_name": "wa"})
+        sb = s.model_copy(update={"consumer_name": "wb"})
+        queue_a = RunsQueue(fake_redis, sa)
+        queue_b = RunsQueue(fake_redis, sb)
+        store = RunStatusStore(fake_redis, s)
+        job = RunJob(run_id="no-lock", goal="g")
+
+        a_calls = 0
+
+        async def exec_a(_j: RunJob) -> dict[str, Any]:
+            nonlocal a_calls
+            a_calls += 1
+            return _ok_result()
+
+        b_calls = 0
+
+        async def exec_b(_j: RunJob) -> dict[str, Any]:
+            nonlocal b_calls
+            b_calls += 1
+            return _ok_result()
+
+        consumer_a = RunConsumer(queue_a, store, exec_a, sa)
+        consumer_b = RunConsumer(queue_b, store, exec_b, sb)
+
+        await queue_a.ensure_group()
+        entry_id = await queue_a.enqueue(job)
+        await queue_a.read_new()  # claim into the group PEL
+
+        # Lease disabled → the guard is OFF: BOTH consumers run their executors
+        # (the legacy concurrent double-processing the lease exists to prevent).
+        # The decisive assertion is executor call counts, not the return value: the
+        # group-wide XACK means only the first acker returns True (acked=1) and the
+        # second returns False (acked=0) regardless of the lease.
+        await consumer_a._process(entry_id, job)
+        await consumer_b._process(entry_id, job)
+        assert a_calls == 1
+        assert b_calls == 1  # B ran too — the bug, present only when the lease is off
+

@@ -412,7 +412,7 @@ class NativeStructuredSettings(BaseSettings):
 class DatabaseSettings(BaseSettings):
     """PostgreSQL database connection configuration."""
 
-    database_url: str = "postgresql+asyncpg://amiagarw@localhost:5432/turing_agent"
+    database_url: str = "postgresql+asyncpg://postgres:changeme@localhost:5433/turing_agent"
     database_pool_size: int = 10
     database_max_overflow: int = 20
     database_pool_timeout: int = 30
@@ -449,7 +449,7 @@ class DatabaseSettings(BaseSettings):
 class RedisSettings(BaseSettings):
     """Redis cache and session storage configuration."""
 
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = "redis://localhost:6380/0"
     redis_ttl_hot_memory: int = 86400  # 24 hours
     redis_ttl_session: int = 3600  # 1 hour
     redis_ttl_rate_limit: int = 60  # 1 minute
@@ -581,7 +581,7 @@ class BudgetSettings(BaseSettings):
 class EvolutionSettings(BaseSettings):
     """Self-evolution system configuration."""
 
-    evolution_enabled: bool = False
+    evolution_enabled: bool = True  # aligns with .env.example (Env: EVOLUTION_ENABLED)
     evolution_interval: int = 10  # Every N tasks
     evolution_max_mutations: int = 5
     evolution_sandbox_timeout: int = 30  # Seconds
@@ -663,7 +663,7 @@ class EvolutionSettings(BaseSettings):
 class AgentSettings(BaseSettings):
     """Core agent execution limits and safety controls."""
 
-    max_iterations: int = 25
+    max_iterations: int = 60
     # Run caps — single source of truth for tool/sub-agent creation limits.
     # Enforcement sites (tool generator, agent_spawn, structure_analysis) read
     # these; the module-level MAX_TOOLS_PER_RUN / MAX_SUB_AGENTS_PER_RUN
@@ -671,8 +671,8 @@ class AgentSettings(BaseSettings):
     # (max_sub_agents previously lived here but was never read — the live cap
     # was the MAX_SUB_AGENTS_PER_RUN constant — so it is folded into this
     # overridable field. Env: MAX_TOOLS_PER_RUN, MAX_SUB_AGENTS_PER_RUN.)
-    max_tools_per_run: int = 3
-    max_sub_agents_per_run: int = 3
+    max_tools_per_run: int = 12
+    max_sub_agents_per_run: int = 5
     # Tool-handler code generation: route to a code-strong model instead of the
     # CHEAP tier (complexity=SIMPLE → Haiku), which truncates non-trivial
     # handlers so they fail the AST gate and never persist (battery-02 N5's
@@ -912,8 +912,8 @@ class EvalSettings(BaseSettings):
     verdict. The LLM-judge and the persistent eval store have their own toggles.
     """
 
-    eval_enabled: bool = False  # Env: EVAL_ENABLED
-    eval_enforce: bool = False  # Env: EVAL_ENFORCE — opt-in completion gating
+    eval_enabled: bool = True  # aligns with .env.example (Env: EVAL_ENABLED)
+    eval_enforce: bool = True  # aligns with .env.example (Env: EVAL_ENFORCE — completion gating)
     eval_llm_judge_enabled: bool = True  # Env: EVAL_LLM_JUDGE_ENABLED
     eval_canary_min_score: float = 0.8  # Env: EVAL_CANARY_MIN_SCORE
     eval_store_enabled: bool = True  # Env: EVAL_STORE_ENABLED

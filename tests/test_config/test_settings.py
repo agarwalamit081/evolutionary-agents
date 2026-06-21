@@ -67,10 +67,10 @@ class TestRedisSettings:
     """Tests for RedisSettings defaults."""
 
     def test_redis_url_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Default redis_url is redis://localhost:6379/0."""
+        """Default redis_url is redis://localhost:6380/0 (compose host port, aligns with .env.example)."""
         monkeypatch.delenv("REDIS_URL", raising=False)
         redis_settings = RedisSettings(_env_file=None)
-        assert redis_settings.redis_url == "redis://localhost:6379/0"
+        assert redis_settings.redis_url == "redis://localhost:6380/0"
 
     def test_cache_ttl_seconds_exists(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify cache_ttl_seconds field exists on RedisSettings."""
@@ -111,22 +111,22 @@ class TestBudgetSettings:
 class TestAgentSettings:
     """AgentSettings run-cap defaults and env overrides (§7)."""
 
-    def test_max_iterations_default_is_25(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The canonical iteration cap default is 25 (CLI/factory/routers align)."""
+    def test_max_iterations_default_is_60(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The canonical iteration cap default is 60 (aligns with .env.example)."""
         from src.config.settings import AgentSettings
 
         monkeypatch.delenv("MAX_ITERATIONS", raising=False)
-        assert AgentSettings(_env_file=None).max_iterations == 25
+        assert AgentSettings(_env_file=None).max_iterations == 60
 
     def test_run_caps_have_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Tool and sub-agent run caps default to 3 and are overridable fields."""
+        """Tool and sub-agent run caps default to 12/5 and are overridable fields (align with .env.example)."""
         from src.config.settings import AgentSettings
 
         monkeypatch.delenv("MAX_TOOLS_PER_RUN", raising=False)
         monkeypatch.delenv("MAX_SUB_AGENTS_PER_RUN", raising=False)
         agent = AgentSettings(_env_file=None)
-        assert agent.max_tools_per_run == 3
-        assert agent.max_sub_agents_per_run == 3
+        assert agent.max_tools_per_run == 12
+        assert agent.max_sub_agents_per_run == 5
 
     def test_max_iterations_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The iteration cap is env-overridable. Settings read case-insensitively, so a

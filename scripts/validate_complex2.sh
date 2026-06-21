@@ -188,7 +188,7 @@ TOTAL_SKIPPED=0
 for c in $(docker compose -f "${COMPOSE_DIR}/docker-compose.yml" ps -q worker); do
   H="$(docker inspect --format '{{.Config.Hostname}}' "${c}")"
   CL="$(docker logs "${c}" 2>&1 | grep -c "Worker claimed run ${RUN_ID}" || true)"
-  SK="$(docker logs "${c}" 2>&1 | grep -c "already in-flight.*${RUN_ID}" || true)"
+  SK="$(docker logs "${c}" 2>&1 | grep -cE "Run ${RUN_ID} .*already in-flight" || true)"
   CK="$(docker logs "${c}" 2>&1 | grep -c "Run ${RUN_ID} completed (acked=1)" || true)"
   TOTAL_CLAIMED=$(( TOTAL_CLAIMED + CL ))
   TOTAL_SKIPPED=$(( TOTAL_SKIPPED + SK ))

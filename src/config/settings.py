@@ -586,6 +586,50 @@ class ToolSandboxSettings(BaseSettings):
     )
 
 
+# ─── Runner Settings ───────────────────────────────────────────────
+
+
+class RunnerSettings(BaseSettings):
+    """Remote no-DinD code-execution runner (Phase 3b/c — opt-in via mode).
+
+    The runner is a dedicated container that is the agent's SINGLE sink for
+    executing generated code — both the ``code_executor`` builtin (unvalidated
+    one-off LLM scripts) and the evolution sandbox (already-SafetyPipeline-
+    validated handler code). It runs a tiny HTTP server that executes submitted
+    Python as a constrained subprocess IN ITS OWN container: no Docker socket
+    (so no Docker-in-Docker), no DATABASE/REDIS/search credentials, and (in
+    compose) no internet egress (it sits on an ``internal: true`` network).
+    The disposable container itself is the isolation boundary — per-invocation
+    gVisor/Kata hardening is a Phase-5 doc item, not this phase.
+
+    The worker reads ``runner_url`` to reach it; when the configured sandbox
+    mode (``EVOLUTION_SANDBOX_MODE`` / ``CODE_EXECUTOR_MODE``) is ``runner``,
+    ``SandboxExecutor`` and ``code_executor`` POST code here instead of calling
+    ``docker.from_env()``, so the worker needs NO Docker access at all and the
+    worker compose service drops its ``/var/run/docker.sock`` mount.
+
+    See :mod:`src.sandbox.runner_client` (this side) and
+    :mod:`src.sandbox.runner_server` (the runner container).
+    """
+
+    # In-compose default; the runner service listens on 8090 internally. Host /
+    # CLI runs that opt into runner mode set RUNNER_URL explicitly.
+    runner_url: str = "http://runner:8090"
+    # Bound on the TCP handshake only — a down runner fails fast so callers
+    # fall back without paying the full request timeout.
+    runner_connect_timeout_s: float = 5.0
+    # Hard cap on a single requested execution timeout so a runaway caller
+    # can't ask the runner to hold a subprocess open for an hour.
+    runner_max_timeout_s: int = 300
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 # ─── Budget Settings ────────────────────────────────────────────────
 
 
@@ -1154,6 +1198,7 @@ class Settings(BaseSettings):
     eval: EvalSettings = EvalSettings()  # type: ignore[assignment]
     search: SearchSettings = SearchSettings()  # type: ignore[assignment]
     worker: WorkerSettings = WorkerSettings()  # type: ignore[assignment]
+    runner: RunnerSettings = RunnerSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

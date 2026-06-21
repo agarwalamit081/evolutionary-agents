@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
@@ -12,6 +13,26 @@ from src.db.models import ColdMemory as ColdMemoryModel
 
 if TYPE_CHECKING:
     from src.memory.embeddings import EmbeddingGenerator
+
+
+def _tags_any_predicate(tags: Sequence[str]) -> sa.ColumnElement[bool]:
+    """Build a JSONB "any-of" predicate over ``ColdMemory.context_tags``.
+
+    True when the episode's ``context_tags`` array contains any of ``tags``.
+    Implemented with the JSONB existence operator ``?`` OR'd per tag rather
+    than the ``?|`` (any-of-array) operator: SQLAlchemy binds a Python list as
+    jsonb and Postgres only defines ``jsonb ?| text[]`` — there is no
+    ``jsonb ?| jsonb`` operator, so ``context_tags.bool_op("?|")(list)`` raises
+    ``operator does not exist: jsonb ?| jsonb`` at execution time (asyncpg).
+    Each ``?`` binds a single text param, sidestepping the mismatch. Empty
+    ``tags`` yields ``false`` (matches no rows), matching the prior empty-array
+    ``?|`` semantics. Parameterized ORM — no interpolated SQL.
+    """
+    if not tags:
+        return sa.false()
+    return sa.or_(
+        *(ColdMemoryModel.context_tags.bool_op("?")(tag) for tag in tags)
+    )
 
 
 class ColdMemory:
@@ -184,7 +205,7 @@ class ColdMemory:
         """
         query = (
             sa.select(ColdMemoryModel)
-            .where(ColdMemoryModel.context_tags.bool_op("?|")(tags))
+            .where(_tags_any_predicate(tags))
             .order_by(ColdMemoryModel.importance.desc())
             .limit(limit)
         )

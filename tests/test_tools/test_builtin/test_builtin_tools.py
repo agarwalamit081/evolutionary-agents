@@ -21,7 +21,13 @@ from src.tools.builtin.http_request import http_request
 from src.tools.builtin.list_directory import list_directory
 from src.tools.builtin.self_inspect import self_inspect
 from src.tools.builtin.terminal_command import terminal_command
-from src.tools.builtin.web_scraper import web_scraper
+from src.tools.builtin.web_scraper import (
+    ExtractedPage,
+    chunk_text,
+    compute_content_hash,
+    extract_page,
+    web_scraper,
+)
 from src.tools.builtin.web_search import web_search
 
 
@@ -679,6 +685,126 @@ class TestWebScraper:
         ):
             result = await web_scraper("https://example.com")
         assert "Title" in result and "body text" in result
+
+
+class TestWebScraperExtraction:
+    """Tests for the AI-format extraction layer (Phase 1): hash, chunking, metadata."""
+
+    _HTML = (
+        "<!DOCTYPE html><html><head>"
+        "<title>Example Article Title</title>"
+        '<meta name="description" content="A short description of the page.">'
+        '<meta name="author" content="Jane Doe">'
+        "</head><body><article><h1>Example Article Title</h1>"
+        "<p>This is the main body content of the article with enough words for "
+        "trafilatura to treat it as the main readable text on the page being "
+        "scraped for the purpose of testing the extraction pipeline end to end.</p>"
+        "<p>Another paragraph adds more content so that the extraction returns a "
+        "non-trivial body for the markdown and text fields used by downstream "
+        "chunking and corpus indexing of the agent's gathered web research.</p>"
+        "<p>A third paragraph of filler content further increases the signal so "
+        "the main-content extractor reliably fires rather than skipping the page "
+        "as too sparse to yield any usable article text at all.</p>"
+        "</article></body></html>"
+    )
+
+    def test_compute_content_hash_stable(self) -> None:
+        """Same normalized content → same hash; whitespace-only diffs collapse."""
+        a = compute_content_hash("hello   world\t\nfoo")
+        b = compute_content_hash("hello world foo")
+        assert a == b
+        assert len(a) == 32
+        assert all(c in "0123456789abcdef" for c in a)
+        assert compute_content_hash("different content") != a
+
+    def test_chunk_text_empty(self) -> None:
+        """Empty/blank input yields no chunks."""
+        assert chunk_text("") == []
+        assert chunk_text("   \n\t  ") == []
+
+    def test_chunk_text_char_mode_small_is_single(self) -> None:
+        """Text shorter than chunk_size returns exactly one chunk."""
+        out = chunk_text("short text", chunk_size=1200, chunk_overlap=150, mode="char")
+        assert out == ["short text"]
+
+    def test_chunk_text_char_mode_overlap(self) -> None:
+        """Char mode with overlap produces >=2 overlapping chunks of bounded size."""
+        text = "x" * 3000
+        out = chunk_text(text, chunk_size=1000, chunk_overlap=200, mode="char")
+        assert len(out) >= 2
+        # Every chunk within the size cap.
+        assert all(len(c) <= 1000 for c in out)
+        # Overlap: adjacent chunks share the `overlap`-sized tail/head.
+        assert out[0][-200:] == out[1][:200]
+        # Full coverage of the source (last chunk reaches the end).
+        assert out[-1].endswith("x")
+
+    def test_chunk_text_token_mode_returns_chunks(self) -> None:
+        """Token mode produces bounded chunks (or degrades to char mode offline)."""
+        text = "word " * 4000
+        out = chunk_text(text, chunk_size=500, chunk_overlap=50, mode="token")
+        assert out  # non-empty
+        # Either path is acceptable; token mode must still bound piece size in chars.
+        assert all(len(c) <= 3000 for c in out)
+
+    def test_chunk_text_overlap_clamped_to_size(self) -> None:
+        """An overlap >= chunk_size is clamped so step stays >= 1 (no infinite loop)."""
+        out = chunk_text("a" * 50, chunk_size=10, chunk_overlap=100, mode="char")
+        assert out  # terminates and returns something
+        assert all(len(c) <= 10 for c in out)
+
+    def test_extract_page_metadata(self) -> None:
+        """extract_page pulls title/description + computes a hash from raw HTML."""
+        with patch(
+            "src.tools.builtin.web_scraper._fetch_html", return_value=self._HTML
+        ):
+            page = extract_page("https://example.com/article", timeout=10.0, max_bytes=2_000_000)
+        assert page.url == "https://example.com/article"
+        assert "Example Article Title" in page.title
+        assert page.content_hash and len(page.content_hash) == 32
+        # Body extracted (markdown or plain text) and hash derived from it.
+        assert (page.markdown or page.text)
+        assert page.content_hash == compute_content_hash(page.markdown or page.text)
+        # Metadata surfaces the title (best-effort; other fields optional).
+        assert page.metadata.get("title") == page.title
+
+    def test_extract_page_fetch_error_surfaces(self) -> None:
+        """A fetch failure raises _FetchError (extract_page does not swallow it)."""
+        from src.tools.builtin.web_scraper import _FetchError
+
+        with patch(
+            "src.tools.builtin.web_scraper._fetch_html",
+            side_effect=_FetchError("ERROR: Only http/https URLs allowed"),
+        ):
+            with pytest.raises(_FetchError):
+                extract_page("file:///etc/passwd", timeout=10.0, max_bytes=2_000_000)
+
+    @pytest.mark.asyncio
+    async def test_chunk_handler_returns_blocks(self) -> None:
+        """web_scraper(chunk=True) returns joined [Chunk N/M] blocks."""
+        from types import SimpleNamespace
+
+        long_page = ExtractedPage(
+            url="https://example.com/long",
+            title="Long",
+            description="",
+            markdown="w" * 3000,
+            text="",
+            content_hash="0" * 32,
+            metadata={},
+        )
+        with (
+            patch("src.tools.builtin.web_scraper.extract_page", return_value=long_page),
+            patch(
+                "src.tools.builtin.web_scraper._search_settings",
+                return_value=SimpleNamespace(chunk_size=1000, chunk_overlap=0),
+            ),
+        ):
+            result = await web_scraper("https://example.com/long", chunk=True)
+        # 3000 chars / step 1000 → 3 chunks.
+        assert result.startswith("[Chunk 1/3]")
+        assert "[Chunk 3/3]" in result
+        assert result.count("[Chunk ") == 3
 
 
 class TestDocumentParser:

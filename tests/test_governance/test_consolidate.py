@@ -226,8 +226,15 @@ class _FakePerfPersister:
         self._names = names
         self._raise = raise_on_scan
         self.retire = AsyncMock(return_value=len(names))
+        self.calls: list[tuple[Any, ...]] = []
 
-    async def underperforming_tools(self, _min_runs: int, _floor: float) -> list[str]:
+    async def underperforming_tools(
+        self,
+        min_runs: int,
+        floor: float,
+        empty_output_floor: float | None = None,
+    ) -> list[str]:
+        self.calls.append((min_runs, floor, empty_output_floor))
         if self._raise:
             raise RuntimeError("scan failed")
         return list(self._names)
@@ -266,3 +273,23 @@ class TestConsolidatePerformance:
         report = await consolidate_performance(persister=fp)
         assert report.performance_retired == []
         fp.retire.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_output_floor_threaded_to_scan(self) -> None:
+        """Phase 4 G: empty_output_floor reaches the persister scan."""
+        fp = _FakePerfPersister(["blank_tool"])
+        await consolidate_performance(
+            min_runs=20,
+            success_floor=0.5,
+            empty_output_floor=0.8,
+            dry_run=True,
+            persister=fp,
+        )
+        assert fp.calls == [(20, 0.5, 0.8)]
+
+    @pytest.mark.asyncio
+    async def test_empty_output_floor_default_is_0_8(self) -> None:
+        """The CLI/default path retires empty-output tools (floor defaults to 0.8)."""
+        fp = _FakePerfPersister([])
+        await consolidate_performance(persister=fp)
+        assert fp.calls and fp.calls[0][2] == 0.8

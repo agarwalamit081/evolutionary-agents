@@ -36,11 +36,29 @@ class RateLimiterRegistry:
         self._rpm_limiters: dict[str, aiolimiter.AsyncLimiter] = {}
         self._tpm_limiters: dict[str, aiolimiter.AsyncLimiter] = {}
         self._settings = settings
+        # Effective per-provider table: the curated PROVIDER_LIMITS overlaid
+        # with any env-tunable overrides (Phase 4 G). Computed once; settings are
+        # fixed for the registry's lifetime.
+        self._limits: dict[str, tuple[int, int]] = self._build_limits()
+
+    def _build_limits(self) -> dict[str, tuple[int, int]]:
+        """Merge the curated PROVIDER_LIMITS with env overrides."""
+        limits: dict[str, tuple[int, int]] = dict(PROVIDER_LIMITS)
+        overrides = self._settings.rate_limiter.rate_limit_provider_overrides or {}
+        for provider, pair in overrides.items():
+            try:
+                rpm, tpm = pair
+                limits[provider] = (int(rpm), int(tpm))
+            except (TypeError, ValueError) as e:
+                logger.debug(
+                    f"Ignoring malformed rate-limit override for {provider}: {e}"
+                )
+        return limits
 
     def _get_or_create(self, provider: str) -> tuple[aiolimiter.AsyncLimiter, aiolimiter.AsyncLimiter]:
         """Get or create RPM and TPM limiters for a provider."""
         if provider not in self._rpm_limiters:
-            rpm, tpm = PROVIDER_LIMITS.get(
+            rpm, tpm = self._limits.get(
                 provider,
                 (
                     self._settings.rate_limiter.rate_limit_default_rpm,
@@ -66,7 +84,7 @@ class RateLimiterRegistry:
 
     def get_limits(self, provider: str) -> tuple[int, int]:
         """Return (RPM, TPM) for a provider."""
-        rpm, tpm = PROVIDER_LIMITS.get(
+        rpm, tpm = self._limits.get(
             provider,
             (
                 self._settings.rate_limiter.rate_limit_default_rpm,

@@ -193,6 +193,7 @@ class TestAgentSettings:
             "CAPABILITY_REDUNDANCY_THRESHOLD",
             "RETIRE_MIN_RUNS",
             "RETIRE_SUCCESS_FLOOR",
+            "RETIRE_EMPTY_OUTPUT_FLOOR",
             "RETIRE_RECENCY_DAYS",
         ):
             monkeypatch.delenv(var, raising=False)
@@ -201,7 +202,8 @@ class TestAgentSettings:
         assert agent.max_active_sub_agents == 60
         assert agent.capability_redundancy_threshold == 0.92
         assert agent.retire_min_runs == 20
-        assert agent.retire_success_floor == 0.25
+        assert agent.retire_success_floor == 0.5
+        assert agent.retire_empty_output_floor == 0.8
         assert agent.retire_recency_days == 30
 
     def test_cumulative_caps_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:

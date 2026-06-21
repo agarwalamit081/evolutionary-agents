@@ -187,7 +187,8 @@ async def consolidate_sub_agents(
 
 async def consolidate_performance(
     min_runs: int = 20,
-    success_floor: float = 0.25,
+    success_floor: float = 0.5,
+    empty_output_floor: float | None = 0.8,
     dry_run: bool = True,
     persister: Any | None = None,
 ) -> ConsolidationReport:
@@ -202,6 +203,8 @@ async def consolidate_performance(
     Args:
         min_runs: Minimum ``calls`` before a tool is eligible.
         success_floor: Retire tools with ``success_rate`` below this.
+        empty_output_floor: Also retire tools whose ``empty_output_rate`` is
+            at/above this (Phase 4 G). ``None`` disables that leg.
         dry_run: When True (default), only report.
         persister: Optional ``ToolPersister`` (dependency injection for tests).
 
@@ -212,7 +215,9 @@ async def consolidate_performance(
 
     p = persister or ToolPersister()
     try:
-        names = await p.underperforming_tools(min_runs, success_floor)
+        names = await p.underperforming_tools(
+            min_runs, success_floor, empty_output_floor
+        )
     except Exception as e:
         logger.error(f"consolidate_performance: underperformer scan failed: {e}")
         return ConsolidationReport(dry_run=dry_run)
@@ -225,7 +230,8 @@ async def consolidate_performance(
     for n in names:
         logger.info(
             f"[consolidate/perf] {verb} '{n}' "
-            f"(success_rate < {success_floor} over >= {min_runs} calls)"
+            f"(success_rate < {success_floor} or empty_output_rate >= "
+            f"{empty_output_floor}, over >= {min_runs} calls)"
         )
     if names:
         logger.info(
@@ -239,13 +245,17 @@ async def consolidate_all(
     threshold: float = 0.92,
     dry_run: bool = True,
     min_runs: int = 20,
-    success_floor: float = 0.25,
+    success_floor: float = 0.5,
+    empty_output_floor: float | None = 0.8,
 ) -> ConsolidationReport:
     """Consolidate redundant tools + sub-agents, then retire underperformers."""
     tools = await consolidate_tools(threshold=threshold, dry_run=dry_run)
     agents = await consolidate_sub_agents(threshold=threshold, dry_run=dry_run)
     perf = await consolidate_performance(
-        min_runs=min_runs, success_floor=success_floor, dry_run=dry_run
+        min_runs=min_runs,
+        success_floor=success_floor,
+        empty_output_floor=empty_output_floor,
+        dry_run=dry_run,
     )
     return ConsolidationReport(
         tools=tools.tools,

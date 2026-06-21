@@ -443,25 +443,47 @@ class ToolPersister:
             return 0
 
     async def underperforming_tools(
-        self, min_runs: int, success_floor: float
+        self,
+        min_runs: int,
+        success_floor: float,
+        empty_output_floor: float | None = None,
     ) -> list[str]:
         """Active generated tools that are chronic low performers (M4).
 
         A tool qualifies when it has been exercised enough to judge
-        (``calls >= min_runs``) yet succeeds too rarely
-        (``success_rate < success_floor``). Untried tools (``calls`` 0,
+        (``calls >= min_runs``) yet performs poorly: ``success_rate <
+        success_floor`` OR, when ``empty_output_floor`` is set,
+        ``empty_output_rate >= empty_output_floor`` (a tool that "succeeds" but
+        returns blank output is useless). Untried tools (``calls`` 0,
         ``success_rate`` seeded 1.0) are deliberately spared — a tool is never
         retired for performance before it has had a fair chance. Best-effort:
         any DB error degrades to an empty list (no retirement).
+
+        Args:
+            min_runs: Minimum ``calls`` before a tool is eligible.
+            success_floor: Retire tools with ``success_rate`` below this.
+            empty_output_floor: Optional — also retire tools whose
+                ``empty_output_rate`` is at/above this (Phase 4 G). ``None``
+                disables the empty-output leg (back-compat for direct callers).
 
         Returns:
             Names of qualifying tools (sorted).
         """
         try:
-            from sqlalchemy import select
+            from sqlalchemy import or_, select
 
             from src.db.models import ToolRegistration
             from src.db.session import get_session
+
+            # Performance failure predicate: low success, and optionally chronic
+            # empty output. ``or_`` of a single column expr collapses to that
+            # expr, so empty_output_floor=None reproduces the prior query exactly.
+            performance = ToolRegistration.success_rate < success_floor
+            if empty_output_floor is not None:
+                performance = or_(
+                    performance,
+                    ToolRegistration.empty_output_rate >= empty_output_floor,
+                )
 
             async with get_session() as session:
                 stmt = (
@@ -470,7 +492,7 @@ class ToolPersister:
                         ToolRegistration.is_active.is_(True),
                         ToolRegistration.tool_type == "generated",
                         ToolRegistration.calls >= min_runs,
-                        ToolRegistration.success_rate < success_floor,
+                        performance,
                     )
                 )
                 result = await session.execute(stmt)
@@ -479,7 +501,12 @@ class ToolPersister:
             logger.debug(f"Underperformer scan failed: {e}")
             return []
 
-    async def retire_underperforming(self, min_runs: int, success_floor: float) -> int:
+    async def retire_underperforming(
+        self,
+        min_runs: int,
+        success_floor: float,
+        empty_output_floor: float | None = None,
+    ) -> int:
         """Retire chronic low-performing generated tools (M4 performance path).
 
         Delegates selection to :meth:`underperforming_tools` and retirement to
@@ -489,15 +516,21 @@ class ToolPersister:
             min_runs: Minimum ``calls`` before a tool is eligible (``RETIRE_MIN_RUNS``).
             success_floor: Retire tools with ``success_rate`` below this
                 (``RETIRE_SUCCESS_FLOOR``).
+            empty_output_floor: Optional — also retire tools whose
+                ``empty_output_rate`` is at/above this
+                (``RETIRE_EMPTY_OUTPUT_FLOOR``). ``None`` disables that leg.
         """
-        names = await self.underperforming_tools(min_runs, success_floor)
+        names = await self.underperforming_tools(
+            min_runs, success_floor, empty_output_floor
+        )
         if not names:
             return 0
         retired = await self.retire(names)
         if retired:
             logger.info(
                 f"Retired {retired} underperforming tools "
-                f"(min_runs={min_runs}, floor={success_floor}): {', '.join(names)}"
+                f"(min_runs={min_runs}, floor={success_floor}, "
+                f"empty_floor={empty_output_floor}): {', '.join(names)}"
             )
         return retired
 
@@ -541,9 +574,12 @@ class ToolPersister:
             # M4 performance retirement: retire chronic low performers that have
             # been exercised enough to judge. Runs after redundancy/cap so the
             # metrics-driven decision sees the already-debloated population.
+            # Phase 4 G: also retires chronic empty-output tools.
             try:
                 await self.retire_underperforming(
-                    settings.retire_min_runs, settings.retire_success_floor
+                    settings.retire_min_runs,
+                    settings.retire_success_floor,
+                    settings.retire_empty_output_floor,
                 )
             except Exception as e:
                 logger.debug(f"Tool performance retirement skipped: {e}")

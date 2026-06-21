@@ -13,7 +13,7 @@ from __future__ import annotations
 import functools
 from typing import Literal, Optional
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -241,6 +241,12 @@ class RateLimiterSettings(BaseSettings):
 
     rate_limit_default_rpm: int = 60  # Env: RATE_LIMIT_DEFAULT_RPM
     rate_limit_default_tpm: int = 100_000  # Env: RATE_LIMIT_DEFAULT_TPM
+    # Per-provider RPM/TPM OVERRIDES layered on top of the curated
+    # PROVIDER_LIMITS table in src/llm/rate_limiter.py (Phase 4 G). A JSON map
+    # of provider → [rpm, tpm]; empty (default) → the curated table is used
+    # unchanged. Lets a deployment tune a provider's limits without a code
+    # change. Env: RATE_LIMIT_PROVIDER_OVERRIDES.
+    rate_limit_provider_overrides: dict[str, list[int]] = Field(default_factory=dict)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -747,20 +753,28 @@ class AgentSettings(BaseSettings):
     # per-run caps above (max_tools_per_run / max_sub_agents_per_run), which
     # bound creation within ONE run. These bound the TOTAL active population and
     # trigger retirement when a capability is a chronic low performer
-    # (success_rate < retire_success_floor over >= retire_min_runs), stale
-    # (unused for retire_recency_days), or redundant (cosine >=
+    # (success_rate < retire_success_floor OR empty_output_rate >=
+    # retire_empty_output_floor, over >= retire_min_runs), stale (unused for
+    # retire_recency_days), or redundant (cosine >=
     # capability_redundancy_threshold with a better-scoring twin). Enforced on
     # load by SubAgentPersister.load_active_agents / ToolPersister.load_active_tools
     # when settings is passed. Env: MAX_ACTIVE_TOOLS, MAX_ACTIVE_SUB_AGENTS,
     # CAPABILITY_REDUNDANCY_THRESHOLD, RETIRE_MIN_RUNS, RETIRE_SUCCESS_FLOOR,
-    # RETIRE_RECENCY_DAYS.
+    # RETIRE_EMPTY_OUTPUT_FLOOR, RETIRE_RECENCY_DAYS.
     max_active_tools: int = 25  # every active tool loads into the registry/selection prompt → keep tight
     # Sub-agents are delegated-to selectively (not all injected into every prompt),
     # so a higher stored cap is safe and preserves a richer specialist ecosystem.
     max_active_sub_agents: int = 60
     capability_redundancy_threshold: float = 0.92
     retire_min_runs: int = 20
-    retire_success_floor: float = 0.25
+    retire_success_floor: float = 0.5
+    # Phase 4 G — retire tools that chronically return BLANK output even when
+    # they "succeed" (success_rate can look healthy while the tool is useless).
+    # A generated tool is retired when calls >= retire_min_runs AND
+    # (success_rate < retire_success_floor OR empty_output_rate >=
+    # retire_empty_output_floor). Env: RETIRE_SUCCESS_FLOOR,
+    # RETIRE_EMPTY_OUTPUT_FLOOR.
+    retire_empty_output_floor: float = 0.8
     retire_recency_days: int = 30
     # Per-tool success-metrics recording (M4). When true, the execute chokepoint
     # records each tool invocation (success/empty/latency) to tool_call_metrics

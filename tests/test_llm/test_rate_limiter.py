@@ -52,3 +52,37 @@ class TestRateLimiterRegistry:
         # Both complete without error
         assert "provider-a" in limiter._rpm_limiters
         assert "provider-b" in limiter._rpm_limiters
+
+
+class TestProviderLimitOverrides:
+    """Phase 4 G — PROVIDER_LIMITS is env-tunable via settings overrides."""
+
+    def test_override_layers_over_curated_table(self) -> None:
+        """A per-provider override replaces the curated RPM/TPM for that provider."""
+        base = Settings()
+        rl = base.rate_limiter.model_copy(
+            update={"rate_limit_provider_overrides": {"openai": [10, 5_000]}}
+        )
+        settings = base.model_copy(update={"rate_limiter": rl})
+        registry = RateLimiterRegistry(settings)
+
+        rpm, tpm = registry.get_limits("openai")
+        assert (rpm, tpm) == (10, 5_000)
+
+    def test_override_leaves_other_providers_untouched(self) -> None:
+        """Overriding one provider does not perturb the curated limits of others."""
+        base = Settings()
+        rl = base.rate_limiter.model_copy(
+            update={"rate_limit_provider_overrides": {"openai": [10, 5_000]}}
+        )
+        settings = base.model_copy(update={"rate_limiter": rl})
+        registry = RateLimiterRegistry(settings)
+
+        rpm, tpm = registry.get_limits("anthropic")
+        assert (rpm, tpm) == (50, 40_000)
+
+    def test_no_override_uses_curated_table(self) -> None:
+        """Default (empty overrides) reproduces the curated table exactly."""
+        registry = RateLimiterRegistry(Settings())
+        rpm, tpm = registry.get_limits("openai")
+        assert (rpm, tpm) == (60, 150_000)

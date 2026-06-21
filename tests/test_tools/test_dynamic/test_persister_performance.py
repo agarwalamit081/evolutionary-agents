@@ -86,3 +86,47 @@ class TestRetireUnderperforming:
         count = await p.retire_underperforming(20, 0.25)
         assert count == 2
         p.retire.assert_awaited_once_with(["bad_a", "bad_b"])
+
+    @pytest.mark.asyncio
+    async def test_empty_output_floor_threaded(self) -> None:
+        """Phase 4 G: retire_underperforming forwards empty_output_floor to the scan."""
+        p = ToolPersister()
+        p.underperforming_tools = AsyncMock(return_value=["blank"])  # type: ignore[method-assign]
+        p.retire = AsyncMock(return_value=1)  # type: ignore[method-assign]
+        await p.retire_underperforming(20, 0.5, empty_output_floor=0.8)
+        p.underperforming_tools.assert_awaited_once_with(20, 0.5, 0.8)
+
+
+class _CapturingSession(_FakeSession):
+    """Fake session that records the compiled statement for SQL-wiring asserts."""
+
+    def __init__(self) -> None:
+        super().__init__(rows=[("captured",)])
+        self.statements: list[Any] = []
+
+    async def execute(self, stmt: Any) -> _FakeResult:
+        self.statements.append(stmt)
+        return _FakeResult(self._rows)
+
+
+class TestEmptyOutputPredicate:
+    """Phase 4 G — the empty-output OR clause is emitted only when requested."""
+
+    @pytest.mark.asyncio
+    async def test_empty_output_floor_adds_or_clause(self) -> None:
+        session = _CapturingSession()
+        with patch("src.db.session.get_session", lambda: session):
+            await ToolPersister().underperforming_tools(20, 0.5, empty_output_floor=0.8)
+        sql = str(session.statements[0])
+        assert "success_rate" in sql
+        assert "empty_output_rate" in sql
+
+    @pytest.mark.asyncio
+    async def test_no_empty_output_floor_omits_clause(self) -> None:
+        """Default (None) reproduces the legacy success_rate-only query."""
+        session = _CapturingSession()
+        with patch("src.db.session.get_session", lambda: session):
+            await ToolPersister().underperforming_tools(20, 0.5)
+        sql = str(session.statements[0])
+        assert "success_rate" in sql
+        assert "empty_output_rate" not in sql

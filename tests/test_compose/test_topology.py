@@ -157,3 +157,25 @@ def test_agent_cli_reaches_runner(compose: dict) -> None:
     agent = compose["services"]["agent"]
     nets = agent.get("networks") or []
     assert "turing-runner-net" in nets, f"agent-cli not on turing-runner-net: {nets}"
+
+
+# ── Healthcheck correctness ─────────────────────────────────────────────
+
+
+def test_meilisearch_healthcheck_uses_ipv4_loopback(compose: dict) -> None:
+    """meilisearch binds 0.0.0.0:7700 (IPv4-ONLY — `--http-addr 0.0.0.0:7700` is not
+    IPv6 `::`). A healthcheck using ``localhost`` resolves to IPv6 ``[::1]`` under
+    busybox wget, which has no listener there → the probe is refused and compose
+    marks the service permanently unhealthy. That blocks every role with
+    `depends_on: meilisearch: service_healthy` (api/worker/agent) — so the whole
+    stack never starts. The probe MUST pin the IPv4 loopback 127.0.0.1."""
+    meili = compose["services"]["meilisearch"]
+    test_cmd = meili.get("healthcheck", {}).get("test") or []
+    joined = " ".join(str(p) for p in test_cmd)
+    assert "127.0.0.1" in joined, (
+        f"meilisearch healthcheck not pinned to IPv4 loopback: {test_cmd}"
+    )
+    assert "localhost" not in joined, (
+        f"meilisearch healthcheck uses 'localhost' (IPv6 ::1 refused vs IPv4-only "
+        f"bind → perpetual unhealthy → blocks dependent roles): {test_cmd}"
+    )

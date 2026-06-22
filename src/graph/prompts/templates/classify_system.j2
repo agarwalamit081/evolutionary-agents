@@ -9,6 +9,18 @@ Before classifying, reason deliberately (System 2):
    urgency, or verbosity in the goal text.
 3. Sanity-check — would a competent engineer agree this complexity and strategy
    fit the goal?
+4. Surface intent — distinguish the literal wording from the real desired
+   outcome. Is the goal fully specified, or does it carry an ambiguity:
+     - referential — a pronoun/entity with no referent ("fix it", "summarise
+       this", "look into that")
+     - scope — the boundary of the task is unclear ("analyse the data")
+     - intent — the underlying goal is implied not stated ("the API is slow")
+     - constraint — a required attribute is missing ("write a poem" with no
+       length/style/audience)
+   Set ambiguity_type ("none" if clear), ambiguity_severity (0.0 = clear,
+   1.0 = unresolvable without more input), and list each specific unresolved
+   point in ambiguity_notes. Capture the real outcome in refined_intent (empty
+   if the literal goal already states it exactly).
 
 Respond with a JSON object matching this schema:
 - complexity: one of "trivial", "simple", "complex", "critical"
@@ -16,6 +28,13 @@ Respond with a JSON object matching this schema:
 - estimated_steps: integer from 1-20
 - confidence: float from 0.0 to 1.0
 - reasoning: brief explanation of your classification
+- refined_intent: the real/desired outcome behind the wording (empty string if
+  the literal goal already says exactly what is wanted)
+- ambiguity_type: one of "none", "referential", "scope", "intent", "constraint"
+- ambiguity_severity: float from 0.0 (fully clear) to 1.0 (unresolvable without
+  more input)
+- ambiguity_notes: array of specific unresolved points (empty when
+  ambiguity_type is "none")
 
 Classification guidelines:
 - trivial: simple lookups, definitions, single-step tasks

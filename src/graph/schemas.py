@@ -18,6 +18,33 @@ class TaskClassification(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0, description="Classification confidence")
     reasoning: str = Field(default="", description="Brief reasoning for the classification")
 
+    # ── Intent refinement + ambiguity assessment (Feature A) ────────────
+    # Additive, all defaulted so a legacy 5-field JSON still parses. This is
+    # the detector that feeds the ambiguity-resolution cascade (Feature B).
+    # The literal goal text is NEVER replaced — refined_intent is advisory
+    # only; it surfaces the real/desired outcome behind the wording.
+    refined_intent: str = Field(
+        default="",
+        description="The real/desired outcome behind the literal goal wording; "
+        "empty string if the literal goal already says exactly what is wanted",
+    )
+    ambiguity_type: str = Field(
+        default="none",
+        description="none | referential | scope | intent | constraint",
+    )
+    ambiguity_severity: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="How under-specified the goal is (0.0 = clear, "
+        "1.0 = unresolvable without more input)",
+    )
+    ambiguity_notes: list[str] = Field(
+        default_factory=list,
+        description="Specific unresolved points (missing entity / scope / "
+        "constraint). Empty when ambiguity_type is none",
+    )
+
 
 class GeneratedStep(BaseModel):
     """A single step in an LLM-generated execution plan."""

@@ -19,6 +19,8 @@ from src.graph.state import AgentState
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
 
+    from src.graph.schemas import TaskClassification
+
 # Heuristic keyword-based classification for fast path
 _COMPLEXITY_KEYWORDS: dict[TaskComplexity, list[str]] = {
     TaskComplexity.TRIVIAL: [
@@ -67,20 +69,38 @@ async def classify_node(
     goal_text = goal.text
     logger.info(f"Classifying task: {goal_text[:100]}...")
 
+    # Advisory metadata (Feature A). Defaults for the heuristic path; the LLM
+    # path overwrites them from the parsed TaskClassification model. The
+    # literal goal text is NEVER replaced — refined_intent only carries an
+    # advisory restatement, consumed downstream by the disambiguate cascade.
+    refined_intent = ""
+    ambiguity_type = "none"
+    ambiguity_severity = 0.0
+    ambiguity_notes: list[str] = []
+
     # Try LLM classification first, fall back to heuristics
+    classification: TaskClassification | None = None
     if gateway is not None:
-        result = await _llm_classify(gateway, goal_text)
-        if result is not None:
-            complexity, strategy, estimated_steps, confidence = result
-            logger.info(
-                f"LLM classification: complexity={complexity.value}, "
-                f"strategy={strategy.value}, "
-                f"steps={estimated_steps}, "
-                f"confidence={confidence.value}"
-            )
-        else:
-            complexity, strategy, estimated_steps = _heuristic_classify(goal_text.lower())
-            confidence = Confidence.MEDIUM
+        classification = await _llm_classify(gateway, goal_text)
+
+    if classification is not None:
+        complexity = classification.complexity
+        strategy = classification.strategy
+        estimated_steps = classification.estimated_steps
+        confidence = (
+            Confidence.HIGH if classification.confidence >= 0.7 else Confidence.MEDIUM
+        )
+        refined_intent = classification.refined_intent
+        ambiguity_type = classification.ambiguity_type
+        ambiguity_severity = classification.ambiguity_severity
+        ambiguity_notes = list(classification.ambiguity_notes)
+        logger.info(
+            f"LLM classification: complexity={complexity.value}, "
+            f"strategy={strategy.value}, "
+            f"steps={estimated_steps}, "
+            f"confidence={confidence.value}, "
+            f"ambiguity={ambiguity_type}@{ambiguity_severity:.2f}"
+        )
     else:
         complexity, strategy, estimated_steps = _heuristic_classify(goal_text.lower())
         confidence = Confidence.MEDIUM
@@ -108,14 +128,23 @@ async def classify_node(
         "current_goal": updated_goal,
         "strategy": strategy,
         "confidence": confidence,
+        "refined_intent": refined_intent,
+        "ambiguity_type": ambiguity_type,
+        "ambiguity_severity": ambiguity_severity,
+        "ambiguity_notes": ambiguity_notes,
     }
 
 
 async def _llm_classify(
     gateway: LLMGateway,
     goal_text: str,
-) -> tuple[TaskComplexity, Strategy, int, Confidence] | None:
-    """Attempt LLM-based classification. Returns None on failure."""
+) -> TaskClassification | None:
+    """Attempt LLM-based classification. Returns the parsed model, or None.
+
+    Returning the full ``TaskClassification`` (not a positional tuple) keeps
+    the new intent/ambiguity fields (Feature A) flowing without a brittle
+    N-tuple. Confidence-enum derivation stays in ``classify_node``.
+    """
     try:
         from src.graph.prompts import CLASSIFY_SYSTEM, CLASSIFY_USER
         from src.graph.schemas import TaskClassification
@@ -134,19 +163,8 @@ async def _llm_classify(
         )
 
         extractor = StructuredOutputManager()
-        classification = await extractor.extract(
+        return await extractor.extract(
             response.content, TaskClassification, gateway=gateway, messages=messages
-        )
-        if classification is None:
-            return None
-
-        conf = Confidence.HIGH if classification.confidence >= 0.7 else Confidence.MEDIUM
-
-        return (
-            classification.complexity,
-            classification.strategy,
-            classification.estimated_steps,
-            conf,
         )
     except Exception as e:
         logger.debug(f"LLM classification failed, using heuristics: {e}")

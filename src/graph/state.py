@@ -46,6 +46,17 @@ class AgentState(TypedDict, total=False):
     plan_steps: list[PlanStep]
     current_step_index: int
 
+    # ─── Intent & Ambiguity (Feature A) ─────────────────────────────────
+    # Advisory-only: surfaced by the classify node, consumed downstream by
+    # the disambiguate cascade (Feature B) + technique selection. The literal
+    # goal text (current_goal.text) stays the OBJECTIVE — these never
+    # replace it. Overwrite (no reducer): a re-classify replaces rather than
+    # stacks the advisory metadata.
+    refined_intent: str
+    ambiguity_type: str
+    ambiguity_severity: float
+    ambiguity_notes: list[str]
+
     # ─── Execution ──────────────────────────────────────────────────────
     messages: Annotated[list[AnyMessage], add_messages]
     tools_called: Annotated[list[dict[str, Any]], operator.add]

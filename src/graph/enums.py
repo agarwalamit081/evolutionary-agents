@@ -9,6 +9,7 @@ class Phase(str, Enum):
     """Graph execution phases — drives conditional edge routing."""
 
     CLASSIFY = "classify"
+    DISAMBIGUATE = "disambiguate"
     PLAN = "plan"
     RETRIEVE_MEMORY = "retrieve_memory"
     STRUCTURE_ANALYSIS = "structure_analysis"

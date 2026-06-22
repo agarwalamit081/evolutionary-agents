@@ -1,0 +1,14 @@
+Resolve the ambiguity in this goal:
+{{ goal_text }}
+
+Classified intent: {{ refined_intent }}
+Ambiguity: {{ ambiguity_type }} at severity {{ ambiguity_severity }}
+Ambiguity notes:
+{{ ambiguity_notes }}
+{% if evidence %}
+WEB EVIDENCE (use to confirm or correct your interpretation):
+{{ evidence }}
+{% endif %}
+Produce the most-likely intended outcome, the assumptions it rests on, and any
+search queries that would help. Remember: you are explaining the goal, not
+changing the deliverable the user asked for.

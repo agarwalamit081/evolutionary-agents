@@ -32,6 +32,10 @@ prompt_manager = PromptManager()
 CLASSIFY_SYSTEM = PromptTemplate("classify_system")
 CLASSIFY_USER = PromptTemplate("classify_user")
 
+# ── Ambiguity Resolution (Feature B) ───────────────────────────────────
+DISAMBIGUATE_SYSTEM = PromptTemplate("disambiguate_system")
+DISAMBIGUATE_USER = PromptTemplate("disambiguate_user")
+
 # ── Planning ───────────────────────────────────────────────────────────
 PLAN_SYSTEM = PromptTemplate("plan_system")
 PLAN_USER = PromptTemplate("plan_user")
@@ -82,6 +86,8 @@ __all__ = [
     "NODE_VERIFY",
     "CLASSIFY_SYSTEM",
     "CLASSIFY_USER",
+    "DISAMBIGUATE_SYSTEM",
+    "DISAMBIGUATE_USER",
     "PLAN_SYSTEM",
     "PLAN_USER",
     "EXECUTE_SYSTEM",

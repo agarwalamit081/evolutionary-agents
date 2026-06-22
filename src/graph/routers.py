@@ -219,6 +219,43 @@ def route_after_reflect(state: AgentState) -> str:
     return "verify"
 
 
+def route_after_classify(state: AgentState) -> str:
+    """Route after the classify node (Feature B ambiguity gate).
+
+    Default-off master switch (``clarifying_gate_enabled``): when off, the
+    topology is byte-identical to today (classify -> plan). When on, an
+    ambiguous goal (severity >= threshold + non-empty notes, not yet
+    disambiguated) routes classify -> disambiguate -> plan so the cascade can
+    resolve it before planning.
+
+    Reads settings via ``get_settings()`` (LangGraph passes ``config=None`` to
+    conditional-edge routers here — same constraint route_after_verify honours).
+
+    Returns:
+        "disambiguate" — ambiguous goal + gate on + not yet disambiguated
+        "plan" — otherwise (the default, unchanged behavior)
+    """
+    try:
+        if not get_settings().agent.clarifying_gate_enabled:
+            return "plan"
+    except Exception:  # noqa: BLE001 — settings access must never break routing
+        return "plan"
+
+    if state.get("disambiguation_done"):
+        return "plan"
+
+    severity = float(state.get("ambiguity_severity", 0.0) or 0.0)
+    notes = state.get("ambiguity_notes", []) or []
+    threshold = get_settings().agent.clarifying_severity_threshold
+    if severity >= threshold and notes:
+        logger.info(
+            f"Ambiguous goal (severity={severity:.2f} >= {threshold}, "
+            f"{len(notes)} notes); routing classify -> disambiguate"
+        )
+        return "disambiguate"
+    return "plan"
+
+
 def route_after_structure_analysis(state: AgentState) -> str:
     """Route after the structure_analysis node.
 

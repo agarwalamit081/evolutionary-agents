@@ -66,6 +66,43 @@ class GeneratedPlan(BaseModel):
     rationale: str = Field(default="", description="Why this plan was chosen")
 
 
+class DisambiguationResolution(BaseModel):
+    """Structured output from the disambiguate node's LLM calls (Feature B).
+
+    One schema serves BOTH cascade LLM calls — the self-resolve pass (which may
+    emit ``grounding_queries``) and the re-score pass (which consumes evidence).
+    Every field is defaulted so a partial/legacy response still parses.
+    """
+
+    proposed_interpretation: str = Field(
+        default="",
+        description="The most-likely intended outcome of the goal, stated plainly",
+    )
+    assumptions: list[str] = Field(
+        default_factory=list,
+        description="Explicit assumptions this interpretation rests on",
+    )
+    grounding_queries: list[str] = Field(
+        default_factory=list,
+        description="Web search queries that would resolve the ambiguity "
+        "(empty if grounding would not help — e.g. pure intent/constraint gaps)",
+    )
+    resolved: bool = Field(
+        default=False,
+        description="True if the ambiguity is resolved to actionable certainty",
+    )
+    remaining_severity: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Residual ambiguity after this pass (0.0 = clear)",
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="Remaining unresolved points (for the advisory context / HITL)",
+    )
+
+
 class ReflectionAnalysis(BaseModel):
     """Structured output from the reflect node's LLM call."""
 

@@ -892,6 +892,23 @@ class AgentSettings(BaseSettings):
     # intent from the goal before the execute loop and seed the spawn nodes.
     structure_analysis_enabled: bool = True
 
+    # ── Ambiguity-resolution cascade (Feature B; all default-off) ─────────
+    # Master switch: when off, route_after_classify always returns "plan" and
+    # the topology is byte-identical to today. When on, an ambiguous goal
+    # (severity >= threshold) routes classify -> disambiguate -> plan, running
+    # an LLM-self-resolve -> web-grounding -> re-score cascade that carries the
+    # resolution forward as ADVISORY planner context (literal goal unchanged).
+    clarifying_gate_enabled: bool = False  # Env: CLARIFYING_GATE_ENABLED
+    clarifying_severity_threshold: float = 0.5  # Env: CLARIFYING_SEVERITY_THRESHOLD
+    # Web grounding runs within the gate when a query is emitted (default on).
+    clarifying_web_grounding_enabled: bool = True  # Env: CLARIFYING_WEB_GROUNDING_ENABLED
+    clarifying_max_queries: int = 3  # Env: CLARIFYING_MAX_QUERIES  (cap on grounding queries)
+    # HITL is the last resort of the cascade. NOTE: there is no Command(resume=)
+    # resume surface in the worker/CLI today, so when enabled the HITL step
+    # degrades to advisory (carries notes forward) rather than stalling the run.
+    clarifying_hitl_threshold: float = 0.7  # Env: CLARIFYING_HITL_THRESHOLD
+    clarifying_hitl_enabled: bool = False  # Env: CLARIFYING_HITL_ENABLED
+
     # Concurrency + loop bounds (previously module constants in
     # src/graph/nodes/execute.py and src/graph/nodes/tool_create.py, and the
     # verify data-tool cap in src/graph/nodes/verify.py).
@@ -938,12 +955,21 @@ class AgentSettings(BaseSettings):
         "verify_max_data_tools",
         "memory_folding_max_tokens",
         "tool_persist_max_attempts",
+        "clarifying_max_queries",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
         """Ensure positive integers."""
         if v < 1:
             raise ValueError(f"Must be a positive integer. Got: {v}")
+        return v
+
+    @field_validator("clarifying_severity_threshold", "clarifying_hitl_threshold")
+    @classmethod
+    def validate_threshold(cls, v: float) -> float:
+        """Ensure an ambiguity/HITL threshold is a probability in [0.0, 1.0]."""
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"Threshold must be between 0.0 and 1.0. Got: {v}")
         return v
 
     @field_validator("memory_folding_temperature")

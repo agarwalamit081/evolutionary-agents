@@ -214,6 +214,12 @@ async def _llm_plan(
         # deliverables (state["eval_checks"]), tell the planner what passes
         # (reuse) vs what failed (fix in place). Empty for a fresh plan.
         correction_ctx = _correction_context(state)
+        # Feature B advisory: the disambiguate cascade's proposed resolution
+        # + assumptions + evidence. Rendered into plan_user.j2's ADVISORY
+        # block — it explains the goal, never rewrites it (the OBJECTIVE slot
+        # still holds the literal goal_text above). Empty when the cascade did
+        # not run (default-off) so the template drops the block entirely.
+        disambig_ctx = str(state.get("disambiguation_context", "") or "")
         user_prompt = PLAN_USER.format(
             goal_text=goal.text,
             strategy=strategy.value,
@@ -222,6 +228,7 @@ async def _llm_plan(
             remaining_iterations=remaining_iterations,
             max_iterations=max_iterations,
             memory_context=memory_ctx,
+            disambiguation_context=disambig_ctx,
             correction_context=correction_ctx,
         )
         # Build dynamic tool list for the plan prompt. When tool retrieval is

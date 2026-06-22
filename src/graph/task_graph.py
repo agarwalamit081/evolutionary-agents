@@ -23,6 +23,7 @@ from src.graph.nodes import (
     agent_spawn_node,
     classify_node,
     delegate_node,
+    disambiguate_node,
     error_handler_node,
     evolve_node,
     execute_node,
@@ -37,6 +38,7 @@ from src.graph.nodes import (
 )
 from src.graph.routers import (
     route_after_agent_spawn,
+    route_after_classify,
     route_after_delegate,
     route_after_error,
     route_after_evolve,
@@ -134,6 +136,11 @@ def build_task_graph(
     # LangGraph's StateNode type is strict about signatures; our closure
     # wrappers match at runtime but Pyright can't verify that statically.
     graph.add_node("classify", _wrap(classify_node, gateway=gateway))  # type: ignore[arg-type]
+    # Feature B: ambiguity-resolution cascade between classify and plan.
+    # Default-off (clarifying_gate_enabled); route_after_classify returns
+    # "plan" unless the gate is on + the goal is ambiguous, so the topology is
+    # byte-identical to today until toggled.
+    graph.add_node("disambiguate", _wrap(disambiguate_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("plan", _wrap(plan_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("retrieve_memory", _wrap(retrieve_memory_node, memory=memory))  # type: ignore[arg-type]
     graph.add_node("structure_analysis", _wrap(structure_analysis_node, tools=tools, sub_agent_registry=sub_agent_registry))  # type: ignore[arg-type]
@@ -151,7 +158,15 @@ def build_task_graph(
 
     # ─── Linear Edges (START → execute) ────────────────────────────────
     graph.add_edge(START, "classify")
-    graph.add_edge("classify", "plan")
+    # Feature B ambiguity gate (default-off). route_after_classify returns
+    # "plan" unless clarifying_gate_enabled + an ambiguous goal — in which case
+    # classify -> disambiguate -> plan. disambiguate_node is single-shot
+    # (disambiguation_done), so no classify↔disambiguate cycle is possible.
+    graph.add_conditional_edges("classify", route_after_classify, {
+        "plan": "plan",
+        "disambiguate": "disambiguate",
+    })
+    graph.add_edge("disambiguate", "plan")
     graph.add_edge("plan", "retrieve_memory")
     graph.add_edge("retrieve_memory", "structure_analysis")
 

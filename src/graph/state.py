@@ -57,6 +57,23 @@ class AgentState(TypedDict, total=False):
     ambiguity_severity: float
     ambiguity_notes: list[str]
 
+    # ─── Disambiguation cascade (Feature B) ─────────────────────────────
+    # ``disambiguation_done`` is the single-shot guard (mirror
+    # structure_analysis_done): the disambiguate node runs at most once per
+    # run, so a classify↔disambiguate cycle is impossible regardless of
+    # reducer semantics. The resolution/assumptions/evidence are advisory
+    # carry-forward rendered into plan_user.j2's ADVISORY block (the literal
+    # goal stays the OBJECTIVE). Overwrite (no reducer): a later pass replaces,
+    # never stacks. ``hitl_requested`` marks the degrade-path (the cascade
+    # wanted HITL but no resume surface exists) so the run carries the notes
+    # forward instead of stalling.
+    disambiguation_done: bool
+    disambiguation_resolution: str
+    disambiguation_assumptions: list[str]
+    disambiguation_evidence: list[str]
+    disambiguation_context: str
+    hitl_requested: bool
+
     # ─── Execution ──────────────────────────────────────────────────────
     messages: Annotated[list[AnyMessage], add_messages]
     tools_called: Annotated[list[dict[str, Any]], operator.add]

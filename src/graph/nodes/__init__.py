@@ -2,6 +2,7 @@
 
 from src.graph.nodes.agent_spawn import agent_spawn_node
 from src.graph.nodes.classify import classify_node
+from src.graph.nodes.disambiguate import disambiguate_node
 from src.graph.nodes.delegate import delegate_node
 from src.graph.nodes.error_handler import error_handler_node
 from src.graph.nodes.evolve import evolve_node
@@ -16,6 +17,7 @@ from src.graph.nodes.verify import verify_node
 
 __all__ = [
     "classify_node",
+    "disambiguate_node",
     "plan_node",
     "retrieve_memory_node",
     "execute_node",

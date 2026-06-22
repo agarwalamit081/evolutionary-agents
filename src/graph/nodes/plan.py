@@ -10,7 +10,7 @@ from loguru import logger
 
 from src.graph.enums import GoalStatus, Phase, Strategy, TaskComplexity
 from src.graph.models import Goal, PlanStep
-from src.graph.state import AgentState
+from src.graph.state import AgentState, objective_goal_text
 
 if TYPE_CHECKING:
     from src.graph.schemas import PlanQuality
@@ -265,7 +265,7 @@ async def _llm_plan(
         # not run (default-off) so the template drops the block entirely.
         disambig_ctx = str(state.get("disambiguation_context", "") or "")
         user_prompt = PLAN_USER.format(
-            goal_text=goal.text,
+            goal_text=objective_goal_text(state),
             strategy=strategy.value,
             complexity=goal.complexity.value if goal.complexity else "simple",
             estimated_steps="auto",

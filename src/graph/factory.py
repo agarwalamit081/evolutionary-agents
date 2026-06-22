@@ -45,6 +45,10 @@ def initial_state(
         max_iterations=max_iterations,
         no_evolution=no_evolution,
         current_goal=Goal(text=goal_text, status=GoalStatus.ACTIVE),
+        # Immutable objective anchor: current_goal is a mutable Goal object that
+        # classify re-emits (and future nodes could touch); submitted_goal freezes
+        # the literal text so recall + the OBJECTIVE can never drift (#254 backstop).
+        submitted_goal=goal_text,
         strategy=Strategy.DIRECT,
         plan_steps=[],
         current_step_index=0,

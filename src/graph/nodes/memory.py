@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from src.graph.enums import Phase
-from src.graph.state import AgentState
+from src.graph.state import AgentState, objective_goal_text
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
@@ -31,8 +31,11 @@ async def retrieve_memory_node(
     Returns:
         Partial state update with retrieved memories.
     """
-    goal = state.get("current_goal")
-    goal_text = goal.text if goal else ""
+    # Key recall on the IMMUTABLE objective (submitted_goal), not the mutable
+    # current_goal.text. If current_goal ever drifts (a recalled skill/episode
+    # leaking into it), recalling on the drifted text would compound the drift
+    # and pull in ever-more-irrelevant context. The anchor keeps recall pure.
+    goal_text = objective_goal_text(state)
 
     logger.info(f"Retrieving memories for: {goal_text[:60]}...")
 

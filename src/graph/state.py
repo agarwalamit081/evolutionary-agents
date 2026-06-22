@@ -25,6 +25,23 @@ from src.graph.models import (
 )
 
 
+def objective_goal_text(state: AgentState) -> str:
+    """The immutable objective: the submitted goal text.
+
+    Returns ``submitted_goal`` (set once at run start in ``initial_state`` and
+    never overwritten by any node), falling back to ``current_goal.text`` for
+    back-compat with checkpointed/resumed states that predate the anchor. Nodes
+    that render the OBJECTIVE or key memory recall must source from this — never
+    from a possibly-drifted ``current_goal.text`` — so recalled memory can neither
+    drift the objective nor redirect the recall query (battery-04 #254 backstop).
+    """
+    submitted = state.get("submitted_goal")
+    if submitted:
+        return str(submitted)
+    goal = state.get("current_goal")
+    return goal.text if goal is not None else ""
+
+
 class AgentState(TypedDict, total=False):
     """Main graph state for the task execution pipeline.
 
@@ -42,6 +59,13 @@ class AgentState(TypedDict, total=False):
 
     # ─── Goal & Planning ────────────────────────────────────────────────
     current_goal: Goal
+    # Immutable objective anchor (battery-04 #254 structural backstop): the
+    # literal goal text submitted at run start, set once in initial_state and
+    # NEVER overwritten by any node. Memory recall (retrieve_memory_node) and
+    # the plan/execute/verify OBJECTIVE slots source from this via
+    # objective_goal_text(), not the mutable current_goal.text — so a recalled
+    # skill/fact/episode can neither drift the objective nor redirect recall.
+    submitted_goal: str
     strategy: Strategy
     plan_steps: list[PlanStep]
     current_step_index: int

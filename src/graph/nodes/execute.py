@@ -15,7 +15,7 @@ from loguru import logger
 from src.config.settings import get_settings
 from src.graph.enums import GoalStatus, Phase
 from src.graph.models import ToolResult
-from src.graph.state import AgentState
+from src.graph.state import AgentState, objective_goal_text
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
@@ -421,7 +421,6 @@ async def execute_node(
     """
     plan_steps = state.get("plan_steps", [])
     step_index = state.get("current_step_index", 0)
-    goal = state.get("current_goal")
     messages = state.get("messages", [])
     iteration_count = state.get("iteration_count", 0)
 
@@ -443,7 +442,7 @@ async def execute_node(
     current_step.status = GoalStatus.ACTIVE
 
     # Build execution context
-    goal_text = goal.text if goal else "Unknown goal"
+    goal_text = objective_goal_text(state) or "Unknown goal"
 
     # Try LLM + tool execution first, fall back to simulated
     if gateway is not None and tools is not None:

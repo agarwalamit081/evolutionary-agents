@@ -13,7 +13,7 @@ from loguru import logger
 
 from src.config.settings import get_settings
 from src.graph.enums import Confidence, Phase, TaskComplexity
-from src.graph.state import AgentState
+from src.graph.state import AgentState, objective_goal_text
 from src.tools._paths import resolve_existing, results_root, strip_results_prefix
 
 if TYPE_CHECKING:
@@ -141,7 +141,6 @@ async def verify_node(
     Returns:
         Partial state update with verification result.
     """
-    goal = state.get("current_goal")
     reflection = state.get("reflection")
     completed_steps = state.get("completed_steps", [])
     errors = state.get("errors", [])
@@ -149,7 +148,7 @@ async def verify_node(
     step_index = state.get("current_step_index", 0)
     confidence = state.get("confidence", Confidence.MEDIUM)
 
-    goal_text = goal.text if goal else "Unknown goal"
+    goal_text = objective_goal_text(state) or "Unknown goal"
     logger.info(f"Verifying results for: {goal_text[:60]}...")
 
     # Independently verify declared deliverables exist on disk. This is the
@@ -313,7 +312,7 @@ async def _llm_verify(
         plan_steps = state.get("plan_steps", [])
         reflection = state.get("reflection")
 
-        goal_text = goal.text if goal else "Unknown goal"
+        goal_text = objective_goal_text(state) or "Unknown goal"
         success_criteria = ""
         if goal and hasattr(goal, "success_criteria") and goal.success_criteria:
             success_criteria = "; ".join(goal.success_criteria)

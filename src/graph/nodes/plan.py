@@ -197,13 +197,15 @@ async def _llm_plan(
         from src.config import get_settings
         from src.tools.selection import select_tools_for_query
 
-        # Build memory context if available
+        # Build memory context if available. Rendered as a bare bulleted list —
+        # the plan_user.j2 template wraps it in an explicit ADVISORY ONLY frame
+        # (objective-drift guard #254: recalled memory must read as advisory
+        # technique hints, never as the objective, so a goal whose recall
+        # surfaces a different run's skill cannot contaminate the plan).
         memories = state.get("retrieved_memories", [])
         memory_ctx = ""
         if memories:
-            memory_ctx = "\nRelevant context from memory:\n" + "\n".join(
-                f"- {m}" for m in memories[:5]
-            )
+            memory_ctx = "\n".join(f"- {m}" for m in memories[:5])
 
         max_iterations = state.get("max_iterations", 20)
         iteration_count = state.get("iteration_count", 0)

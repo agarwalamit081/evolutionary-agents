@@ -395,10 +395,12 @@ async def _llm_execute(
         iteration_count = state.get("iteration_count", 0)
         memories = state.get("retrieved_memories", [])
 
-        # Build context
+        # Build memory context as a bare bulleted list — execute_system.j2 wraps it
+        # in an explicit ADVISORY ONLY frame (objective-drift guard #254: recalled
+        # memory must read as technique hints, not as the objective).
         memory_ctx = ""
         if memories:
-            memory_ctx = "\nRelevant context:\n" + "\n".join(f"- {m}" for m in memories[:3])
+            memory_ctx = "\n".join(f"- {m}" for m in memories[:3])
 
         tool_results_ctx = ""
         if tool_results:

@@ -103,6 +103,34 @@ class DisambiguationResolution(BaseModel):
     )
 
 
+class StepAtomicity(BaseModel):
+    """Per-step atomicity verdict (Feature C plan-quality validator)."""
+
+    step_id: str = Field(default="", description="The PlanStep.id this verdict covers")
+    description: str = Field(default="", description="Truncated step description")
+    flag: str = Field(
+        default="atomic",
+        description="atomic | too_coarse | too_fine",
+    )
+    reason: str = Field(default="", description="Why the step received this flag")
+
+
+class PlanQuality(BaseModel):
+    """Whole-plan atomicity assessment (Feature C).
+
+    Computed by the plan node's pure heuristic ``_validate_step_atomicity`` and
+    attached to state as ``plan_quality`` (a ``model_dump()`` dict —
+    AsyncPostgresSaver checkpoint-safe). Serves as advisory telemetry on
+    decomposition quality; reflect/verify may read it to decide whether a
+    re-plan is warranted.
+    """
+
+    per_step: list[StepAtomicity] = Field(default_factory=list)
+    atomic: bool = Field(default=True, description="True iff every step is atomic")
+    too_coarse_count: int = Field(default=0, ge=0)
+    too_fine_count: int = Field(default=0, ge=0)
+
+
 class ReflectionAnalysis(BaseModel):
     """Structured output from the reflect node's LLM call."""
 

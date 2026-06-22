@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.config import get_settings
 from src.graph.enums import GoalStatus, Phase, Strategy, TaskComplexity
 from src.graph.factory import initial_state
-from src.graph.models import Goal
-from src.graph.nodes.plan import plan_node
+from src.graph.models import Goal, PlanStep
+from src.graph.nodes.plan import _split_coarse_step, _validate_step_atomicity, plan_node
 from src.llm.models import LLMResponse
 
 
@@ -434,3 +435,149 @@ class TestGeneratedStepFieldPreservation:
         assert steps[1].tool_name == "code_executor"
         assert steps[1].expected_output == "computed answer"
         assert steps[1].depends_on == ["Gather data"]
+
+
+def _mock_gateway_for_plan(plan_json: str) -> object:
+    """Build a gateway mock whose acompletion returns the given plan JSON."""
+    gw = MagicMock()
+    gw.acompletion = AsyncMock(return_value=LLMResponse(
+        content=plan_json,
+        model="gpt-4o-mini-2024-07-18",
+        provider="openai",
+        input_tokens=10,
+        output_tokens=50,
+        total_tokens=60,
+        cost_usd=0.0001,
+    ))
+    return gw
+
+
+class TestPlanAtomicityValidator:
+    """Feature C — the pure-heuristic per-step atomicity validator."""
+
+    def test_too_coarse_flag(self) -> None:
+        """A step with >=2 conjunction/clause markers is too_coarse."""
+        steps = [PlanStep(description="Fetch the data and clean it then write to disk")]
+        quality = _validate_step_atomicity(steps)
+        assert quality.per_step[0].flag == "too_coarse"
+        assert quality.too_coarse_count == 1
+        assert quality.atomic is False
+
+    def test_too_fine_flag(self) -> None:
+        """A sub-3-word step with no expected_output is too_fine."""
+        steps = [PlanStep(description="run it")]  # 2 words, no expected_output
+        quality = _validate_step_atomicity(steps)
+        assert quality.per_step[0].flag == "too_fine"
+        assert quality.too_fine_count == 1
+        assert quality.atomic is False
+
+    def test_too_fine_rescued_by_expected_output(self) -> None:
+        """A short step WITH an expected_output is atomic (not too_fine)."""
+        steps = [PlanStep(description="run it", expected_output="exit code 0")]
+        quality = _validate_step_atomicity(steps)
+        assert quality.per_step[0].flag == "atomic"
+
+    def test_atomic_flag(self) -> None:
+        """A single, well-scoped step is atomic."""
+        steps = [PlanStep(description="Compute the Fibonacci sequence")]
+        quality = _validate_step_atomicity(steps)
+        assert quality.per_step[0].flag == "atomic"
+        assert quality.atomic is True
+        assert quality.too_coarse_count == 0
+        assert quality.too_fine_count == 0
+
+    def test_split_coarse_step_decomposes(self) -> None:
+        """_split_coarse_step breaks a coarse step into one PlanStep per clause."""
+        step = PlanStep(
+            description="Fetch the data and clean it then write to disk",
+            tool_name="code_executor",
+            expected_output="file",
+        )
+        sub = _split_coarse_step(step)
+        assert len(sub) == 3
+        assert [s.description for s in sub] == [
+            "Fetch the data", "clean it", "write to disk",
+        ]
+        # Context inherited.
+        for s in sub:
+            assert s.tool_name == "code_executor"
+            assert s.expected_output == "file"
+
+    def test_split_returns_unchanged_when_single_clause(self) -> None:
+        """A non-coarse description (one clause) is returned unchanged."""
+        step = PlanStep(description="Compute the Fibonacci sequence")
+        assert _split_coarse_step(step) == [step]
+
+
+class TestPlanAtomicityNodeIntegration:
+    """Feature C — plan_node attaches plan_quality + enforce-gated split."""
+
+    _COARSE_PLAN_JSON = (
+        '{"steps": ['
+        '{"description": "Fetch the data and clean it then write to disk", '
+        '"tool_name": "code_executor", "expected_output": "file", '
+        '"depends_on": []}'
+        '], "rationale": "one coarse step"}'
+    )
+
+    def _state_with_coarse_goal(self, thread: str) -> dict:
+        state = initial_state(
+            "fetch the data and clean it then write to disk", thread,
+        )
+        state["strategy"] = Strategy.PLANNING
+        state["current_goal"] = Goal(
+            text="fetch the data and clean it then write to disk",
+            status=GoalStatus.ACTIVE,
+            complexity=TaskComplexity.COMPLEX,
+        )
+        return state
+
+    @pytest.mark.asyncio
+    async def test_plan_quality_always_attached(self) -> None:
+        """Even with enforce off, plan_quality is attached as advisory telemetry."""
+        state = self._state_with_coarse_goal("thread-quality")
+        result = await plan_node(state, gateway=_mock_gateway_for_plan(self._COARSE_PLAN_JSON))
+        # The coarse step is preserved (enforce is off by default).
+        assert len(result["plan_steps"]) == 1
+        pq = result["plan_quality"]
+        assert pq["too_coarse_count"] == 1
+        assert pq["atomic"] is False
+        assert pq["per_step"][0]["flag"] == "too_coarse"
+        # No enforcement attempted -> no replan marker.
+        assert "atomicity_replan_done" not in result
+
+    @pytest.mark.asyncio
+    async def test_enforce_off_preserves_coarse_step(self) -> None:
+        """Default-off: the coarse step is NOT split (plan unchanged)."""
+        state = self._state_with_coarse_goal("thread-nosplit")
+        result = await plan_node(state, gateway=_mock_gateway_for_plan(self._COARSE_PLAN_JSON))
+        assert len(result["plan_steps"]) == 1
+        assert "fetch the data" in result["plan_steps"][0].description.lower()
+
+    @pytest.mark.asyncio
+    async def test_enforce_on_splits_coarse_step(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """enforce on + coarse step -> one bounded heuristic split."""
+        monkeypatch.setattr(get_settings().agent, "plan_atomicity_enforce", True)
+        state = self._state_with_coarse_goal("thread-split")
+        result = await plan_node(state, gateway=_mock_gateway_for_plan(self._COARSE_PLAN_JSON))
+        # The single coarse step decomposed into 3 atomic clauses.
+        assert len(result["plan_steps"]) == 3
+        assert result["atomicity_replan_done"] is True
+        # Re-validated quality now reports the plan as atomic.
+        assert result["plan_quality"]["atomic"] is True
+        assert result["plan_quality"]["too_coarse_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_replan_done_guard_prevents_resplit(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """atomicity_replan_done set in state -> no re-split even with enforce on."""
+        monkeypatch.setattr(get_settings().agent, "plan_atomicity_enforce", True)
+        state = self._state_with_coarse_goal("thread-guard")
+        state["atomicity_replan_done"] = True
+        result = await plan_node(state, gateway=_mock_gateway_for_plan(self._COARSE_PLAN_JSON))
+        # Guard held: the coarse step is NOT decomposed.
+        assert len(result["plan_steps"]) == 1
+        assert result["plan_quality"]["too_coarse_count"] == 1

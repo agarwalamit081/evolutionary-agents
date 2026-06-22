@@ -45,6 +45,12 @@ class AgentState(TypedDict, total=False):
     strategy: Strategy
     plan_steps: list[PlanStep]
     current_step_index: int
+    # Feature C: per-step atomicity. plan_quality is a PlanQuality.model_dump()
+    # dict (checkpoint-safe advisory telemetry on decomposition quality).
+    # atomicity_replan_done is the write-once guard bounding the heuristic
+    # coarse-step split to a single pass per run (loop safety).
+    plan_quality: dict[str, Any]
+    atomicity_replan_done: bool
 
     # ─── Intent & Ambiguity (Feature A) ─────────────────────────────────
     # Advisory-only: surfaced by the classify node, consumed downstream by

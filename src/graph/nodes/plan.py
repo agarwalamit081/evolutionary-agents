@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from src.graph.models import Goal, PlanStep
 from src.graph.state import AgentState
 
 if TYPE_CHECKING:
+    from src.graph.schemas import PlanQuality
     from src.llm.gateway import LLMGateway
     from src.tools.registry import ToolRegistry
 
@@ -71,12 +73,54 @@ async def plan_node(
 
     logger.info(f"Generated {len(plan_steps)} plan steps")
 
-    return {
+    # Feature C: per-step atomicity. Always compute + attach ``plan_quality``
+    # as advisory telemetry (a model_dump dict — checkpoint-safe). When
+    # ``plan_atomicity_enforce`` is on and a too_coarse step is found, run ONE
+    # bounded heuristic split (guarded by ``atomicity_replan_done`` so a
+    # reflect→plan loop can't re-split the same step forever). Pure heuristic —
+    # zero LLM cost, fully deterministic.
+    atomicity_replan_done = bool(state.get("atomicity_replan_done"))
+    quality = _validate_step_atomicity(plan_steps)
+    if (
+        get_settings().agent.plan_atomicity_enforce
+        and not atomicity_replan_done
+        and quality.too_coarse_count > 0
+    ):
+        # Mark attempted regardless of outcome — a coarse step that won't split
+        # must not be retried every re-plan (the loop guard).
+        atomicity_replan_done = True
+        refined_steps: list[PlanStep] = []
+        for step in plan_steps:
+            verdict = next(
+                (v for v in quality.per_step if v.step_id == step.id), None
+            )
+            if verdict is not None and verdict.flag == "too_coarse":
+                refined_steps.extend(_split_coarse_step(step))
+            else:
+                refined_steps.append(step)
+        if len(refined_steps) != len(plan_steps):
+            plan_steps = refined_steps[:max_steps]
+            quality = _validate_step_atomicity(plan_steps)
+            logger.info(
+                f"Atomicity enforce: decomposed coarse step(s) -> "
+                f"{len(plan_steps)} steps"
+            )
+    if not quality.atomic:
+        logger.warning(
+            f"Plan not atomic: {quality.too_coarse_count} too_coarse, "
+            f"{quality.too_fine_count} too_fine"
+        )
+
+    result: dict[str, Any] = {
         "phase": Phase.RETRIEVE_MEMORY,
         "plan_steps": plan_steps,
         "current_step_index": 0,
         "iteration_count": iteration_count + 1,
+        "plan_quality": quality.model_dump(),
     }
+    if atomicity_replan_done:
+        result["atomicity_replan_done"] = True
+    return result
 
 
 # Keywords marking a failure as a content-hash / handoff-integrity problem. The
@@ -412,3 +456,90 @@ def _generate_plan(goal_text: str, strategy: Strategy) -> list[PlanStep]:
         ))
 
     return steps
+
+
+# ── Feature C: per-step atomicity (pure heuristic) ────────────────────────
+
+# Conjunctions / clause delimiters that signal a step bundles multiple actions.
+_ATOMIC_CONJUNCTION_RE = re.compile(r"\b(?:and|then|also)\b|;", re.IGNORECASE)
+# Splitter — consumes the delimiters + surrounding whitespace into clauses.
+_COARSE_SPLIT_RE = re.compile(r"\s*(?:\b(?:and|then|also)\b|;)\s*", re.IGNORECASE)
+_FINE_MAX_WORDS = 3
+_COARSE_SPLIT_CAP = 4
+
+
+def _validate_step_atomicity(steps: list[PlanStep]) -> PlanQuality:
+    """Flag each plan step as atomic / too_coarse / too_fine (pure heuristic).
+
+    - ``too_coarse``: >=2 conjunction/';' markers — the step bundles multiple
+      actions and should be decomposed.
+    - ``too_fine``: fewer than ``_FINE_MAX_WORDS`` AND no expected_output —
+      the step is under-specified.
+    - ``atomic``: otherwise.
+
+    Returns a :class:`PlanQuality` (advisory; never mutates the steps).
+    """
+    from src.graph.schemas import PlanQuality, StepAtomicity
+
+    per_step: list[StepAtomicity] = []
+    coarse = 0
+    fine = 0
+    atomic_all = True
+    for step in steps:
+        desc = (step.description or "").strip()
+        words = len(desc.split())
+        conjunctions = len(_ATOMIC_CONJUNCTION_RE.findall(desc))
+        flag = "atomic"
+        reason = "single, well-scoped action"
+        if conjunctions >= 2:
+            flag = "too_coarse"
+            reason = (
+                f"{conjunctions} conjunction/clause markers — "
+                "split into atomic sub-steps"
+            )
+            coarse += 1
+            atomic_all = False
+        elif words < _FINE_MAX_WORDS and not (step.expected_output or "").strip():
+            flag = "too_fine"
+            reason = (
+                f"only {words} word(s) and no expected_output — under-specified"
+            )
+            fine += 1
+            atomic_all = False
+        per_step.append(StepAtomicity(
+            step_id=step.id,
+            description=desc[:120],
+            flag=flag,
+            reason=reason,
+        ))
+    return PlanQuality(
+        per_step=per_step,
+        atomic=atomic_all,
+        too_coarse_count=coarse,
+        too_fine_count=fine,
+    )
+
+
+def _split_coarse_step(step: PlanStep) -> list[PlanStep]:
+    """Heuristically decompose a too_coarse step on its conjunctions.
+
+    Bounded + deterministic (no LLM cost): 'fetch X and clean it then write to
+    disk' becomes one ``PlanStep`` per clause, each inheriting the parent's
+    ``tool_name`` / ``expected_output`` context. Returns ``[step]`` unchanged
+    when the split yields fewer than 2 clauses (nothing to decompose).
+    """
+    parts = [
+        p.strip() for p in _COARSE_SPLIT_RE.split(step.description or "") if p.strip()
+    ]
+    if len(parts) < 2:
+        return [step]
+    sub_steps: list[PlanStep] = []
+    for clause in parts[:_COARSE_SPLIT_CAP]:
+        sub_steps.append(PlanStep(
+            id=uuid4().hex[:8],
+            description=clause,
+            tool_name=step.tool_name,
+            expected_output=step.expected_output,
+            status=step.status,
+        ))
+    return sub_steps

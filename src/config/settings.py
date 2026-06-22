@@ -908,6 +908,12 @@ class AgentSettings(BaseSettings):
     # degrades to advisory (carries notes forward) rather than stalling the run.
     clarifying_hitl_threshold: float = 0.7  # Env: CLARIFYING_HITL_THRESHOLD
     clarifying_hitl_enabled: bool = False  # Env: CLARIFYING_HITL_ENABLED
+    # Feature C: per-step atomicity. plan_quality is ALWAYS computed + attached
+    # as advisory telemetry. When this gate is on, a too_coarse step (>=2
+    # conjunctions) triggers ONE bounded heuristic conjunction-split (guarded
+    # by atomicity_replan_done so a reflect->plan loop can't re-split forever).
+    # Pure heuristic — zero LLM cost. Default off: plans pass through unchanged.
+    plan_atomicity_enforce: bool = False  # Env: PLAN_ATOMICITY_ENFORCE
 
     # Concurrency + loop bounds (previously module constants in
     # src/graph/nodes/execute.py and src/graph/nodes/tool_create.py, and the

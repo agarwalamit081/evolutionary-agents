@@ -979,6 +979,41 @@ class TestGoalDeliverableFallback:
         goal = "Build a report from results/input.csv, saving results/output.md"
         assert _extract_goal_deliverable(goal) == "results/output.md"
 
+    # ── Bug #5: bare-filename deliverables (no results/ prefix) ──────────
+
+    def test_extract_goal_deliverable_bare_filename_named_cue(self) -> None:
+        """Bug #5: a goal naming its output without the results/ prefix
+        ("write a CSV file named primes_demo.csv") must still resolve the
+        deliverable. Previously the regex required results/ and returned None,
+        so the evolution gate never matched a completed bare-filename run."""
+        goal = "Write a CSV file named primes_demo.csv with the first 15 primes."
+        assert _extract_goal_deliverable(goal) == "primes_demo.csv"
+
+    def test_extract_goal_deliverable_bare_filename_save_cue(self) -> None:
+        """A bare filename preceded by a save/write verb resolves."""
+        goal = "compute the primes and save primes_demo.csv"
+        assert _extract_goal_deliverable(goal) == "primes_demo.csv"
+
+    def test_extract_goal_deliverable_bare_filename_no_cue_returns_none(self) -> None:
+        """False-positive guard: a bare known-extension token NOT preceded by an
+        output cue is incidental text ("the schema is in schema.md"), not a
+        deliverable. Returning None here is correct — neither caller treats it
+        as success (nudge runs once; evolution gate uses its other criterion)."""
+        goal = "Analyze the engine latency; the schema is documented in schema.md"
+        assert _extract_goal_deliverable(goal) is None
+
+    def test_extract_goal_deliverable_ignores_version_and_decimal_tokens(self) -> None:
+        """Version strings ("v0.23.0") and decimals are NOT grabbed as paths —
+        the bare branch is restricted to known data/text extensions."""
+        goal = "Benchmark vLLM v0.23.0 against TGI v0.19.0 and report the ratio as 2.0"
+        assert _extract_goal_deliverable(goal) is None
+
+    def test_extract_goal_deliverable_bare_output_wins_over_results_input(self) -> None:
+        """A results/-prefixed INPUT (read-context) is skipped in favour of a
+        bare-filename OUTPUT named later, proving the two shapes cooperate."""
+        goal = "read results/input.csv and write a summary to brief.md"
+        assert _extract_goal_deliverable(goal) == "brief.md"
+
     def test_is_producing_step_true_for_merge(self) -> None:
         assert _is_producing_step(
             "Merge all three processed results into a cohesive Q3 overview", 0, 2

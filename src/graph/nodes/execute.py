@@ -73,8 +73,20 @@ _WRITE_INTENT_RE = re.compile(
 # producing step that declares no path of its own — without it, a "merge the
 # results into a cohesive overview" step narrates the deliverable as prose and
 # never calls file_writer (Q3 never produced q3_overview.md).
+# An OUTPUT deliverable path named in the goal. Two shapes:
+# (a) ``results/<name>.<ext>`` — a strong path signal (always a deliverable
+#     candidate, subject only to input-skipping below).
+# (b) a bare ``<name>.<ext>`` — natural-language goals often name outputs
+#     without the results/ prefix ("write a CSV file named primes_demo.csv").
+#     Restricted to known data/text extensions so decimals ("2.0") and version
+#     strings ("v0.23.0") are not grabbed, AND (in _extract_goal_deliverable)
+#     to a preceding output cue. Without (b) the objective-success evolution
+#     gate never matched bare-filename goals, so evolution never fired on them
+#     (Bug #5: covbench/primes goals returned None and a completed run's
+#     success never crystallized into a mutation).
 _GOAL_DELIVERABLE_RE = re.compile(
-    r"\b(results/[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+)\b",
+    r"\b(?:results/[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+"
+    r"|[A-Za-z0-9_][A-Za-z0-9_-]*\.(?:csv|json|jsonl|md|txt|py|xlsx|tsv|html|xml|yaml|yml))\b",
     re.IGNORECASE,
 )
 
@@ -82,9 +94,18 @@ _GOAL_DELIVERABLE_RE = re.compile(
 # writes. A goal commonly names its input first ("Reuse q01's normalizer output
 # at results/q01/normalized.csv"), so the first match is the input; without this
 # guard _extract_goal_deliverable returned that input as the deliverable (F-k).
-# The signal is the word immediately before "results/".
+# The signal is the word immediately before the path.
 _GOAL_INPUT_CONTEXT_RE = re.compile(
     r"\b(?:at|from|using|against|reuse|input|source|read)\s*$",
+    re.IGNORECASE,
+)
+
+# A bare deliverable (no results/ prefix) is only an OUTPUT when an output cue
+# immediately precedes it; otherwise a known-extension token in the goal is
+# incidental text (a doc mention, a reference). Checked in the same look-back
+# window _extract_goal_deliverable uses for input-skipping.
+_GOAL_OUTPUT_CONTEXT_RE = re.compile(
+    r"\b(?:named|called|to|into|onto|as|file|filename|files|save\w*|writ\w*|produc\w*|generat\w*|output|export\w*|dump\w*)\s*$",
     re.IGNORECASE,
 )
 
@@ -209,13 +230,23 @@ def _extract_expected_file_path(step_description: str) -> str | None:
 def _extract_goal_deliverable(goal_text: str) -> str | None:
     """Return the canonical OUTPUT deliverable path named in the goal, or None.
 
-    Goals embed paths as ``results/<name>.<ext>``. A goal often names its INPUT
-    first ("process results/q01/x.csv -> write results/q03/y.csv"), so returning
-    the first match grabs the input (F-k). Instead skip any path whose
-    immediately-preceding word marks it as an input (at/from/using/against/reuse/
-    input/source/read) and return the LAST remaining match — outputs are stated
-    last, after "writing ... to". If every path is input-context, fall back to
-    the last path overall.
+    Two path shapes are recognized:
+    - ``results/<name>.<ext>`` — a strong output signal; always a candidate
+      (subject only to input-context skipping below).
+    - a bare ``<name>.<ext>`` (no results/ prefix) — recognized ONLY when an
+      output cue (named/called/to/into/as/file/save/write/produce/generate/
+      output/export/dump) immediately precedes it. Natural-language goals name
+      outputs without the prefix ("write a CSV file named primes_demo.csv");
+      without bare-filename support such a goal's success never matched the
+      evolution gate, so it never crystallized into a mutation (Bug #5). The cue
+      gate keeps an incidental mention ("see perf.md") from being mistaken for a
+      deliverable.
+
+    A goal often names its INPUT first ("process results/q01/x.csv -> write
+    ... to results/q03/y.csv"), so skip any path whose preceding word marks it
+    as input (at/from/using/against/reuse/input/source/read) and return the LAST
+    remaining candidate — outputs are stated last. If no candidate survives,
+    return None (no confident output signal) rather than guessing.
     """
     text = goal_text or ""
     matches = list(_GOAL_DELIVERABLE_RE.finditer(text))
@@ -223,13 +254,22 @@ def _extract_goal_deliverable(goal_text: str) -> str | None:
         return None
     outputs: list[str] = []
     for match in matches:
+        token = match.group(0)
         window = text[max(0, match.start() - 24): match.start()].lower()
         if _GOAL_INPUT_CONTEXT_RE.search(window):
             continue
-        outputs.append(match.group(1))
-    if outputs:
-        return outputs[-1]
-    return matches[-1].group(1)
+        # A bare filename (no results/ prefix) is a deliverable only when an
+        # output cue precedes it; a results/ path is always a candidate.
+        if not token.lower().startswith("results/") and not _GOAL_OUTPUT_CONTEXT_RE.search(window):
+            continue
+        outputs.append(token)
+    # No candidate survived input-skip + output-cue gating. Rather than guess an
+    # incidental path (a bare-filename mention that the output cue filtered out
+    # would be re-admitted by a naive "last match" fallback — reopening the very
+    # false-positive hole the gate closes), report no confident output signal.
+    # Both callers handle None: the execute nudge runs the step once, and the
+    # evolution gate falls back to its non-deliverable success criterion.
+    return outputs[-1] if outputs else None
 
 
 def _is_producing_step(

@@ -126,6 +126,14 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     "tree_sitter",
     "tree_sitter_python",
     "arxiv",
+    # ── Phase S8 — algebraic modeling + offline solver ──
+    # ``pyomo``: LP/MILP/MINLP modeling. Offline solving via ``highspy`` (the HiGHS
+    # solver, bundled in its pip wheel — appsi_highs), verified end-to-end: solves a
+    # trivial LP to the known optimum with NO glpk/cbc system binary and NO apt dep.
+    # ``highspy`` is also allowlisted for direct HiGHS use. Both respect the no-
+    # managed-binary invariant (the compiled HiGHS ships inside the highspy wheel).
+    "pyomo",
+    "highspy",
 })
 
 # Maximum number of tools that can be created per agent run.
@@ -185,6 +193,12 @@ SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     "tree-sitter",
     "tree-sitter-python",
     "arxiv",
+    # ── Phase S8 — algebraic modeling + offline HiGHS solver ──
+    # pyomo drives highspy (appsi_highs) for offline LP/MILP; highspy bundles the
+    # compiled HiGHS solver in its wheel — no glpk/cbc/apt dep. See the ALLOWED_MODULES
+    # Phase-S8 note; both share their import name.
+    "pyomo",
+    "highspy",
 })
 
 
@@ -273,6 +287,8 @@ def get_materializer_namespace() -> dict[str, Any]:
         # tree_sitter/tree_sitter_python (tree-sitter + Python grammar), arxiv.
         "fitz", "pymupdf", "pulp", "cvxpy",
         "tree_sitter", "tree_sitter_python", "arxiv",
+        # Phase S8: pyomo (modeling) + highspy (offline HiGHS solver backend).
+        "pyomo", "highspy",
     ):
         try:
             mod = __import__(mod_name)

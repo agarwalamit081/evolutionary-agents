@@ -36,6 +36,7 @@ RUN pip install --no-cache-dir \
     redis \
     python-dateutil jsonschema tenacity loguru \
     scipy scikit-learn openpyxl tabulate aiofiles trafilatura libcst \
-    pymupdf pulp cvxpy tree-sitter tree-sitter-python arxiv
+    pymupdf pulp cvxpy tree-sitter tree-sitter-python arxiv \
+    pyomo highspy
 
 CMD ["python"]

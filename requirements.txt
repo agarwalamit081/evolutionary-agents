@@ -105,6 +105,8 @@ cvxpy==1.9.1                        # Convex optimization, bundles OSQP/ECOS/SCS
 tree-sitter==0.25.2                 # Incremental parser (import tree_sitter) — allowlisted for generated tools
 tree-sitter-python==0.25.0          # Python grammar for tree-sitter (import tree_sitter_python) — allowlisted for generated tools
 arxiv==4.0.0                        # arXiv API client — allowlisted for generated tools
+pyomo==6.10.1                       # Algebraic modeling (LP/MILP/MINLP) — allowlisted; offline solver via highspy
+highspy==1.14.0                     # HiGHS LP/MILP/QP solver (bundled in wheel) — pyomo's appsi_highs backend + direct use
 
 # ─── Development & Testing ──────────────────────────────────────
 pytest==8.4.2

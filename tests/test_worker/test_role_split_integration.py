@@ -93,7 +93,7 @@ class TestApiWorkerRoleSplit:
         """api enqueue → worker drain → status COMPLETED + deliverable + acked."""
         seen: dict[str, RunJob] = {}
 
-        async def fake_executor(job: RunJob) -> dict[str, Any]:
+        async def fake_executor(job: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             seen["job"] = job
             return {"final_output": "DELIVERABLE", "is_complete": True, "iteration_count": 1}
 
@@ -125,7 +125,7 @@ class TestApiWorkerRoleSplit:
         """
         calls = {"n": 0}
 
-        async def flaky_executor(job: RunJob) -> dict[str, Any]:
+        async def flaky_executor(job: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("transient worker failure")

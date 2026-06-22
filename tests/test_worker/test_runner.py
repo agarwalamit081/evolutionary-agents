@@ -44,7 +44,7 @@ class TestRunConsumerCore:
         store = RunStatusStore(fake_redis, worker_settings)
         job = RunJob(run_id="ok", goal="g")
 
-        async def executor(_j: RunJob) -> dict[str, Any]:
+        async def executor(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             return _ok_result()
 
         consumer = RunConsumer(queue, store, executor, worker_settings)
@@ -64,6 +64,46 @@ class TestRunConsumerCore:
         assert record.is_complete is True
         assert record.iteration_count == 3
 
+    async def test_process_reports_iteration_count_mid_run(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """#255: the executor's on_progress callback mirrors the live
+        iteration_count onto the RUNNING status record mid-run, so GET
+        /runs/<id> no longer reports iteration_count=0 until completion."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        job = RunJob(run_id="prog", goal="g")
+
+        mid_run_counts: list[int] = []
+
+        async def executor(_j: RunJob, on_progress: Any = None) -> dict[str, Any]:
+            # Simulate execute_run advancing through iterations (as astream
+            # would). Each report must land on the RUNNING status record.
+            assert on_progress is not None, "consumer must pass a progress callback"
+            for ic in (1, 2, 3):
+                await on_progress(ic)
+                record = await store.get("prog")
+                assert record is not None
+                assert record.iteration_count == ic
+                assert record.status is JobStatus.RUNNING
+                mid_run_counts.append(record.iteration_count)
+            return {"final_output": "done", "is_complete": True, "iteration_count": 3}
+
+        consumer = RunConsumer(queue, store, executor, worker_settings)
+        await queue.ensure_group()
+        await queue.enqueue(job)
+        entries = await queue.read_new()
+        acked = await consumer._process(entries[0][0], job)
+
+        assert acked is True
+        # Progress was visible mid-run (not stuck at 0 throughout).
+        assert mid_run_counts == [1, 2, 3]
+        # The terminal COMPLETED record carries the authoritative count.
+        final = await store.get("prog")
+        assert final is not None
+        assert final.status is JobStatus.COMPLETED
+        assert final.iteration_count == 3
+
     async def test_process_failure_marks_failed_and_does_not_ack(
         self, fake_redis, worker_settings
     ) -> None:
@@ -72,7 +112,7 @@ class TestRunConsumerCore:
         store = RunStatusStore(fake_redis, worker_settings)
         job = RunJob(run_id="boom", goal="g")
 
-        async def executor(_j: RunJob) -> dict[str, Any]:
+        async def executor(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             raise RuntimeError("worker crashed mid-run")
 
         consumer = RunConsumer(queue, store, executor, worker_settings)
@@ -97,7 +137,7 @@ class TestRunConsumerCore:
         await queue.enqueue(RunJob(run_id="a", goal="g"))
         await queue.enqueue(RunJob(run_id="b", goal="g"))
 
-        async def executor(j: RunJob) -> dict[str, Any]:
+        async def executor(j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             return {"final_output": j.run_id, "is_complete": True}
 
         consumer = RunConsumer(queue, store, executor, worker_settings)
@@ -122,10 +162,10 @@ class TestRunConsumerRecovery:
         store = RunStatusStore(fake_redis, worker_settings)
         job = RunJob(run_id="crash", goal="survive the crash")
 
-        async def always_fail(_j: RunJob) -> dict[str, Any]:
+        async def always_fail(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             raise RuntimeError("boom")
 
-        async def succeed(_j: RunJob) -> dict[str, Any]:
+        async def succeed(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             return _ok_result()
 
         await queue_a.ensure_group()
@@ -168,7 +208,7 @@ class TestRunConsumerServeLoop:
         await queue.enqueue(RunJob(run_id="s1", goal="g"))
         stop = asyncio.Event()
 
-        async def executor(_j: RunJob) -> dict[str, Any]:
+        async def executor(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             stop.set()  # in-loop signal — no competing task to starve
             return _ok_result()
 
@@ -191,7 +231,7 @@ class TestRunConsumerServeLoop:
         await queue.enqueue(RunJob(run_id="c1", goal="g"))
         started = asyncio.Event()
 
-        async def slow_executor(_j: RunJob) -> dict[str, Any]:
+        async def slow_executor(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             started.set()
             # Suspend here so serve_forever is parked when we cancel — cancel is
             # injected at this suspension point (CancelledError is BaseException,
@@ -227,7 +267,7 @@ class TestRunConsumerDeadLetter:
         store = RunStatusStore(fake_redis, s)
         job = RunJob(run_id="poison", goal="g")
 
-        async def always_raise(_j: RunJob) -> dict[str, Any]:
+        async def always_raise(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             raise RuntimeError("deterministic boom")
 
         consumer = RunConsumer(queue, store, always_raise, s)
@@ -274,7 +314,7 @@ class TestRunConsumerLeaseLock:
         release_a = asyncio.Event()
         a_calls = 0
 
-        async def slow_executor_a(_j: RunJob) -> dict[str, Any]:
+        async def slow_executor_a(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             nonlocal a_calls
             a_calls += 1
             started.set()
@@ -283,7 +323,7 @@ class TestRunConsumerLeaseLock:
 
         b_calls = 0
 
-        async def executor_b(_j: RunJob) -> dict[str, Any]:
+        async def executor_b(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             nonlocal b_calls
             b_calls += 1
             return _ok_result()
@@ -325,7 +365,7 @@ class TestRunConsumerLeaseLock:
         store = RunStatusStore(fake_redis, worker_settings)
         job = RunJob(run_id="fails", goal="g")
 
-        async def boom(_j: RunJob) -> dict[str, Any]:
+        async def boom(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             raise RuntimeError("boom")
 
         consumer = RunConsumer(queue, store, boom, worker_settings)
@@ -355,14 +395,14 @@ class TestRunConsumerLeaseLock:
 
         a_calls = 0
 
-        async def exec_a(_j: RunJob) -> dict[str, Any]:
+        async def exec_a(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             nonlocal a_calls
             a_calls += 1
             return _ok_result()
 
         b_calls = 0
 
-        async def exec_b(_j: RunJob) -> dict[str, Any]:
+        async def exec_b(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
             nonlocal b_calls
             b_calls += 1
             return _ok_result()

@@ -26,12 +26,21 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
 
 from src.config.settings import Settings  # noqa: TC003 — used in annotations
+
+# Optional per-run progress reporter. The queue worker binds one (via the
+# executor) so ``execute_run`` can stream the live ``iteration_count`` into the
+# run-status hash mid-run — without it, ``GET /runs/<id>`` reports
+# iteration_count=0 for the whole run until completion (#255). ``None`` (the CLI
+# path, which has no status store) keeps ``execute_run`` on the atomic
+# ``ainvoke`` path with zero behavior change.
+RunProgressCallback = Callable[[int], Awaitable[None]]
 
 
 def _thread_id_for_run(run_id: str | None, goal_text: str, *, origin: str = "cli") -> str:
@@ -138,6 +147,7 @@ async def execute_run(
     model: str | None = None,
     resume: bool = False,
     origin: str = "cli",
+    on_progress: RunProgressCallback | None = None,
 ) -> dict:
     """Run the agent graph to completion.
 
@@ -158,6 +168,14 @@ async def execute_run(
         origin: Checkpoint thread_id prefix (``"cli"`` default). The queue worker
             passes ``"api"`` so an API-routed run never collides with a CLI run
             sharing the same run_id on the checkpointer.
+        on_progress: Optional async callback invoked with the live
+            ``iteration_count`` whenever it changes during the run. When
+            provided, the graph is driven via ``astream`` (stream_mode="values")
+            so each super-step's iteration_count is reported mid-run; the worker
+            uses this to mirror progress into the run-status hash (#255). When
+            ``None`` (the CLI path), the run uses the atomic ``ainvoke`` path
+            unchanged. The callback is observability-only — a raise inside it is
+            caught and logged, never aborting the run.
 
     Returns:
         Final agent state as a dict.
@@ -347,11 +365,34 @@ async def execute_run(
     if checkpointer is not None:
         invoke_config["configurable"] = {"thread_id": thread_id}
     try:
-        result = await compiled.ainvoke(
-            None if resume else state,
-            config=invoke_config,
-        )
-        result_dict = dict(result)
+        if on_progress is None:
+            # CLI path (no status store): atomic invoke — zero behavior change.
+            result = await compiled.ainvoke(
+                None if resume else state,
+                config=invoke_config,
+            )
+            result_dict = dict(result)
+        else:
+            # Worker path (#255): stream each super-step so the live
+            # iteration_count reaches the run-status hash mid-run via on_progress.
+            # The last yielded state == the final state ainvoke would return, so
+            # result_dict is equivalent. Report only on change to avoid Redis churn.
+            result_dict: dict[str, Any] = {}
+            last_reported = -1
+            async for chunk in compiled.astream(
+                None if resume else state,
+                config=invoke_config,
+                stream_mode="values",
+            ):
+                if isinstance(chunk, dict):
+                    result_dict = chunk
+                    ic = int(chunk.get("iteration_count", 0) or 0)
+                    if ic != last_reported:
+                        last_reported = ic
+                        try:
+                            await on_progress(ic)
+                        except Exception as e:  # noqa: BLE001 — progress is observability-only
+                            logger.debug(f"run progress callback error (ignored): {e}")
 
         # Cost/token fallback: if the graph terminated without flushing
         # cost_records via store_memory (e.g. error_termination), recover from the

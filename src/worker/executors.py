@@ -14,20 +14,29 @@ defers its graph/DB imports, so importing it is cheap.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from src.runner import execute_run
+from src.runner import RunProgressCallback, execute_run
 from src.worker.schema import RunJob
 
 
-async def default_agent_executor(job: RunJob) -> dict[str, Any]:
+async def default_agent_executor(
+    job: RunJob,
+    on_progress: Callable[[int], Awaitable[None]] | None = None,
+) -> dict[str, Any]:
     """Run a queued job through the full agent graph; return its final state.
 
     ``resume=False``: each claim is a fresh execution that resumes from the last
     checkpoint via the stable ``api-{run_id}`` thread (handled inside
     ``execute_run`` when a checkpointer is wired). At-least-once redelivery thus
     resumes mid-run rather than restarting.
+
+    ``on_progress``: forwarded to ``execute_run`` so the worker can stream the
+    live iteration_count into the run-status hash mid-run (#255). ``None`` keeps
+    the atomic ainvoke path.
     """
+    _progress: RunProgressCallback | None = on_progress
     return await execute_run(
         goal_text=job.goal,
         max_iterations=job.max_iterations,
@@ -36,4 +45,5 @@ async def default_agent_executor(job: RunJob) -> dict[str, Any]:
         model=job.model,
         resume=False,
         origin="api",
+        on_progress=_progress,
     )

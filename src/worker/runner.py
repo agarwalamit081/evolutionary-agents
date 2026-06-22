@@ -28,10 +28,15 @@ from src.worker.status import RunStatusStore
 if TYPE_CHECKING:
     from src.config.settings import WorkerSettings
 
-# A run executor: given a queued job, run the agent and return its final state
-# dict (final_output / is_complete / iteration_count). The default production
-# executor calls src.runner.execute_run (see src.worker.executors).
-RunExecutor = Callable[[RunJob], Awaitable[dict[str, Any]]]
+# A run executor: given a queued job (+ an optional progress callback), run the
+# agent and return its final state dict (final_output / is_complete /
+# iteration_count). The default production executor calls src.runner.execute_run
+# (see src.worker.executors). The progress callback lets the executor stream the
+# live iteration_count back mid-run so the run-status hash reflects progress
+# (#255); it may be ignored (fakes) or None (no progress reporting).
+RunExecutor = Callable[
+    [RunJob, Callable[[int], Awaitable[None]] | None], Awaitable[dict[str, Any]]
+]
 
 
 class RunConsumer:
@@ -93,8 +98,20 @@ class RunConsumer:
         try:
             await self._status.mark(run_id, thread_id, JobStatus.RUNNING)
             logger.info(f"Worker claimed run {run_id} ({entry_id}): {job.goal[:80]}")
+
+            # #255: report the live iteration_count into the status hash mid-run so
+            # GET /runs/<id> reflects progress (previously 0 until completion). The
+            # callback mirrors each increment onto the RUNNING record; the executor
+            # may ignore it (fakes), and the COMPLETED mark below still stamps the
+            # authoritative final count. execute_run streams only while a callback
+            # is passed, so the CLI path (callback=None) is unchanged.
+            async def _report_progress(iteration: int) -> None:
+                await self._status.mark(
+                    run_id, thread_id, JobStatus.RUNNING, iteration_count=iteration
+                )
+
             try:
-                result = await self._executor(job)
+                result = await self._executor(job, _report_progress)
             except Exception as exc:
                 # Dead-letter cap (Bug B). ``record_attempt`` is keyed by run_id, so
                 # the count is stable across XAUTOCLAIM redelivery (same consumer or a

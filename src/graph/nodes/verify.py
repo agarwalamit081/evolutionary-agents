@@ -775,6 +775,20 @@ def _extract_deliverable_paths(state: AgentState) -> list[str]:
             return
         if len(cleaned) < 2 or cleaned.lower() in _PATH_NOISE_TOKENS:
             return
+        # A deliverable must look like a path: a nested location (contains "/")
+        # or a dotted extension. _DIR_OUTPUT_RE's phrasal cue
+        # ("create/generate/produce ... in/into/under/at <token>") captures the
+        # first token after the preposition WITHOUT requiring a dot, so bare
+        # prose leaks in — "generating latency in milliseconds", "across
+        # concurrency levels" captured "milliseconds"/"concurrency". Such a
+        # token passes _has_alpha_extension (a dotless token's final segment is
+        # the token itself, which has letters) yet can never exist on disk, so
+        # verify reports it missing and loops verify→plan until the iteration
+        # hard-cap (coverage covbench query looped on these). Every real
+        # deliverable carries a dot (from _SAVE_TO_RE /
+        # _DELIVERABLE_CONTINUATION_RE) or a slash, so this only drops phantoms.
+        if "/" not in cleaned and "." not in cleaned:
+            return
         # Numeric-range / version shorthand the regex mis-captures as a path
         # ("1..100", "v1.2.3", "1.5"): a final extension with no letter can never
         # be a real deliverable, and treating it as one loops verify→plan until
@@ -867,6 +881,14 @@ def _extract_goal_deliverables(state: AgentState) -> list[str]:
         if cleaned.rsplit("/", 1)[-1].startswith("."):
             return
         if len(cleaned) < 2 or cleaned.lower() in _PATH_NOISE_TOKENS:
+            return
+        # A deliverable must look like a path (contains "/" or a dotted
+        # extension) — see _extract_deliverable_paths._add for the full
+        # rationale. _DIR_OUTPUT_RE captures bare prose ("generating ... in
+        # milliseconds" → "milliseconds") that passes _has_alpha_extension yet
+        # can never exist on disk and loops verify→plan until the cap. Mirrors
+        # the guard there.
+        if "/" not in cleaned and "." not in cleaned:
             return
         # Numeric-range / version shorthand the regex mis-captures as a path
         # ("1..100", "v1.2.3", "1.5"): a final extension with no letter can never

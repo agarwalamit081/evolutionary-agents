@@ -376,6 +376,47 @@ class TestNumericRangePhantomExclusion:
         assert "summary.json" in goal_paths  # real goal deliverable survives
         assert "1..100" not in goal_paths  # numeric-range phantom dropped
 
+    def test_bare_prose_phantom_excluded_from_plan(self) -> None:
+        """_DIR_OUTPUT_RE captures the token after "generate ... in/under/at"
+        WITHOUT requiring a dot, so bare prose leaks in. The coverage covbench
+        goal "generating ... latency in milliseconds" captured "milliseconds"
+        and "across ... concurrency levels" captured "concurrency"; both pass
+        _has_alpha_extension (a dotless token's final segment is the token
+        itself) yet can never exist on disk, so verify looped verify→plan until
+        the iteration hard-cap. The path-like guard now drops them while the
+        real deliverables (.csv/.md) survive.
+        """
+        state = initial_state(
+            "Produce a brief generating latency in milliseconds across "
+            "concurrency levels. Write metrics to engine_latency_metrics.csv. "
+            "Write the report to engine_serving_brief.md.",
+            "thread-bare-prose-phantom",
+        )
+        state["plan_steps"] = []
+        state["completed_steps"] = []
+        paths = _extract_deliverable_paths(state)
+        assert "engine_latency_metrics.csv" in paths  # real deliverable survives
+        assert "engine_serving_brief.md" in paths  # real deliverable survives
+        assert "milliseconds" not in paths  # bare-prose phantom dropped
+        assert "concurrency" not in paths  # bare-prose phantom dropped
+
+    def test_bare_prose_phantom_excluded_from_goal(self) -> None:
+        """Same bare-prose phantom, isolated to the goal-only extraction path
+        used by _force_complete_on_evidence. The real goal deliverables
+        survive; the bare prose does not.
+        """
+        state = initial_state(
+            "Produce a brief generating latency in milliseconds across "
+            "concurrency levels, and write the metrics to latency.csv.",
+            "thread-bare-prose-goal-phantom",
+        )
+        state["plan_steps"] = []
+        state["completed_steps"] = []
+        goal_paths = _extract_goal_deliverables(state)
+        assert "latency.csv" in goal_paths  # real goal deliverable survives
+        assert "milliseconds" not in goal_paths  # bare-prose phantom dropped
+        assert "concurrency" not in goal_paths  # bare-prose phantom dropped
+
 
 class TestGoalDeliverableSufficiencyFH:
     """F-h: when the GOAL's named deliverables are present + non-empty, plan-

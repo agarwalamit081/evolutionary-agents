@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
+import threading
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -589,6 +591,80 @@ async def _search_with_fallback(
     return []
 
 
+class _RequestSpacer:
+    """Shared minimum inter-request delay + jitter across all web_search fetches.
+
+    ``SEARCH_BATCH_CONCURRENCY`` bounds how many queries are in flight at once,
+    NOT how closely their dispatches land — a batch of 5 can otherwise fire 5
+    requests in the same millisecond and trip an engine's rate limit. This
+    spacer serializes the *moment of dispatch* across every concurrent fetch
+    (single + batch): consecutive dispatches are spaced >= ``min_delay`` apart,
+    jittered up to ``max_delay`` to spread load rather than burst-then-stall.
+
+    The ``asyncio.Lock`` lives inside the instance (not at module scope) so a
+    fresh one binds to the running event loop each time the spacer is rebuilt —
+    avoiding the cross-loop breakage a module-global asyncio primitive would
+    cause under per-test event loops. Init is guarded by a loop-agnostic
+    ``threading.Lock`` (no await held inside it) instead.
+    """
+
+    def __init__(self, min_delay: float, max_delay: float) -> None:
+        self._min = max(0.0, float(min_delay))
+        self._max = max(self._min, float(max_delay))
+        self._lock = asyncio.Lock()
+        self._last_release: float = 0.0
+
+    async def acquire(self) -> None:
+        """Block until >= ``min_delay`` has elapsed since the last release, +jitter."""
+        if self._max <= 0.0:
+            return
+        async with self._lock:
+            now = asyncio.get_running_loop().time()
+            elapsed = now - self._last_release
+            floor = max(0.0, self._min - elapsed)
+            jitter = random.uniform(0.0, self._max - self._min)
+            wait = floor + jitter
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_release = asyncio.get_running_loop().time()
+
+
+# Process-wide shared spacer (single event loop in production). Lazy-built on
+# first dispatch so WEB_SEARCH_DELAY_MIN/MAX are read from live settings, not
+# captured at import. Reset via _reset_search_spacer() when the knobs change.
+_search_spacer: _RequestSpacer | None = None
+_search_spacer_init_guard = threading.Lock()
+
+
+async def _get_search_spacer() -> _RequestSpacer:
+    """Lazy-init the shared spacer from WEB_SEARCH_DELAY_MIN/MAX on first use."""
+    global _search_spacer
+    if _search_spacer is None:
+        with _search_spacer_init_guard:
+            if _search_spacer is None:
+                limits = _tool_limits()
+                _search_spacer = _RequestSpacer(
+                    limits.web_search_delay_min, limits.web_search_delay_max
+                )
+    return _search_spacer
+
+
+def _reset_search_spacer() -> None:
+    """Drop the cached spacer so the next fetch rebuilds it from current knobs.
+
+    Test seam + the rare runtime knob change: without it a long-lived host
+    would keep the spacer it built on first dispatch forever.
+    """
+    global _search_spacer
+    with _search_spacer_init_guard:
+        _search_spacer = None
+
+
+async def _pace_search() -> None:
+    """Enforce the shared inter-request delay before dispatching a search."""
+    await (await _get_search_spacer()).acquire()
+
+
 async def _fetch_results(
     query: str,
     max_results: int,
@@ -597,6 +673,9 @@ async def _fetch_results(
     deep_crawl: bool,
 ) -> list[dict[str, str]]:
     """Single-query fetch over a fresh client. The clean test/replace seam."""
+    # Pace the dispatch so concurrent/batched queries don't burst-fire and trip
+    # an engine rate limit (S10 — wires the previously-dead WEB_SEARCH_DELAY_*).
+    await _pace_search()
     async with httpx.AsyncClient() as client:
         return await _search_with_fallback(
             client, query, max_results, region, timelimit, deep_crawl

@@ -242,7 +242,7 @@ RT="$(docker logs --since 20m self-evolving-agent-runner-1 2>&1 | grep -c 'POST 
 echo "    runner POST /execute traces (last 20m): ${RT}" | tee -a "${LOG}"
 
 # ── cost ─────────────────────────────────────────────────────────────────
-COST="$(docker exec turing-postgres psql -U postgres -d turing_agent -t -A -c "SELECT COALESCE(round(sum(cost_usd)::numeric,4),0) FROM cost_ledger WHERE run_id='api-${RUN_ID}';")"
+COST="$(docker exec self-evolving-agent-postgres-1 psql -U postgres -d turing_agent -t -A -c "SELECT COALESCE(round(sum(cost_usd)::numeric,4),0) FROM cost_ledger WHERE run_id='api-${RUN_ID}';")"
 echo "[cost] run_id=api-${RUN_ID} cost_usd=\$${COST}" | tee -a "${LOG}"
 
 echo "" | tee -a "${LOG}"

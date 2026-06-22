@@ -66,7 +66,6 @@ x-agent-common: &agent-common
 services:
   postgres:
     image: pgvector/pgvector:pg18
-    container_name: turing-postgres
     environment:
       POSTGRES_DB: turing_agent
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -104,7 +103,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: turing-redis
     # --maxmemory lowered 2g→1g so the container mem-limit (1.5g below) sits
     # ABOVE the data cap with real headroom — redis self-limits at 1g (LRU), so
     # it is never OOM-killed and never evicts an unacked turing:runs stream entry
@@ -146,7 +144,6 @@ services:
     # mapped to 8081 so this stack never clashes with SearXNG containers other
     # projects may run on the default 8080.
     image: searxng/searxng:latest
-    container_name: turing-searxng
     ports:
       - "8081:8080"
     volumes:
@@ -174,7 +171,6 @@ services:
     # 7701 so this stack never clashes with Meilisearch containers other
     # projects may run on the default 7700.
     image: getmeili/meilisearch:v1.12
-    container_name: turing-meilisearch
     command: ["meilisearch", "--http-addr", "0.0.0.0:7700"]
     environment:
       MEILI_ENV: ${MEILI_ENV:-development}
@@ -213,7 +209,6 @@ services:
   # loop. Both reuse the single Dockerfile image, differing only in `command`.
   api:
     <<: *agent-common
-    container_name: turing-api
     # uvicorn factory (src/api/app.py:create_app). The Dockerfile CMD (CLI) is
     # stale for the API role; run the server directly.
     command:
@@ -350,7 +345,6 @@ services:
   agent:
     <<: *agent-common
     profiles: ["cli"]
-    container_name: turing-agent
     networks:
       # CLI smoke runs inherit CODE_EXECUTOR_MODE=runner from the anchor and route
       # code-exec through the runner too, so reach it on turing-runner-net.

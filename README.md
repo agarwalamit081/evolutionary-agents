@@ -277,7 +277,7 @@ alembic upgrade head
 > listening on those published ports it will silently shadow the container —
 > every run logs the resolved database on connect (e.g.
 > `Database engine created → localhost:5433/turing_agent`); verify the
-> host/database match the container (`turing-postgres` / `turing_agent`).
+> host/database match the container (`self-evolving-agent-postgres-1` / `turing_agent`).
 
 > **⚠️ Do not run the legacy `../web-search/docker-compose.yml`** — that older
 > standalone stack (the `ws_*` containers: `ws_searxng`/`ws_meilisearch`/

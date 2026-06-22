@@ -42,6 +42,33 @@ _GOAL_PATTERNS: dict[str, tuple[str, ...]] = {
                  "tradeoff", "pros and cons"),
 }
 
+# ── Audience keyword groups (Feature D): who the answer is for ──────────────
+# A technique may be audience-specific (first-principles for an expert; an
+# analogy for an end-user). Empty ``audiences`` on a Technique means universal.
+_AUDIENCE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "expert": ("expert", "advanced", "technical", "specialist", "researcher",
+               "peer"),
+    "developer": ("developer", "programmer", "engineer", "software", "api",
+                  "codebase"),
+    "executive": ("executive", "manager", "stakeholder", "leadership",
+                  "business", "ceo", "board"),
+    "enduser": ("beginner", "novice", "layperson", "non-technical", "eli5",
+                "explain to", "simply"),
+}
+
+# ── Uncertainty keyword groups (Feature D): how settled the answer must be ──
+# Hedges signal the answer may be provisional; absolutes signal it must be
+# exact. Empty ``uncertainties`` on a Technique means uncertainty-agnostic.
+_UNCERTAINTY_PATTERNS: dict[str, tuple[str, ...]] = {
+    "high": ("might", "could be", "roughly", "approximately", "estimate",
+             "uncertain", "not sure", "best guess", "possibly", "approx",
+             "ballpark"),
+    "medium": ("likely", "probably", "seems", "appears", "mostly",
+               "typically", "around"),
+    "low": ("exactly", "precisely", "definitively", "must", "guaranteed",
+            "prove", "always", "never"),
+}
+
 
 @dataclass(frozen=True)
 class Technique:
@@ -57,6 +84,10 @@ class Technique:
         nodes: Nodes where injecting this technique is meaningful.
         goal_patterns: Goal categories that make this technique especially
             apt. Empty means broadly applicable.
+        audiences: Reader profiles this technique suits (Feature D). Empty
+            means universal — always retained regardless of inferred audience.
+        uncertainties: Answer-settledness levels this technique suits
+            (Feature D). Empty means uncertainty-agnostic.
         token_cost_estimate: Rough body length in tokens, for budget capping.
         layer: Coaching category — ``reasoning`` / ``framing`` / ``verification``.
         priority: Tie-breaker; higher wins when several techniques qualify.
@@ -67,6 +98,8 @@ class Technique:
     applies_to_complexities: frozenset[TaskComplexity]
     nodes: frozenset[str]
     goal_patterns: frozenset[str] = field(default_factory=frozenset)
+    audiences: frozenset[str] = field(default_factory=frozenset)
+    uncertainties: frozenset[str] = field(default_factory=frozenset)
     token_cost_estimate: int = 100
     layer: str = "reasoning"
     priority: int = 50
@@ -126,6 +159,53 @@ TECHNIQUE_REGISTRY: list[Technique] = [
         token_cost_estimate=80,
         layer="reasoning",
         priority=60,
+    ),
+    Technique(
+        name="first_principles",
+        body=(
+            "Reason from first principles: strip the problem to its irreducible "
+            "facts and constraints, then rebuild the answer upward from those "
+            "foundations instead of by analogy to prior cases."
+        ),
+        applies_to_complexities=frozenset({TaskComplexity.COMPLEX, TaskComplexity.CRITICAL}),
+        nodes=frozenset({NODE_PLAN, NODE_EXECUTE}),
+        goal_patterns=frozenset({"reasoning"}),
+        audiences=frozenset({"expert", "developer"}),
+        token_cost_estimate=90,
+        layer="reasoning",
+        priority=62,
+    ),
+    Technique(
+        name="synthesis",
+        body=(
+            "Synthesize: draw the key threads from all evidence and perspectives "
+            "together into one coherent conclusion that reconciles them rather "
+            "than merely picking one."
+        ),
+        applies_to_complexities=frozenset({TaskComplexity.COMPLEX, TaskComplexity.CRITICAL}),
+        nodes=frozenset({NODE_PLAN, NODE_EXECUTE}),
+        goal_patterns=frozenset({"analysis", "research"}),
+        audiences=frozenset({"executive"}),
+        uncertainties=frozenset({"medium"}),
+        token_cost_estimate=80,
+        layer="reasoning",
+        priority=58,
+    ),
+    Technique(
+        name="analogy",
+        body=(
+            "Explain via a familiar analogy: map the problem to a concrete, "
+            "well-understood parallel the reader already knows, then transfer "
+            "the insight back to the original problem."
+        ),
+        applies_to_complexities=frozenset({TaskComplexity.COMPLEX, TaskComplexity.CRITICAL}),
+        nodes=frozenset({NODE_PLAN, NODE_EXECUTE}),
+        goal_patterns=frozenset({"analysis"}),
+        audiences=frozenset({"enduser", "executive"}),
+        uncertainties=frozenset({"high", "medium"}),
+        token_cost_estimate=80,
+        layer="framing",
+        priority=54,
     ),
     Technique(
         name="role_prompting",
@@ -246,12 +326,47 @@ class TechniqueSelector:
                 return pattern
         return None
 
+    @staticmethod
+    def infer_audience(goal_text: str | None) -> str | None:
+        """Map a goal's text to the first matching reader profile (Feature D).
+
+        Returns ``None`` when no audience keyword group matches — techniques
+        with empty ``audiences`` (universal) still apply regardless. Substring
+        match keeps the result stable and explainable, mirroring
+        :meth:`infer_goal_pattern`.
+        """
+        if not goal_text:
+            return None
+        lowered = goal_text.lower()
+        for audience, keywords in _AUDIENCE_PATTERNS.items():
+            if any(kw in lowered for kw in keywords):
+                return audience
+        return None
+
+    @staticmethod
+    def infer_uncertainty(goal_text: str | None) -> str | None:
+        """Map a goal's text to a settledness level: high/medium/low (Feature D).
+
+        Hedges ("roughly", "might") → high uncertainty; absolutes ("exactly",
+        "prove") → low. Returns ``None`` when no marker matches — techniques
+        with empty ``uncertainties`` (agnostic) still apply.
+        """
+        if not goal_text:
+            return None
+        lowered = goal_text.lower()
+        for level, keywords in _UNCERTAINTY_PATTERNS.items():
+            if any(kw in lowered for kw in keywords):
+                return level
+        return None
+
     def select(
         self,
         complexity: TaskComplexity,
         node: str,
         goal_pattern: str | None = None,
         budget_tokens: int = 512,
+        audience: str | None = None,
+        uncertainty: str | None = None,
     ) -> list[Technique]:
         """Return the ordered techniques to inject for this call.
 
@@ -259,6 +374,15 @@ class TechniqueSelector:
         any exist, ranks by priority (desc), and caps total token cost to
         ``budget_tokens``. Always returns at least the top-ranked candidate
         when any qualify (so a tight budget never zeroes out selection).
+
+        Audience + uncertainty (Feature D) narrow NON-destructively: a
+        technique with an empty set is universal/agnostic and always retained;
+        only a technique explicitly tagged for a *different* audience or
+        uncertainty is filtered out. So ``chain_of_thought`` (empty audiences)
+        survives every audience, while ``first_principles`` (tagged expert/
+        developer) drops out for an enduser audience. The filter is guarded so
+        it never empties the candidate set (falls back to pre-filter if it
+        would) — mirroring goal-pattern's fall-back safety.
         """
         candidates = [
             t for t in self._registry
@@ -271,6 +395,21 @@ class TechniqueSelector:
             matched = [t for t in candidates if goal_pattern in t.goal_patterns]
             if matched:
                 candidates = matched
+
+        # Feature D: audience + uncertainty (non-destructive — see docstring).
+        if audience:
+            filtered = [
+                t for t in candidates if not t.audiences or audience in t.audiences
+            ]
+            if filtered:
+                candidates = filtered
+        if uncertainty:
+            filtered = [
+                t for t in candidates
+                if not t.uncertainties or uncertainty in t.uncertainties
+            ]
+            if filtered:
+                candidates = filtered
 
         ranked = sorted(candidates, key=lambda t: t.priority, reverse=True)
 
@@ -287,6 +426,7 @@ class TechniqueSelector:
 
         logger.info(
             f"Techniques selected for {node}/{complexity.value}/"
-            f"{goal_pattern or 'none'}: {[t.name for t in selected]}"
+            f"{goal_pattern or 'none'}/aud={audience or '-'}/"
+            f"unc={uncertainty or '-'}: {[t.name for t in selected]}"
         )
         return selected

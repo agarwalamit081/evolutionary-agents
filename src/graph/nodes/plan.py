@@ -294,6 +294,11 @@ async def _llm_plan(
         plan_complexity = goal.complexity or TaskComplexity.SIMPLE
         techniques = select_techniques_for_node(
             complexity=plan_complexity, node=NODE_PLAN, goal_text=goal.text,
+            # Feature D: thread Feature A's refined_intent so audience/
+            # uncertainty signals shape the plan's technique mix. ``or None``
+            # collapses the empty heuristic-path default so generic goals
+            # (and tests with no refined_intent) infer nothing → unchanged.
+            refined_intent=(state.get("refined_intent") or None),
         )
         messages = build_messages(system_prompt, user_prompt, techniques, node=NODE_PLAN)
 

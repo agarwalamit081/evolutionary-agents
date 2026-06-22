@@ -106,12 +106,20 @@ def select_techniques_for_node(
     node: str,
     goal_text: str | None = None,
     budget_tokens: int = 512,
+    refined_intent: str | None = None,
 ) -> list[Technique]:
     """Select prompting techniques for a node's LLM call (§5 wiring helper).
 
     Centralizes the (complexity, node, goal-pattern) → technique-list lookup so
     each node's LLM branch stays a one-liner. Infers the goal pattern from the
     goal text, then delegates to :meth:`TechniqueSelector.select`.
+
+    Feature D also infers the reader **audience** and answer **uncertainty** and
+    threads them into selection. The richest available text is used: the
+    classify node's ``refined_intent`` (Feature A — the real desired outcome)
+    when present, else the literal ``goal_text``. Both inference helpers return
+    ``None`` for generic text, so a goal with no audience/uncertainty markers
+    yields identical selection to the pre-Feature-D behaviour.
 
     Degrades cleanly on missing inputs so a heuristic/fallback path never raises:
     a ``None`` complexity returns ``[]`` (techniques are only applied on the LLM
@@ -124,6 +132,9 @@ def select_techniques_for_node(
         node: Node identifier constant (``NODE_PLAN`` / ``NODE_EXECUTE`` / …).
         goal_text: The goal's raw text, used to infer a goal pattern.
         budget_tokens: Soft cap on total injected token cost.
+        refined_intent: Optional refined intent (Feature A) used as the
+            preferred signal for audience/uncertainty inference. Backward-
+            compatible: existing callers omit it and get identical results.
 
     Returns:
         Ordered (priority desc) list of techniques to splice into the prompt;
@@ -132,15 +143,23 @@ def select_techniques_for_node(
     if complexity is None:
         return []
     goal_pattern = TechniqueSelector.infer_goal_pattern(goal_text)
+    # Feature D: prefer the refined intent for audience/uncertainty signals —
+    # it captures the real desired outcome — else the literal goal text.
+    signal_text = refined_intent or goal_text
+    audience = TechniqueSelector.infer_audience(signal_text)
+    uncertainty = TechniqueSelector.infer_uncertainty(signal_text)
     selected = _SELECTOR.select(
         complexity=complexity,
         node=node,
         goal_pattern=goal_pattern,
         budget_tokens=budget_tokens,
+        audience=audience,
+        uncertainty=uncertainty,
     )
     logger.info(
         f"Techniques selected for {node}/{complexity.value}/"
-        f"{goal_pattern or 'none'}: {[t.name for t in selected]}"
+        f"{goal_pattern or 'none'}/aud={audience or '-'}/"
+        f"unc={uncertainty or '-'}: {[t.name for t in selected]}"
     )
     return selected
 

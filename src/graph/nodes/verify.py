@@ -1084,16 +1084,29 @@ def _classify_deliverable_format(path: Path) -> str | None:
         return None  # 0-byte files are already reported via the size check
 
     if suffix == ".csv":
-        # A valid CSV deliverable's first non-empty row must be comma-delimited
-        # (>= 2 fields). A report dumped into a .csv has a prose first line with
-        # no comma ("VERIFICATION REPORT - ...") -> not tabular -> malformed.
+        # A well-formed CSV's first non-empty row is either comma-delimited
+        # (>= 2 fields) OR a single-column file (1 field per row — RFC 4180
+        # permits single-column CSVs, e.g. a header plus one value per line).
+        # A report or diagnostic dumped into a .csv has prose lines with no
+        # delimiter -> not tabular. We tell a genuine single-column CSV apart
+        # from such clobbered prose by row shape: a real single-column file is
+        # dominated by single-token values (numbers, ids, labels); a clobbered
+        # report is dominated by multi-word phrases. Flag the file when prose
+        # rows outnumber data rows. (battery-04 q1: an 11-step VERIFICATION
+        # REPORT clobbered normalized.csv; the prior >=2-fields-only check
+        # wrongly rejected valid single-column CSVs and looped verify->replan
+        # indefinitely — covbench evo-demo: primes_demo.csv = header 'prime'
+        # + 15 primes, rejected as malformed.)
         reader = csv.reader(io.StringIO(text))
-        for row in reader:
-            if any(cell.strip() for cell in row):
-                if len(row) < 2:
-                    return "first row is not comma-delimited (not tabular CSV)"
-                return None
-        return "no non-empty rows (malformed CSV)"
+        rows = [r for r in reader if any(cell.strip() for cell in r)]
+        if not rows:
+            return "no non-empty rows (malformed CSV)"
+        if len(rows[0]) >= 2:
+            return None
+        prose = sum(1 for r in rows if len(r[0].split()) > 1)
+        if prose > len(rows) - prose:
+            return "rows are prose, not tabular CSV"
+        return None
     if suffix == ".json":
         try:
             json.loads(text)

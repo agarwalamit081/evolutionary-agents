@@ -70,6 +70,26 @@ class TestClassifyDeliverableFormat:
         p.write_text("just one prose line with no delimiter", encoding="utf-8")
         assert _classify_deliverable_format(p) is not None
 
+    def test_csv_single_column_data_passes(self, tmp_path: Path) -> None:
+        """A single-column CSV (header + one value per row) is RFC-4180 valid.
+
+        Regression (covbench evo-demo): primes_demo.csv = header 'prime' +
+        15 primes was wrongly rejected as 'not tabular CSV' (the old check
+        required >=2 fields on the first row), looping verify->replan forever.
+        """
+        p = tmp_path / "primes_demo.csv"
+        p.write_text(
+            "prime\n2\n3\n5\n7\n11\n13\n17\n19\n23\n29\n31\n37\n41\n43\n47\n",
+            encoding="utf-8",
+        )
+        assert _classify_deliverable_format(p) is None
+
+    def test_csv_single_value_passes(self, tmp_path: Path) -> None:
+        """A two-row single-column CSV (header + one value) is valid."""
+        p = tmp_path / "count.csv"
+        p.write_text("count\n42\n", encoding="utf-8")
+        assert _classify_deliverable_format(p) is None
+
     def test_valid_multicolumn_csv_passes(self, tmp_path: Path) -> None:
         p = tmp_path / "normalized.csv"
         p.write_text(

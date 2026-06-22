@@ -399,20 +399,82 @@ async def _searxng_fetch(
 # ── lightweight paid provider adapters (each: keyed → normalized results) ─
 
 
+_TAVILY_DEPTHS = {"basic", "advanced"}
+_TAVILY_TOPICS = {"general", "news"}
+
+
+def _parse_domains(raw: str) -> list[str]:
+    """Comma-separated hostnames → stripped, lowercased, non-empty list."""
+    return [d.strip().lower() for d in (raw or "").split(",") if d.strip()]
+
+
+def _tavily_request_body(key: str, query: str, max_results: int) -> dict[str, object]:
+    """Build the Tavily /search request body from the configured knobs (S12).
+
+    ``search_depth``/``topic`` are validated against Tavily's enums and fall
+    back to the cheap defaults if misconfigured (avoids a 4xx). ``days`` is sent
+    only when ``topic=news`` (it is a no-op/error for general). Domain lists are
+    parsed from comma-separated hostnames and omitted when empty — Tavily treats
+    an absent list as unconstrained, so an empty include/exclude must not be
+    sent as ``[]`` (which would mean "match no domains").
+    """
+    s = _search_settings()
+    depth = str(s.tavily_search_depth).strip().lower()
+    if depth not in _TAVILY_DEPTHS:
+        depth = "basic"
+    topic = str(s.tavily_topic).strip().lower()
+    if topic not in _TAVILY_TOPICS:
+        topic = "general"
+    body: dict[str, object] = {
+        "api_key": key,
+        "query": query,
+        "max_results": max_results,
+        "search_depth": depth,
+        "topic": topic,
+    }
+    if topic == "news":
+        body["days"] = max(1, int(s.tavily_days))
+    include = _parse_domains(s.tavily_include_domains)
+    if include:
+        body["include_domains"] = include
+    exclude = _parse_domains(s.tavily_exclude_domains)
+    if exclude:
+        body["exclude_domains"] = exclude
+    return body
+
+
+def _as_float(value: object) -> float | None:
+    """Best-effort numeric coercion of a provider score field (None if not a number)."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 async def _tavily_fetch(
     client: httpx.AsyncClient, key: str, query: str, max_results: int,
 ) -> list[dict[str, str]]:
+    body = _tavily_request_body(key, query, max_results)
     data = await _run_with_retry(
         "tavily",
         lambda: _post_json(
             client, "https://api.tavily.com/search", provider="tavily",
-            json_body={"api_key": key, "query": query, "max_results": max_results},
+            json_body=body,
         ),
     )
-    return [
-        _norm(r.get("title"), r.get("url"), r.get("content"))
-        for r in _rows(data, "results")[:max_results]
-    ]
+    # Filter by Tavily's per-hit relevance score BEFORE truncating to max_results
+    # — a low-score floor drops noise first, then the cap bounds the count.
+    min_score = float(_search_settings().tavily_min_score)
+    out: list[dict[str, str]] = []
+    for r in _rows(data, "results"):
+        if min_score > 0.0:
+            score = _as_float(r.get("score"))
+            if score is None or score < min_score:
+                continue
+        out.append(_norm(r.get("title"), r.get("url"), r.get("content")))
+        if len(out) >= max_results:
+            break
+    return out
 
 
 async def _serper_fetch(

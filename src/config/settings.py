@@ -1104,6 +1104,19 @@ class SearchSettings(BaseSettings):
     # from this chain (provisioned-only, see deep_crawl_enabled).
     search_fallback_providers: str = "tavily,serper,brave,serpapi,serpstack,llmlayer"  # Env: SEARCH_FALLBACK_PROVIDERS
 
+    # Tavily adapter tuning (S12). Tavily returns a relevance ``score`` per hit
+    # (0..1); these shape the request and the result filter. Defaults keep the
+    # cheap/broad path: search_depth=basic, topic=general, no domain filter,
+    # no score floor. search_depth=advanced pulls higher-quality answers but
+    # costs more credits; topic=news activates recency (then ``days`` applies).
+    # include/exclude_domains are comma-separated hostnames (e.g. "arxiv.org").
+    tavily_search_depth: str = "basic"  # Env: TAVILY_SEARCH_DEPTH (basic|advanced)
+    tavily_topic: str = "general"  # Env: TAVILY_TOPIC (general|news)
+    tavily_days: int = 3  # Env: TAVILY_DAYS (days back; only used when topic=news)
+    tavily_include_domains: str = ""  # Env: TAVILY_INCLUDE_DOMAINS (comma-sep hostnames)
+    tavily_exclude_domains: str = ""  # Env: TAVILY_EXCLUDE_DOMAINS (comma-sep hostnames)
+    tavily_min_score: float = 0.0  # Env: TAVILY_MIN_SCORE (drop hits with score below this)
+
     # Batch/parallel fan-out control (web_search(queries) + corpus_search(queries)).
     search_batch_concurrency: int = 5  # Env: SEARCH_BATCH_CONCURRENCY
 

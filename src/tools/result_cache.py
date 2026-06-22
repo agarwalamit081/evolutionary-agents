@@ -25,16 +25,38 @@ from loguru import logger
 if TYPE_CHECKING:
     from src.config.settings import Settings
 
+# Exact arg-key names that structurally signal a time-bounded query. Presence
+# of any (with a truthy value) marks the query recency-sensitive → short TTL.
+_RECENCY_KEY_NAMES: frozenset[str] = frozenset({
+    "timelimit", "time_limit", "time_range", "timerange",
+    "date_range", "daterange", "tbs", "freshness", "recency",
+    "timeframe", "days", "since", "until",
+})
+
+# Lexical recency cues matched as substrings against the lowercased query text
+# (covers the common case where recency lives in the query itself, e.g.
+# "latest X news"). Conservative phrases to avoid false positives; the only
+# cost of a miss is a shorter-than-base TTL, which is always safe.
+_RECENCY_VALUE_CUES: frozenset[str] = frozenset({
+    "latest", "recent", "recently", "today", "tonight", "yesterday",
+    "tomorrow", "now", "current", "currently", "breaking", "live update",
+    "this week", "this month", "this year", "past week", "past month",
+    "last week", "last month", "last 24", "24h", "news", "update",
+})
+
 
 class ToolResultCache:
     """Best-effort Redis cache for idempotent tool results.
 
     Args:
         redis_url: Redis connection URL. Used to lazily build a pooled client.
-        ttl_seconds: Per-entry TTL.
+        ttl_seconds: Per-entry TTL (evergreen queries).
         enabled: Master switch; when False, get/set are no-ops.
         redis_client: Optional pre-built client (e.g. a shared pool or a fake
             in tests). When provided it takes precedence over ``redis_url``.
+        recency_ttl_seconds: Shorter TTL applied to recency-sensitive queries
+            (a time-window param or a "latest"/"news"/"today" cue). See
+            ``is_recency_sensitive``.
     """
 
     _PREFIX = "turing:toolcache:"
@@ -45,9 +67,11 @@ class ToolResultCache:
         ttl_seconds: int = 3600,
         enabled: bool = True,
         redis_client: aioredis.Redis | None = None,
+        recency_ttl_seconds: int = 300,
     ) -> None:
         self._redis_url = redis_url
         self._ttl = ttl_seconds
+        self._recency_ttl = recency_ttl_seconds
         self._enabled = enabled
         # Sentinel: None = not yet built. ``_connect`` flips this to a client
         # or disables itself if construction fails.
@@ -64,9 +88,10 @@ class ToolResultCache:
         tc = getattr(settings, "tool_cache", None)
         return cls(
             redis_url=settings.redis.redis_url,
-            ttl_seconds=tc.tool_cache_ttl_seconds if tc else 3600,
-            enabled=bool(tc.tool_cache_enabled) if tc else True,
+            ttl_seconds=getattr(tc, "tool_cache_ttl_seconds", 3600) if tc else 3600,
+            enabled=bool(getattr(tc, "tool_cache_enabled", True)) if tc else True,
             redis_client=redis_client,
+            recency_ttl_seconds=getattr(tc, "tool_cache_recency_ttl_seconds", 300) if tc else 300,
         )
 
     def _connect(self) -> aioredis.Redis | None:
@@ -88,6 +113,35 @@ class ToolResultCache:
         raw = f"{tool_name}|{json.dumps(args, sort_keys=True, default=str)}"
         digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
         return f"{ToolResultCache._PREFIX}{digest}"
+
+    @staticmethod
+    def is_recency_sensitive(args: dict[str, Any]) -> bool:
+        """True when a query is time-bounded or recency-sensitive.
+
+        Two signals (either suffices):
+          * **Structural** — an arg key in ``_RECENCY_KEY_NAMES`` carries a
+            truthy value (an explicit time-window/range param).
+          * **Lexical** — the concatenated string values contain a recency cue
+            ("latest", "news", "today", …), the common case where recency lives
+            in the query text itself rather than a dedicated param.
+        """
+        text_parts: list[str] = []
+        for key, value in args.items():
+            if str(key).lower() in _RECENCY_KEY_NAMES and value not in (None, "", 0):
+                return True
+            if isinstance(value, str):
+                text_parts.append(value)
+            elif isinstance(value, (list, tuple)):
+                text_parts.extend(str(x) for x in value)
+        text = " ".join(text_parts).lower()
+        return any(cue in text for cue in _RECENCY_VALUE_CUES)
+
+    def ttl_for_args(self, args: dict[str, Any]) -> int:
+        """Dynamic TTL: the shorter recency TTL for time-sensitive queries,
+        else the base TTL. Pure function of ``args`` + the configured TTLs."""
+        if self.is_recency_sensitive(args):
+            return self._recency_ttl
+        return self._ttl
 
     async def get(
         self,
@@ -121,7 +175,7 @@ class ToolResultCache:
             await client.set(
                 self.make_key(tool_name, args),
                 json.dumps(result, default=str),
-                ex=self._ttl,
+                ex=self.ttl_for_args(args),
             )
         except Exception as exc:  # noqa: BLE001 — never break a run
             logger.debug(f"ToolResultCache set failed ({tool_name}): {exc}")

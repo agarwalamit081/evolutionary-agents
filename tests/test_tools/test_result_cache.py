@@ -249,6 +249,92 @@ class TestFromSettings:
 
         assert cache._enabled is False
 
+    def test_recency_ttl_read_when_present(self) -> None:
+        """A settings object carrying the recency TTL maps it onto the cache."""
+        settings = SimpleNamespace(
+            redis=SimpleNamespace(redis_url="redis://cache:6379/0"),
+            tool_cache=SimpleNamespace(
+                tool_cache_enabled=True,
+                tool_cache_ttl_seconds=3600,
+                tool_cache_recency_ttl_seconds=120,
+            ),
+        )
+        cache = ToolResultCache.from_settings(settings)  # type: ignore[arg-type]
+        assert cache._recency_ttl == 120
+
+    def test_recency_ttl_defaults_when_absent(self) -> None:
+        """An older settings object lacking the recency field still builds (300)."""
+        cache = ToolResultCache.from_settings(_settings("redis://c:6379/0", enabled=True, ttl=3600))  # type: ignore[arg-type]
+        assert cache._recency_ttl == 300  # getattr default — never AttributeError
+
+
+# ─── Dynamic TTL (recency-sensitive queries) ─────────────────────────
+
+
+class TestDynamicTTL:
+    """ttl_for_args scales TTL down for time-sensitive queries (Gap 5)."""
+
+    def _cache(self, base: int = 3600, recency: int = 300) -> ToolResultCache:
+        return ToolResultCache(redis_client=None, ttl_seconds=base, recency_ttl_seconds=recency)
+
+    def test_evergreen_query_keeps_base_ttl(self) -> None:
+        """A plain factual query with no time signal keeps the full TTL."""
+        cache = self._cache(base=3600, recency=300)
+        assert cache.ttl_for_args({"query": "how does photosynthesis work"}) == 3600
+
+    def test_lexical_cue_latest_uses_recency_ttl(self) -> None:
+        assert self._cache().ttl_for_args({"query": "latest rust release notes"}) == 300
+
+    def test_lexical_cue_news_uses_recency_ttl(self) -> None:
+        assert self._cache().ttl_for_args({"query": "spacex news today"}) == 300
+
+    def test_lexical_cue_today_uses_recency_ttl(self) -> None:
+        assert self._cache().ttl_for_args({"query": "weather today london"}) == 300
+
+    def test_lexical_cue_in_batch_queries(self) -> None:
+        """A recency cue in any of a batch's queries triggers the short TTL."""
+        cache = self._cache(base=3600, recency=120)
+        assert cache.ttl_for_args({"queries": ["gdp france", "breaking election results"]}) == 120
+
+    def test_structural_time_range_param_uses_recency_ttl(self) -> None:
+        """An explicit time_window / time_range param signals recency."""
+        assert self._cache().ttl_for_args({"query": "x", "time_range": "week"}) == 300
+
+    def test_structural_timelimit_param_uses_recency_ttl(self) -> None:
+        assert self._cache().ttl_for_args({"query": "x", "timelimit": "d"}) == 300
+
+    def test_structural_tbs_param_uses_recency_ttl(self) -> None:
+        assert self._cache().ttl_for_args({"query": "x", "tbs": "qdr:d"}) == 300
+
+    def test_empty_time_range_param_is_not_recency(self) -> None:
+        """A falsy time-window value (0/"") is NOT a recency signal."""
+        assert self._cache().ttl_for_args({"query": "x", "time_range": ""}) == 3600
+
+    def test_is_recency_sensitive_is_static_and_pure(self) -> None:
+        """The detector is callable without an instance."""
+        assert ToolResultCache.is_recency_sensitive({"query": "latest"}) is True
+        assert ToolResultCache.is_recency_sensitive({"query": "history of rome"}) is False
+
+    @pytest.mark.asyncio
+    async def test_set_applies_dynamic_ttl(self) -> None:
+        """set forwards the recency TTL (not the base) for a news query."""
+        client = MagicMock()
+        client.set = AsyncMock(return_value=True)
+        cache = ToolResultCache(redis_client=client, ttl_seconds=7200, recency_ttl_seconds=90)  # type: ignore[arg-type]
+
+        await cache.set("web_search", {"query": "latest ai news"}, {"success": True})
+        assert client.set.call_args.kwargs["ex"] == 90  # recency TTL, not 7200
+
+    @pytest.mark.asyncio
+    async def test_set_applies_base_ttl_for_evergreen(self) -> None:
+        """set forwards the base TTL for an evergreen query."""
+        client = MagicMock()
+        client.set = AsyncMock(return_value=True)
+        cache = ToolResultCache(redis_client=client, ttl_seconds=7200, recency_ttl_seconds=90)  # type: ignore[arg-type]
+
+        await cache.set("web_search", {"query": "what is a prime number"}, {"success": True})
+        assert client.set.call_args.kwargs["ex"] == 7200
+
 
 # ─── Execute-node cache routing (_execute_tool_call) ─────────────────
 

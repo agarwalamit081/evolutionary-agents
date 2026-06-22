@@ -490,6 +490,12 @@ class ToolCacheSettings(BaseSettings):
 
     tool_cache_enabled: bool = True
     tool_cache_ttl_seconds: int = 3600  # 1 hour
+    # Shorter TTL for recency-sensitive queries (Gap 5 dynamic TTL). A query
+    # carrying a time-window param (time_range/timelimit/tbs/days/…) or a
+    # lexical recency cue ("latest"/"news"/"today"/"2025" in the text) is
+    # cached for this long instead of the full ``tool_cache_ttl_seconds``, so a
+    # moved time window isn't served stale. Evergreen queries keep the base TTL.
+    tool_cache_recency_ttl_seconds: int = 300  # 5 minutes
 
     model_config = SettingsConfigDict(
         env_file=".env",

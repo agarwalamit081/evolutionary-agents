@@ -209,12 +209,18 @@ class ToolGenerator:
                 "sandbox_result": sandbox_result,
             }
 
-        # Step 4: Register in ToolRegistry
+        # Step 4: Register in ToolRegistry. ``generated=True`` + the source so
+        # that, in a sandboxed code-exec mode (docker/runner), the execute node
+        # routes this tool's invocation through that sandbox instead of calling
+        # the in-process ``handler`` — the handler_code is untrusted LLM output
+        # and must not run inside the worker with full DB/Redis/FS access.
         registry.register(
             name=tool.tool_name,
             handler=handler,
             description=tool.description,
             parameters=tool.input_schema,
+            generated=True,
+            handler_code=tool.handler_code,
         )
 
         self._tools_created += 1

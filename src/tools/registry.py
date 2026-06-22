@@ -24,6 +24,8 @@ class ToolRegistry:
         description: str = "",
         parameters: dict[str, Any] | None = None,
         cacheable: bool = False,
+        generated: bool = False,
+        handler_code: str | None = None,
     ) -> None:
         """Register a tool in the registry.
 
@@ -36,6 +38,19 @@ class ToolRegistry:
                 for the Redis result cache. Reserve this for idempotent,
                 read-only tools (e.g. ``web_search``, ``file_reader``). NEVER
                 mark mutating tools (``file_writer``) cacheable.
+            generated: True for an LLM-generated dynamic tool (``tool_create`` →
+                ``ToolGenerator``) whose ``handler`` is materialized from
+                ``handler_code``. Such tools' handler_code is UNTRUSTED LLM
+                output; in a sandboxed code-exec mode (docker/runner) the
+                execute node routes their invocation through that sandbox (the
+                SAME surface ``code_executor`` uses) instead of calling the
+                in-process ``handler`` — closing the gap where generated code
+                otherwise runs inside the worker with full DB/Redis/FS access.
+                Hand-written builtins leave this False and always run in-process
+                (they are trusted and need gateway/Redis access).
+            handler_code: The Python source the handler was materialized from.
+                Required when ``generated=True`` (the dispatch needs it to build
+                the sandboxed driver); ignored otherwise.
         """
         if name in self._tools:
             logger.warning(f"Tool '{name}' already registered, overwriting")
@@ -46,6 +61,8 @@ class ToolRegistry:
             "description": description,
             "parameters": parameters or {},
             "cacheable": cacheable,
+            "generated": generated,
+            "handler_code": handler_code if generated else None,
         }
         logger.debug(f"Tool registered: {name}")
 
@@ -101,6 +118,28 @@ class ToolRegistry:
         """Get just the handler function for a tool."""
         tool = self._tools.get(name)
         return tool["handler"] if tool else None
+
+    def is_generated(self, name: str) -> bool:
+        """Return whether ``name`` is an LLM-generated dynamic tool.
+
+        Generated tools carry untrusted ``handler_code``; in a sandboxed
+        code-exec mode the execute node routes their invocation through that
+        sandbox instead of the in-process ``handler``. Hand-written builtins
+        and MCP-loaded tools are False and always run in-process.
+        """
+        tool = self._tools.get(name)
+        return bool(tool and tool.get("generated"))
+
+    def get_handler_code(self, name: str) -> str | None:
+        """Return the materialized source of a generated tool, or None.
+
+        None for unknown tools and non-generated tools (builtins have no
+        source — their handler is hand-written in the worker package).
+        """
+        tool = self._tools.get(name)
+        if not tool or not tool.get("generated"):
+            return None
+        return tool.get("handler_code")
 
     def list_tools(self, names: list[str] | None = None) -> list[dict[str, Any]]:
         """List registered tools (without handlers, for LLM consumption).

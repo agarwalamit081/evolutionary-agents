@@ -99,21 +99,36 @@ def scope_tools(
     scoped = ToolRegistry()
 
     if spec.tool_scope == "inherit_all":
-        # Copy all tools from parent
+        # Copy all tools from parent. Propagate ``generated`` + ``handler_code``
+        # so a generated tool delegated to a sub-agent is STILL routed through
+        # the sandbox in a sandboxed code-exec mode (a scoped copy must not
+        # silently drop the untrusted-source tag and run in-process).
         for name in parent_tools.list_names():
             tool = parent_tools.get(name)
             if tool:
                 scoped.register(
-                    name, tool["handler"], tool["description"], tool["parameters"]
+                    name,
+                    tool["handler"],
+                    tool["description"],
+                    tool["parameters"],
+                    cacheable=tool.get("cacheable", False),
+                    generated=tool.get("generated", False),
+                    handler_code=tool.get("handler_code"),
                 )
 
     elif spec.tool_scope == "inherit_subset":
-        # Only copy named tools
+        # Only copy named tools (same generated-flag propagation as above).
         for name in spec.tool_subset:
             tool = parent_tools.get(name)
             if tool:
                 scoped.register(
-                    name, tool["handler"], tool["description"], tool["parameters"]
+                    name,
+                    tool["handler"],
+                    tool["description"],
+                    tool["parameters"],
+                    cacheable=tool.get("cacheable", False),
+                    generated=tool.get("generated", False),
+                    handler_code=tool.get("handler_code"),
                 )
             else:
                 logger.warning(

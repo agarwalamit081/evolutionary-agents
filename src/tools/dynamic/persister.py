@@ -629,6 +629,14 @@ class ToolPersister:
                             handler=handler,
                             description=reg.description,
                             parameters=reg.input_schema,
+                            # A loaded generated tool is STILL untrusted LLM
+                            # output (its source is version.code_content); tag
+                            # it + carry the source so a sandboxed code-exec
+                            # mode routes its invocation through the sandbox on
+                            # THIS run too (otherwise a tool persisted under
+                            # isolation would run in-process when recalled).
+                            generated=True,
+                            handler_code=version.code_content,
                         )
                         loaded.append(reg.tool_name)
 

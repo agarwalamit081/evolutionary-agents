@@ -813,6 +813,25 @@ async def _execute_tool_call(
             )
 
     start = time.perf_counter()
+    # Generated tools (``tool_create`` → registry) carry untrusted LLM
+    # handler_code materialized via ``exec``. In a sandboxed code-exec mode
+    # (docker/runner) route the invocation through that sandbox — the SAME
+    # surface ``code_executor`` uses — so generated code never runs in-process
+    # in the worker with full DB/Redis/FS access. Returns ``None`` in
+    # subprocess mode (no isolation concept on a host-run agent) so the
+    # in-process handler runs below, unchanged.
+    from src.tools.dynamic.sandbox_dispatch import invoke_generated_tool
+
+    isolated = await invoke_generated_tool(tool_name, tools, args)
+    if isolated is not None:
+        await _record_tool_metric(
+            tool_name,
+            success=isolated.success,
+            empty_output=not (isolated.output or "").strip(),
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
+        return isolated
+
     try:
         result = await handler(**args)
         latency_ms = int((time.perf_counter() - start) * 1000)

@@ -98,6 +98,19 @@ class TestBuildBatteryJobs:
         jobs = build_battery_jobs(BATTERY04_GOALS[:1], settings, "20260622")
         assert jobs[0].no_evolution is True
 
+    def test_spec_limit_zero_enqueues_every_spec(self) -> None:
+        """spec_limit=0 (the default) is the production nightly curve — every spec."""
+        settings = SchedulerSettings(_env_file=None)  # spec_limit defaults 0
+        jobs = build_battery_jobs(BATTERY04_GOALS, settings, "20260622")
+        assert len(jobs) == len(BATTERY04_GOALS)
+
+    def test_spec_limit_positive_caps_to_first_n(self) -> None:
+        """spec_limit>0 enqueues only the first N specs — the cheap smoke cap."""
+        settings = SchedulerSettings(_env_file=None, spec_limit=1)
+        jobs = build_battery_jobs(BATTERY04_GOALS, settings, "20260622")
+        assert len(jobs) == 1
+        assert jobs[0].run_id == f"{BATTERY04_GOALS[0].spec_id}-20260622"
+
 
 # ── BatteryEnqueuer (fake queue — no broker) ──────────────────────────
 

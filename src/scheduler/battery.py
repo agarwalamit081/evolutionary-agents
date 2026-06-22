@@ -51,12 +51,16 @@ def _today_date_str(settings_s: SchedulerSettings) -> str:
 def build_battery_jobs(
     specs: list[GoalSpec], settings_s: SchedulerSettings, date_str: str
 ) -> list[RunJob]:
-    """Map every battery ``GoalSpec`` to a date-suffixed ``RunJob``.
+    """Map the battery ``GoalSpec`` list to date-suffixed ``RunJob`` payloads.
 
-    ``max_iterations`` comes from the spec (each query's own cap);
-    ``no_evolution`` / ``model`` come from scheduler settings (model empty → the
-    run uses its complexity-tiered default, mirroring ``--eval``).
+    ``spec_limit`` bounds the batch: 0 = every spec (the production nightly
+    curve); >0 = only the first N (set 1 for a cheap one-spec plumbing smoke).
+    Each spec's ``max_iterations`` comes from the spec itself; ``no_evolution`` /
+    ``model`` come from scheduler settings (model empty → the run uses its
+    complexity-tiered default, mirroring ``--eval``).
     """
+    limit = settings_s.spec_limit
+    selected = specs[:limit] if limit > 0 else specs
     model = settings_s.model or None
     return [
         RunJob(
@@ -66,7 +70,7 @@ def build_battery_jobs(
             no_evolution=settings_s.no_evolution,
             model=model,
         )
-        for spec in specs
+        for spec in selected
     ]
 
 

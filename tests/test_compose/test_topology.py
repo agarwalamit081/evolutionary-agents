@@ -234,6 +234,15 @@ def test_scheduler_runs_the_scheduler_module(compose: dict) -> None:
     )
 
 
+def test_scheduler_exposes_spec_limit_env(compose: dict) -> None:
+    """The smoke/partial-curve cap is wired into the scheduler env so an operator
+    can run a cheap one-spec plumbing smoke (default 0 = the full nightly curve)
+    without rebuilding the image."""
+    scheduler = compose["services"]["scheduler"]
+    env = scheduler.get("environment") or {}
+    assert "SCHEDULER_SPEC_LIMIT" in env, f"SCHEDULER_SPEC_LIMIT missing: {env}"
+
+
 def test_scheduler_is_cred_minimal(compose: dict) -> None:
     """The scheduler is a pure Redis PRODUCER — it must NOT hold DATABASE_URL /
     search keys / runner URL. It neither executes code nor touches the DB; the

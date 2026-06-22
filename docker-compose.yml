@@ -323,6 +323,8 @@ services:
       SCHEDULER_TIMEZONE: ${SCHEDULER_TIMEZONE:-UTC}
       SCHEDULER_MODEL: ${SCHEDULER_MODEL:-}
       SCHEDULER_NO_EVOLUTION: ${SCHEDULER_NO_EVOLUTION:-false}
+      # 0 = full battery (production nightly curve); 1 = cheap one-spec smoke.
+      SCHEDULER_SPEC_LIMIT: ${SCHEDULER_SPEC_LIMIT:-0}
       # RO rootfs image hygiene (matches the runner): no .pyc writes.
       PYTHONDONTWRITEBYTECODE: "1"
     depends_on:

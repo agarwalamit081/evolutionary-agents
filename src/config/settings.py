@@ -1268,6 +1268,11 @@ class SchedulerSettings(BaseSettings):
     # embedded hyphens (e.g. ``%Y-%m-%d``) would break that strip — keep it
     # compact. Env: SCHEDULER_DATE_SUFFIX_FORMAT.
     date_suffix_format: str = "%Y%m%d"  # Env: SCHEDULER_DATE_SUFFIX_FORMAT
+    # Smoke / partial-curve cap: 0 = enqueue EVERY spec (the production nightly —
+    # the full capability curve); >0 = enqueue only the first N (e.g. 1 for a
+    # cheap one-spec plumbing smoke that does not run the full $1.50 battery).
+    # Env: SCHEDULER_SPEC_LIMIT.
+    spec_limit: int = 0  # Env: SCHEDULER_SPEC_LIMIT
 
     model_config = SettingsConfigDict(
         # env_prefix maps the documented SCHEDULER_* vars to these fields:

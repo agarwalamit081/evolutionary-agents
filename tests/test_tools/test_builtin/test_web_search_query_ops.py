@@ -117,7 +117,7 @@ class TestMultiQueryIntegration:
         """multi_query=False (default) → exactly one fetch, the normalized query."""
         seen: list[str] = []
 
-        async def fake_fetch(q: str, *_a: object) -> list[dict[str, str]]:
+        async def fake_fetch(q: str, *_a: object, **_kw: object) -> list[dict[str, str]]:
             seen.append(q)
             return [{"title": "t", "href": "http://x", "body": "b"}]
 
@@ -131,7 +131,7 @@ class TestMultiQueryIntegration:
     ) -> None:
         seen: list[str] = []
 
-        async def fake_fetch(q: str, *_a: object) -> list[dict[str, str]]:
+        async def fake_fetch(q: str, *_a: object, **_kw: object) -> list[dict[str, str]]:
             seen.append(q)
             return []
 
@@ -146,7 +146,7 @@ class TestMultiQueryIntegration:
         """Each variant contributes a unique URL + a shared URL; shared collapses."""
         seen: list[str] = []
 
-        async def fake_fetch(q: str, *_a: object) -> list[dict[str, str]]:
+        async def fake_fetch(q: str, *_a: object, **_kw: object) -> list[dict[str, str]]:
             seen.append(q)
             return [
                 {"title": f"t-{q[:6]}", "href": f"http://unique/{q[:6]}", "body": "b"},
@@ -168,7 +168,7 @@ class TestMultiQueryIntegration:
     ) -> None:
         """Merged+deduped results are capped at max_results."""
 
-        async def fake_fetch(q: str, *_a: object) -> list[dict[str, str]]:
+        async def fake_fetch(q: str, *_a: object, **_kw: object) -> list[dict[str, str]]:
             return [{"title": f"t{i}-{q[:4]}", "href": f"http://x/{q[:4]}/{i}", "body": "b"} for i in range(6)]
 
         monkeypatch.setattr(ws, "_fetch_results", fake_fetch)
@@ -182,7 +182,7 @@ class TestMultiQueryIntegration:
     ) -> None:
         seen: list[str] = []
 
-        async def fake_fetch(q: str, *_a: object) -> list[dict[str, str]]:
+        async def fake_fetch(q: str, *_a: object, **_kw: object) -> list[dict[str, str]]:
             seen.append(q)
             return []
 
@@ -200,7 +200,7 @@ class TestMultiQueryIntegration:
     ) -> None:
         seen: list[str] = []
 
-        async def fake_fetch(q: str, *_a: object) -> list[dict[str, str]]:
+        async def fake_fetch(q: str, *_a: object, **_kw: object) -> list[dict[str, str]]:
             seen.append(q)
             return [{"title": "t", "href": f"http://x/{q}", "body": "b"}]
 

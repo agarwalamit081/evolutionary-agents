@@ -848,14 +848,27 @@ async def _fetch_results(
     region: str,
     timelimit: str,
     deep_crawl: bool,
+    *,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, str]]:
-    """Single-query fetch over a fresh client. The clean test/replace seam."""
+    """Single-query fetch. The clean test/replace seam.
+
+    With ``client`` given, reuses it (caller owns its lifecycle — e.g. a batch
+    shares one pooled client across queries, S16, so TCP connections + TLS
+    handshakes are amortized across every query in the batch and across each
+    query's provider-fallback chain instead of being torn down per query).
+    Without it, opens a fresh client for this call (the single-query path).
+    """
     # Pace the dispatch so concurrent/batched queries don't burst-fire and trip
     # an engine rate limit (S10 — wires the previously-dead WEB_SEARCH_DELAY_*).
     await _pace_search()
-    async with httpx.AsyncClient() as client:
+    if client is not None:
         return await _search_with_fallback(
             client, query, max_results, region, timelimit, deep_crawl
+        )
+    async with httpx.AsyncClient() as owned:
+        return await _search_with_fallback(
+            owned, query, max_results, region, timelimit, deep_crawl
         )
 
 
@@ -868,21 +881,27 @@ async def _fetch_batch(
 ) -> list[list[dict[str, str]]]:
     """Fan out queries concurrently under the SEARCH_BATCH_CONCURRENCY semaphore.
 
-    Each query gets its own client; a transient failure on one query yields an
-    empty list for that slot (others are unaffected) — gather never aborts early.
+    All queries share ONE pooled ``httpx.AsyncClient`` (S16), so a batch reuses
+    TCP connections across queries (and across each query's provider-fallback
+    chain) instead of building/tearing down a connection pool per query. A
+    transient failure on one query yields an empty list for that slot (others
+    are unaffected) — gather never aborts early.
     """
     concurrency = max(1, _search_settings().search_batch_concurrency)
     sem = asyncio.Semaphore(concurrency)
 
-    async def _one(q: str) -> list[dict[str, str]]:
+    async def _one(q: str, shared: httpx.AsyncClient) -> list[dict[str, str]]:
         async with sem:
             try:
-                return await _fetch_results(q, max_results, region, timelimit, deep_crawl)
+                return await _fetch_results(
+                    q, max_results, region, timelimit, deep_crawl, client=shared
+                )
             except Exception as exc:  # keep one bad query from sinking the batch
                 logger.warning(f"web_search: batch query '{q[:40]}' failed: {exc}")
                 return []
 
-    return await asyncio.gather(*[_one(q) for q in queries])
+    async with httpx.AsyncClient() as shared:
+        return await asyncio.gather(*[_one(q, shared) for q in queries])
 
 
 def _format_results(cleaned: list[dict[str, str]]) -> str:

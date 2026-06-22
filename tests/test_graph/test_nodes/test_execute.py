@@ -1055,6 +1055,25 @@ class TestGoalDeliverableFallback:
         monkeypatch.setattr("src.config.settings.get_settings", lambda: fake)
         assert _deliverable_on_disk("results/empty.md") is False
 
+    def test_deliverable_on_disk_finds_cwd_subprocess_write(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bug #6 regression: a code_executor/terminal subprocess writes the
+        deliverable to the process CWD (repo root) when the run-id contextvar
+        does not cross the subprocess boundary. verify's ``_resolve_deliverable``
+        already accepts such a file via its literal-path candidate;
+        ``_deliverable_on_disk`` must too, or the objective-success evolution
+        gate never matches a run verify already marked complete (verify=complete,
+        evolution=not-on-disk → no mutation). The bare filename resolves via the
+        CWD-relative ``Path(path)`` candidate, with results/workspace empty."""
+        fake = MagicMock()
+        fake.agent.results_root = str(tmp_path / "no_results")
+        fake.agent.workspace_root = str(tmp_path / "no_workspace")
+        monkeypatch.setattr("src.config.settings.get_settings", lambda: fake)
+        monkeypatch.chdir(tmp_path)  # Path(path) resolves here, as for a subprocess
+        (tmp_path / "primes_demo.csv").write_text("prime\n2\n3\n5\n7\n")
+        assert _deliverable_on_disk("primes_demo.csv") is True
+
     def _merge_step_state(self) -> dict[str, Any]:
         """Single merge step (last step) with a path-free description but a goal
         that names results/q3_overview.md."""

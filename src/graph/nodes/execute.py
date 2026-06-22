@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -288,23 +289,39 @@ def _is_producing_step(
 
 
 def _deliverable_on_disk(path: str) -> bool:
-    """True if ``path`` already exists under results_root, non-empty.
+    """True if ``path`` already exists, non-empty, anywhere the agent writes.
 
-    Resolves via the shared path resolver — the same one ``file_writer`` uses —
-    so the de-nest set matches exactly and the check sees what file_writer would
-    write. Used so the goal-deliverable fall-back only nudges while the file is
-    still missing — never re-nudges once it exists.
+    Mirrors verify's ``_resolve_deliverable`` candidate set so this check and the
+    verify node agree on what "deliverable on disk" means. Without that parity a
+    run could be marked complete (verify found the file) yet report no on-disk
+    deliverable here — so the objective-success evolution gate never matched a
+    genuinely-successful run (Bug #6: a ``code_executor``/``terminal`` subprocess
+    wrote ``primes_demo.csv`` to the repo root, verify accepted it via the
+    literal-path candidate, but this check only looked under ``results/`` and
+    returned False, suppressing evolution).
+
+    Candidates, in order: ``results`` (``file_writer``'s target — incl. the
+    per-run subdir when active, with the flat-root read fallback), ``workspace``
+    (fixtures), and a literal CWD-relative ``Path(path)`` (where subprocess
+    writes land when the run-id contextvar does not cross the process boundary).
     """
     from src.tools._paths import normalize
 
-    try:
-        target = normalize(path, base="results")
-    except Exception:  # noqa: BLE001 — traversal/settings failure must not abort a step
-        return False
-    try:
-        return target.is_file() and target.stat().st_size > 0
-    except (OSError, ValueError):  # noqa: BLE001 — unreadable/invalid path → not on disk
-        return False
+    candidates: list[Path] = []
+    for base in ("results", "workspace"):
+        try:
+            candidates.append(normalize(path, base=base))
+        except Exception:  # noqa: BLE001 — traversal/settings failure must not abort a step
+            continue
+    candidates.append(Path(path))  # CWD-relative: subprocess writes land here
+
+    for target in candidates:
+        try:
+            if target.is_file() and target.stat().st_size > 0:
+                return True
+        except (OSError, ValueError):  # noqa: BLE001 — unreadable/invalid candidate → skip
+            continue
+    return False
 
 
 def _tool_call_name(tool_call: dict[str, Any]) -> str:

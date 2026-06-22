@@ -35,6 +35,47 @@ if TYPE_CHECKING:
 # call-time below.
 
 
+# Placeholder phrases that signal a tool-gap DESCRIPTION references another
+# location ("described in the goal") instead of naming a concrete capability.
+# Such gaps embed to a generic centroid whose nearest stored tool is a FALSE
+# match at near-1.0 cosine (battery-04 q01: the vague gap "custom tool
+# described in the goal" reused the unrelated ``csv_type_inferrer`` instead of
+# generating an event-normalizer → normalized.csv was never produced and the
+# run looped to MAX_ITERATIONS). When a gap is too vague to be a meaningful
+# capability spec, semantic-dedup REUSE is skipped and the node falls through
+# to generation (which receives goal_text context and produces a specific
+# tool). Defense-in-depth alongside reflect's gap-description quality; never
+# blocks the run.
+_VAGUE_GAP_MARKERS: tuple[str, ...] = (
+    "described in",
+    "mentioned in",
+    "specified in",
+    "in the goal",
+    "from the goal",
+    "user wants",
+    "the user wants",
+)
+
+# Below this length a gap is too short to name a concrete capability (verb +
+# object), so its embedding is not trustworthy for reuse.
+_MIN_SPECIFIC_GAP_LEN = 12
+
+
+def _gap_is_too_vague(gap_description: str) -> bool:
+    """True if ``gap_description`` is too generic to trust for semantic reuse.
+
+    A real capability gap names a concrete capability (e.g. "normalize and
+    deduplicate event records by canonical ID"); a vague one only points
+    elsewhere ("a custom tool described in the goal"). The latter embeds to a
+    generic centroid whose nearest stored tool is a false match, so reuse is
+    unsafe — generation is the correct path.
+    """
+    text = (gap_description or "").strip().lower()
+    if len(text) < _MIN_SPECIFIC_GAP_LEN:
+        return True
+    return any(marker in text for marker in _VAGUE_GAP_MARKERS)
+
+
 async def tool_create_node(
     state: AgentState,
     *,
@@ -168,32 +209,45 @@ async def _create_single_tool(
 
         gap_embedding, emb_source = await embed_capability(gap_description)
         if gap_embedding is not None and emb_source == "api":
-            try:
-                from src.config import get_settings
-                from src.tools.dynamic.persister import ToolPersister
-
-                threshold = get_settings().agent.capability_dedup_threshold
-                similar = await ToolPersister().find_similar(
-                    gap_embedding, threshold=threshold
+            if _gap_is_too_vague(gap_description):
+                # A vague gap (e.g. "custom tool described in the goal") embeds
+                # to a generic centroid whose nearest stored tool is a FALSE
+                # match — reusing it would short-circuit generation of the
+                # actually-needed capability (battery-04 q01 reused the
+                # unrelated csv_type_inferrer instead of generating a
+                # normalizer). Fall through to generation, which gets goal_text
+                # context and produces a specific tool.
+                logger.info(
+                    f"Tool gap '{gap_description[:60]}' is too vague to trust "
+                    f"for semantic reuse — generating a specific tool instead"
                 )
-                for cand in similar:
-                    if registry.has(cand["tool_name"]):
-                        logger.info(
-                            f"Reusing existing tool '{cand['tool_name']}' for "
-                            f"gap '{gap_description[:60]}' "
-                            f"(similarity={cand['similarity']:.3f}) — skipping "
-                            f"generation"
-                        )
-                        return {
-                            "success": True,
-                            "tool_name": cand["tool_name"],
-                            "description": cand["description"],
-                            "reused": True,
-                            "safety_passed": True,
-                            "sandbox_passed": True,
-                        }
-            except Exception as e:
-                logger.debug(f"Tool capability dedup skipped: {e}")
+            else:
+                try:
+                    from src.config import get_settings
+                    from src.tools.dynamic.persister import ToolPersister
+
+                    threshold = get_settings().agent.capability_dedup_threshold
+                    similar = await ToolPersister().find_similar(
+                        gap_embedding, threshold=threshold
+                    )
+                    for cand in similar:
+                        if registry.has(cand["tool_name"]):
+                            logger.info(
+                                f"Reusing existing tool '{cand['tool_name']}' for "
+                                f"gap '{gap_description[:60]}' "
+                                f"(similarity={cand['similarity']:.3f}) — skipping "
+                                f"generation"
+                            )
+                            return {
+                                "success": True,
+                                "tool_name": cand["tool_name"],
+                                "description": cand["description"],
+                                "reused": True,
+                                "safety_passed": True,
+                                "sandbox_passed": True,
+                            }
+                except Exception as e:
+                    logger.debug(f"Tool capability dedup skipped: {e}")
 
         # Sandbox is optional — best-effort
         sandbox: Any = None

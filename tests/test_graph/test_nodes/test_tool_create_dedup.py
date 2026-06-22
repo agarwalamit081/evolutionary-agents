@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.graph.nodes.tool_create import _create_single_tool
+from src.graph.nodes.tool_create import _create_single_tool, _gap_is_too_vague
 
 
 def _gen_instance(tool_name: str = "new_tool") -> MagicMock:
@@ -204,3 +204,82 @@ class TestCreateSingleToolDedup:
         assert result["success"] is True
         assert result["tool_name"] == "new_tool"
         gen_instance.generate.assert_awaited_once()
+
+
+class TestVagueGapSkipsReuse:
+    """battery-04 q01 fix: a vague gap description (one that points elsewhere
+    instead of naming a concrete capability) embeds to a generic centroid whose
+    nearest stored tool is a FALSE match at near-1.0 cosine. The node must NOT
+    reuse in that case — it falls through to generation, which receives
+    goal_text context and produces the actually-needed capability. Regression
+    for q01: the gap "custom tool described in the goal" reused the unrelated
+    ``csv_type_inferrer`` instead of generating an event-normalizer, so
+    normalized.csv was never produced and the run looped to MAX_ITERATIONS."""
+
+    @pytest.mark.parametrize(
+        "gap",
+        [
+            "custom tool described in the goal",
+            "a tool mentioned in the goal",
+            "the capability specified in the prompt",
+            "tool from the goal",
+            "the thing the user wants",
+            "tool",            # far too short to name a capability
+            "",                # empty
+        ],
+    )
+    def test_gap_is_too_vague(self, gap: str) -> None:
+        assert _gap_is_too_vague(gap) is True
+
+    @pytest.mark.parametrize(
+        "gap",
+        [
+            "normalize and deduplicate event records by canonical id",
+            "ingest a csv and infer column data types",
+            "fetch urls over http and return their html",
+            "compute cohort retention from event timestamps",
+        ],
+    )
+    def test_gap_is_specific_enough(self, gap: str) -> None:
+        assert _gap_is_too_vague(gap) is False
+
+    @pytest.mark.asyncio
+    async def test_vague_gap_generates_instead_of_reusing_false_match(self) -> None:
+        """Even when find_similar returns a 1.0-cosine candidate that IS loaded,
+        a vague gap must skip reuse and generate. This is the exact q01
+        regression: csv_type_inferrer matched the vague gap at similarity 1.0."""
+        embed_mock = AsyncMock(return_value=([0.1] * 768, "api"))
+        persister_inst = MagicMock()
+        persister_inst.find_similar = AsyncMock(
+            return_value=[
+                {"tool_name": "csv_type_inferrer", "description": "d", "similarity": 1.0}
+            ]
+        )
+        gen_instance = _gen_instance(tool_name="event_normalizer")
+
+        registry = MagicMock()
+        registry.list_names = MagicMock(return_value=[])
+        registry.has = MagicMock(return_value=True)  # candidate IS loaded → would reuse
+
+        persist_mock = AsyncMock()
+        with (
+            patch("src.memory.embeddings.embed_capability", embed_mock),
+            patch("src.tools.dynamic.persister.ToolPersister", return_value=persister_inst),
+            patch("src.tools.dynamic.generator.ToolGenerator", return_value=gen_instance),
+            patch("src.graph.nodes.tool_create._persist_tool", new=persist_mock),
+        ):
+            result = await _create_single_tool(
+                gateway=MagicMock(),
+                registry=registry,
+                gap_description="custom tool described in the goal",
+                goal_text="ingest+dedupe events, writing results/q01/normalized.csv",
+                tool_results=[],
+            )
+
+        # Generated the specific tool; did NOT reuse the false match.
+        assert result["success"] is True
+        assert "reused" not in result
+        assert result["tool_name"] == "event_normalizer"
+        gen_instance.generate.assert_awaited_once()
+        # The dedup query was never even issued for a vague gap.
+        persister_inst.find_similar.assert_not_awaited()

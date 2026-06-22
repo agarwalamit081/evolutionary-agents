@@ -104,15 +104,20 @@ def test_runner_builds_from_runner_dockerfile(compose: dict) -> None:
 
 def test_runner_has_no_db_redis_search_credentials(compose: dict) -> None:
     """The runner holds NO DATABASE_URL / REDIS_URL / search keys — it does not
-    use env_file and its environment block lists only RUNNER_* vars."""
+    use env_file and its environment block carries only RUNNER_* knobs plus a
+    closed allowlist of benign Python runtime knobs (image hygiene under the
+    read-only rootfs, never credentials)."""
     runner = compose["services"]["runner"]
     assert runner.get("env_file") is None, "runner must not load an env_file"
     env = runner.get("environment") or {}
     forbidden = {"DATABASE_URL", "REDIS_URL", "SEARXNG_URL", "MEILISEARCH_URL", "MEILISEARCH_KEY"}
     leaked = forbidden & set(env)
     assert not leaked, f"runner leaked credentials: {leaked}"
-    # every env var it DOES have is a RUNNER_* knob
-    assert all(k.startswith("RUNNER_") for k in env), env
+    # benign Python interpreter knobs the read-only-rootfs image needs (NOT secrets).
+    # Adding any OTHER non-RUNNER_ key must fail here → forces a conscious review.
+    benign = {"PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHONHASHSEED"}
+    offenders = {k for k in env if not k.startswith("RUNNER_") and k not in benign}
+    assert not offenders, f"runner has unexpected non-RUNNER_ env: {offenders}"
 
 
 def test_runner_exposes_internal_port_only(compose: dict) -> None:

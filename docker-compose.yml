@@ -53,6 +53,15 @@ x-agent-common: &agent-common
   networks:
     - turing-net
   restart: unless-stopped
+  # Defense-in-depth inherited by every agent role (api/worker/agent-cli). The
+  # worker runs LLM-driven code (via the isolated runner), so drop ALL Linux
+  # capabilities + block privilege escalation. Per-role resource limits are set
+  # on each service below (resource limits can't be shared via the anchor — a
+  # service's own `deploy:` would shallow-replace the anchor's).
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
 
 services:
   postgres:
@@ -74,6 +83,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+          pids: 1024
+    security_opt:
+      - no-new-privileges:true
+    # No cap_drop:ALL here: the postgres official entrypoint chowns/chmods the
+    # data dir + /var/run/postgresql as root before gosu→postgres, which needs
+    # file-ownership caps (CHOWN/FOWNER/DAC_OVERRIDE). Dropping ALL makes it
+    # loop "Operation not permitted" and never come up. no-new-privileges +
+    # the resource limit still bound it, and postgres runs no untrusted code,
+    # so cap_drop adds no real protection here. (Meili/rootless images DO
+    # tolerate cap_drop:ALL; these root-then-gosu images do not.)
     networks:
       - turing-net
     restart: unless-stopped
@@ -81,7 +105,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: turing-redis
-    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    # --maxmemory lowered 2g→1g so the container mem-limit (1.5g below) sits
+    # ABOVE the data cap with real headroom — redis self-limits at 1g (LRU), so
+    # it is never OOM-killed and never evicts an unacked turing:runs stream entry
+    # (which would lose a pending job). 1g is ample for this app's hot/cache tier.
+    command: redis-server --appendonly yes --maxmemory 1g --maxmemory-policy allkeys-lru
     ports:
       - "6380:6379"
     volumes:
@@ -91,6 +119,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1500m
+          cpus: "1.0"
+          pids: 1024
+    security_opt:
+      - no-new-privileges:true
+    # No cap_drop:ALL here: the redis official entrypoint chowns the AOF/data
+    # dir as root before gosu→redis, which needs file-ownership caps (CHOWN/
+    # FOWNER/DAC_OVERRIDE). Dropping ALL makes it loop "Permission denied" on
+    # ./appendonlydir. no-new-privileges + the resource limit bound it; redis
+    # executes no untrusted code so cap_drop adds no real protection. See the
+    # matching note on the postgres service for the same root-then-gosu reason.
     networks:
       - turing-net
     restart: unless-stopped
@@ -109,6 +151,16 @@ services:
       - "8081:8080"
     volumes:
       - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+          pids: 1024
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     networks:
       - turing-net
     restart: unless-stopped
@@ -142,6 +194,16 @@ services:
       retries: 5
     networks:
       - turing-net
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+          pids: 1024
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   # ─── Phase 3 role-split ───────────────────────────────────────────────
@@ -174,6 +236,12 @@ services:
     # of the mapping is non-8000, so nothing in-container references 8000 as a host.
     ports:
       - "8800:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+          pids: 512
 
   worker:
     <<: *agent-common
@@ -184,6 +252,11 @@ services:
     command: ["python", "-m", "src.worker"]
     deploy:
       replicas: 2
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+          pids: 512
     # Graceful drain: SIGTERM sets the stop flag; an in-flight job finishes +
     # XACKs before the loop exits. A run longer than this grace is hard-killed,
     # which is SAFE — its checkpoint is durable, so the next worker claim
@@ -222,6 +295,8 @@ services:
     environment:
       RUNNER_RESULTS_ROOT: /home/turing/.turing/results
       RUNNER_MAX_TIMEOUT_S: "300"
+      # RO rootfs (below): stop Python from trying to write .pyc to /app.
+      PYTHONDONTWRITEBYTECODE: "1"
     volumes:
       # Shared workspace RW so a script's results/<file> writes are visible to the
       # worker and land in the same persisted volume the worker/api read. logs for
@@ -233,6 +308,27 @@ services:
       - turing-logs:/home/turing/logs
     expose:
       - "8090"   # internal only — NOT mapped to a host port (no egress path)
+    # Hardest target — this container EXECUTES untrusted LLM-generated Python,
+    # so bound it tight: RO rootfs (writes only hit the writable /tmp tmpfs +
+    # the shared results volume), 256 PIDs (fork-bomb cap), 1g mem / 1 cpu,
+    # ALL capabilities dropped, no privilege escalation. /tmp is scratch for the
+    # executed subprocess (script + tempfile.mkdtemp); the results volume holds
+    # deliverables (cwd = results-root parent). read_only is safe because the
+    # only rootfs writes would be pyc, suppressed by PYTHONDONTWRITEBYTECODE.
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m
+      - /run:size=32m
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+          pids: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test:
         [
@@ -262,6 +358,12 @@ services:
       - turing-runner-net
     # Inherits the Dockerfile CMD (python main.py --interactive); extra args
     # pass through on `docker compose --profile cli run agent --goal "..."`.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+          pids: 512
 
   # Phase 2c — the code_executor sandbox image (NOT a running service). Gated
   # behind the `sandbox` profile so it never starts with the default stack; an

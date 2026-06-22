@@ -207,6 +207,29 @@ class TestModelRouterRoute:
         # The defensive default must also be a real registered model.
         assert DEFAULT_COMPLEXITY_TIER[1] in MODEL_REGISTRY
 
+    def test_trivial_primary_is_qwen36_flash_with_qwen35_fallback(self) -> None:
+        """Promotion regression: the TRIVIAL primary is qwen3.6-flash (the
+        rolling flash alias), and its predecessor qwen3.5-flash survives as a
+        fallback — so promoting the newer flash model never strands the old one.
+
+        Locks the deliberate COMPLEXITY_TIER_MAP swap (qwen3.5-flash →
+        qwen3.6-flash for TRIVIAL) together with its safety property: the new
+        primary is routable (registered, provider alibaba) and the old primary
+        is still reachable on failure via its fallback chain."""
+        from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY
+        from src.llm.model_router import COMPLEXITY_TIER_MAP
+
+        trivial_primary = COMPLEXITY_TIER_MAP[TaskComplexity.TRIVIAL][1]
+        assert trivial_primary == "qwen3.6-flash"
+        # The primary must resolve to a real alibaba-routed model, else it would
+        # be silently skipped in every chain it appears in (the
+        # alibaba-deepseek-v4-flash regression class).
+        assert trivial_primary in MODEL_REGISTRY
+        assert ModelRouter._extract_provider(trivial_primary) == "alibaba"
+        # Safety: the predecessor flash model is reachable as a fallback, so the
+        # promotion can't strand the previously-primary model on failure.
+        assert "qwen3.5-flash" in FALLBACK_CHAINS.get(trivial_primary, [])
+
     def test_route_uses_default_complexity_tier_when_unmapped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

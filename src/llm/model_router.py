@@ -29,7 +29,14 @@ from src.graph.enums import TaskComplexity
 # dead attempt with no behavior change on a funded key. Haiku stays registered
 # + as deepseek-v4-flash's first chain fallback.
 COMPLEXITY_TIER_MAP: dict[TaskComplexity, tuple[ModelTier, str]] = {
-    TaskComplexity.TRIVIAL: (ModelTier.VERY_CHEAP, "qwen3.5-flash"),
+    # TRIVIAL primary is the newest flash-tier model — qwen3.6-flash (the
+    # successor to qwen3.5-flash), promoted so the rolling flash alias is the
+    # trivial-tier workhorse. qwen3.5-flash stays registered and remains
+    # qwen3.6-flash's first FALLBACK_CHAINS entry, so the swap is safe: the old
+    # primary didn't disappear, it became the fallback. Both resolve to provider
+    # "alibaba" (DashScope) via the registry, so the Alibaba api_base/key pin in
+    # the gateway applies to whichever fires.
+    TaskComplexity.TRIVIAL: (ModelTier.VERY_CHEAP, "qwen3.6-flash"),
     TaskComplexity.SIMPLE: (ModelTier.CHEAP, "deepseek-v4-flash"),
     TaskComplexity.COMPLEX: (ModelTier.MODERATE, "glm-4.7"),
     TaskComplexity.CRITICAL: (ModelTier.MODERATE, "glm-4.7"),

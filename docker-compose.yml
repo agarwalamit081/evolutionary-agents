@@ -6,6 +6,10 @@ x-agent-common: &agent-common
   build:
     context: .
     dockerfile: Dockerfile
+  # Named tag (S9) so `docker images` shows it instead of an opaque auto-name,
+  # and scripts/push-images.sh can push it to the local registry. Covers api +
+  # worker + agent-cli, which all build from this one image.
+  image: turing-agent:latest
   env_file: .env
   environment:
     # Internal service hostnames (override the localhost defaults in .env) +
@@ -389,12 +393,39 @@ services:
       dockerfile: Dockerfile.toolbox
     image: turing-toolbox:latest
 
+  # Local registry (S9) — host-only push target for scripts/push-images.sh so
+  # the built images (turing-agent / turing-runner / turing-toolbox) are named,
+  # cached, and shareable without depending on an external registry. Exposed to
+  # the host on :5001; on turing-net. NOT started by default (gated behind the
+  # `registry` profile, like `toolbox`/`sandbox`) — bring it up explicitly:
+  #   docker compose --profile registry up -d registry
+  registry:
+    profiles: ["registry"]
+    image: registry:2
+    ports:
+      - "5001:5000"
+    volumes:
+      - registrydata:/var/lib/registry
+    networks:
+      - turing-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+
 volumes:
   pgdata:
   redisdata:
   meilidata:
   turing-workspace:
   turing-logs:
+  registrydata:
 
 networks:
   turing-net:

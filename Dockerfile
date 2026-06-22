@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ── Stage 1: Builder ─────────────────────────────────────────────────
 FROM python:3.12-slim AS builder
 
@@ -12,10 +13,11 @@ COPY requirements.txt .
 # first (resolves cleanly), then litellm itself with --no-deps so its over-strict
 # metadata never blocks resolution. fastuuid (litellm's only base dep not otherwise
 # required) is pinned in requirements.txt and lands in the core install below.
-RUN grep -v -E '^\s*litellm\b' requirements.txt > /tmp/req.core.txt && \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    grep -v -E '^\s*litellm\b' requirements.txt > /tmp/req.core.txt && \
     grep -E '^\s*litellm\b' requirements.txt > /tmp/req.litellm.txt && \
-    pip install --no-cache-dir --prefix=/install -r /tmp/req.core.txt && \
-    pip install --no-cache-dir --no-deps --prefix=/install -r /tmp/req.litellm.txt
+    pip install --prefix=/install -r /tmp/req.core.txt && \
+    pip install --no-deps --prefix=/install -r /tmp/req.litellm.txt
 
 # ── Stage 2: Runtime ───────────────────────────────────────────────
 FROM python:3.12-slim AS runtime

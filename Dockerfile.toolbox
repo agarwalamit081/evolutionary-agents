@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # turing-toolbox — the runtime code_executor sandbox image (Phase 2c).
 #
 # Used by src/sandbox/executor.py (execute_runtime_code) when an operator opts
@@ -26,7 +27,7 @@ FROM python:3.12-slim
 # persist to the host (read-only rootfs otherwise).
 RUN mkdir -p /workspace
 
-RUN pip install --no-cache-dir \
+RUN --mount=type=cache,target=/root/.cache/pip pip install \
     httpx aiohttp requests \
     beautifulsoup4 lxml feedparser xmltodict \
     pandas numpy pyyaml jinja2 Pillow \

@@ -112,6 +112,20 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     "aiofiles",
     "trafilatura",
     "libcst",
+    # ── Phase S7 — data/code libs for generated tools (pure-python or bundled solver) ─
+    # ``fitz``/``pymupdf`` ← PyMuPDF dist (PDF render/extract). ``pulp``: LP, bundles
+    # CBC. ``cvxpy``: convex optimization, bundles OSQP/ECOS/SCS. ``tree_sitter`` ←
+    # tree-sitter dist; ``tree_sitter_python`` ← tree-sitter-python dist (incremental
+    # parser + Python grammar). ``arxiv``: arXiv API client. Pure-compute or
+    # network-egress-under-contract (arxiv); no managed binary beyond the bundled
+    # solvers, no detection-evasion surface.
+    "fitz",
+    "pymupdf",
+    "pulp",
+    "cvxpy",
+    "tree_sitter",
+    "tree_sitter_python",
+    "arxiv",
 })
 
 # Maximum number of tools that can be created per agent run.
@@ -161,6 +175,16 @@ SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     "aiofiles",
     "trafilatura",
     "libcst",
+    # ── Phase S7 — dist names for the data/code libs above ──
+    # pymupdf (import fitz/pymupdf); tree-sitter (import tree_sitter);
+    # tree-sitter-python (import tree_sitter_python). pulp/cvxpy/arxiv share their
+    # import name. See the ALLOWED_MODULES Phase-S7 note for the rationale.
+    "pymupdf",
+    "pulp",
+    "cvxpy",
+    "tree-sitter",
+    "tree-sitter-python",
+    "arxiv",
 })
 
 
@@ -245,6 +269,10 @@ def get_materializer_namespace() -> dict[str, Any]:
         # Phase 2d additions (findings-04): sklearn ← scikit-learn dist.
         "scipy", "sklearn", "openpyxl", "tabulate",
         "aiofiles", "trafilatura", "libcst",
+        # Phase S7 additions: fitz/pymupdf (PyMuPDF), pulp, cvxpy,
+        # tree_sitter/tree_sitter_python (tree-sitter + Python grammar), arxiv.
+        "fitz", "pymupdf", "pulp", "cvxpy",
+        "tree_sitter", "tree_sitter_python", "arxiv",
     ):
         try:
             mod = __import__(mod_name)

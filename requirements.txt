@@ -99,6 +99,12 @@ python-docx==1.2.0                   # Word .docx extraction (document_parser)
 openpyxl==3.1.5                      # Excel .xlsx extraction (document_parser)
 unstructured==0.21.5                 # Document partitioning — allowlisted for generated tools
 markdown-it-py==4.2.0                # Markdown parsing — allowlisted for generated tools
+pymupdf==1.26.7                     # PDF render/extract — allowlisted for generated tools (import fitz/pymupdf)
+pulp==3.3.2                         # Linear programming, bundles CBC — allowlisted for generated tools
+cvxpy==1.9.1                        # Convex optimization, bundles OSQP/ECOS/SCS — allowlisted for generated tools
+tree-sitter==0.25.2                 # Incremental parser (import tree_sitter) — allowlisted for generated tools
+tree-sitter-python==0.25.0          # Python grammar for tree-sitter (import tree_sitter_python) — allowlisted for generated tools
+arxiv==4.0.0                        # arXiv API client — allowlisted for generated tools
 
 # ─── Development & Testing ──────────────────────────────────────
 pytest==8.4.2

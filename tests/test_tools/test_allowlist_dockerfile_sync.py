@@ -52,6 +52,10 @@ _IMPORT_TO_DIST: dict[str, str] = {
     "markdown_it": "markdown-it-py",
     "sklearn": "scikit-learn",
     "dateutil": "python-dateutil",
+    # Phase S7 additions.
+    "fitz": "pymupdf",
+    "tree_sitter": "tree-sitter",
+    "tree_sitter_python": "tree-sitter-python",
 }
 
 

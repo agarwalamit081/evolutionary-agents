@@ -38,7 +38,8 @@ RUN pip install --no-cache-dir \
     unstructured markdown-it-py \
     redis \
     python-dateutil jsonschema tenacity loguru \
-    scipy scikit-learn openpyxl tabulate aiofiles trafilatura libcst
+    scipy scikit-learn openpyxl tabulate aiofiles trafilatura libcst \
+    pymupdf pulp cvxpy tree-sitter tree-sitter-python arxiv
 
 # ONLY the self-contained server module (no intra-src imports → runs standalone,
 # keeping DB models / gateway / Settings-with-DB-URLs out of this no-creds image).

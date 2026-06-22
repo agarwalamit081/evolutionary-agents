@@ -362,6 +362,82 @@ class TestQ01UtcConformanceProbe:
         assert res.passed is True
 
 
+class TestQ01TimestampInstantProbe:
+    """The q01 instant-preservation probe must resolve any agent-named raw seed.
+
+    The q01 goal tells the agent to *generate* its raw event JSONL and is
+    filename-agnostic about it (only ``normalized.csv`` + ``summary.json`` are
+    named). The probe used to hardcode ``raw_events.jsonl`` as the only
+    acceptable upstream, so an agent that named its seed ``seed_events.jsonl``
+    could never pass — a false-negative. The probe now resolves any event-like
+    ``.jsonl`` under the results root. Run against the REAL golden-spec config
+    so a return to the hardcoded name is caught here.
+    """
+
+    def _probe_config(self) -> CheckConfig:
+        from src.eval.golden import lookup_goal_spec
+
+        spec = lookup_goal_spec("battery04_q01")
+        assert spec is not None
+        cfg = next(
+            (c for c in spec.checks if c.name == "q01_timestamp_instant_preservation"),
+            None,
+        )
+        assert cfg is not None, "q01_timestamp_instant_preservation must exist"
+        return cfg
+
+    @pytest.mark.asyncio
+    async def test_passes_when_seed_named_differently(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _patch_roots(monkeypatch, tmp_path)
+        # The agent generated its raw seed as seed_events.jsonl (NOT the
+        # previously-hardcoded raw_events.jsonl); timestamps are preserved.
+        Path(root, "seed_events.jsonl").write_text(
+            '{"event_id": "evt-001", "timestamp": "2023-10-01T12:00:00Z"}\n'
+            '{"event_id": "evt-002", "timestamp": "2023-10-02T09:15:00Z"}\n',
+            encoding="utf-8",
+        )
+        Path(root, "normalized.csv").write_text(
+            "event_id,timestamp\nevt-001,2023-10-01T12:00:00Z\nevt-002,2023-10-02T09:15:00Z\n",
+            encoding="utf-8",
+        )
+        res = await ExecutionCheck().check(self._probe_config(), ["results/normalized.csv"], {})
+        assert res.passed is True, res.evidence
+
+    @pytest.mark.asyncio
+    async def test_fails_when_instant_changed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _patch_roots(monkeypatch, tmp_path)
+        # False-positive guard: the seed resolves (under a third name), but a
+        # normalized timestamp differs from the raw instant — must FAIL.
+        Path(root, "events.jsonl").write_text(
+            '{"event_id": "evt-001", "timestamp": "2023-10-01T12:00:00Z"}\n',
+            encoding="utf-8",
+        )
+        Path(root, "normalized.csv").write_text(
+            "event_id,timestamp\nevt-001,2023-10-01T11:00:00Z\n",
+            encoding="utf-8",
+        )
+        res = await ExecutionCheck().check(self._probe_config(), ["results/normalized.csv"], {})
+        assert res.passed is False
+        assert "instant changed" in res.evidence["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_fails_when_no_jsonl_upstream(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _patch_roots(monkeypatch, tmp_path)
+        # No raw jsonl anywhere — the probe must still fail (cannot verify).
+        Path(root, "normalized.csv").write_text(
+            "event_id,timestamp\nevt-001,2023-10-01T12:00:00Z\n",
+            encoding="utf-8",
+        )
+        res = await ExecutionCheck().check(self._probe_config(), ["results/normalized.csv"], {})
+        assert res.passed is False
+
+
 class TestQ04TestResultsCountsProbe:
     """The q04 test_results.json counts check — regression for the failure-stub slip.
 

@@ -25,6 +25,11 @@ class GeneratedStep(BaseModel):
     description: str = Field(description="What this step accomplishes")
     tool_name: str | None = Field(default=None, description="Tool to use, if any")
     expected_output: str = Field(default="", description="Expected result of this step")
+    depends_on: list[str] = Field(
+        default_factory=list,
+        description="Descriptions of earlier steps this step depends on (the "
+        "'dependencies' decomposition pass); empty if none",
+    )
 
 
 class GeneratedPlan(BaseModel):

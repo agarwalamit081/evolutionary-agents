@@ -268,6 +268,9 @@ async def _llm_plan(
             steps.append(PlanStep(
                 id=uuid4().hex[:8],
                 description=gen_step.description,
+                tool_name=gen_step.tool_name,
+                expected_output=gen_step.expected_output,
+                depends_on=list(gen_step.depends_on),
                 status=GoalStatus.PENDING,
             ))
 

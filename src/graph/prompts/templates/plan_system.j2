@@ -10,6 +10,7 @@ Respond with a JSON object matching this schema:
   - description: what this step accomplishes
   - tool_name: optional name of a tool to use (choose from the Available tools list below, or null)
   - expected_output: what we expect from this step
+  - depends_on: array of descriptions of earlier steps this step depends on (empty if none)
 - rationale: brief explanation of the plan
 
 Available tools: {{ available_tools }}

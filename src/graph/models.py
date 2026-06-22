@@ -42,6 +42,7 @@ class PlanStep(BaseModel):
     tool_name: str | None = None
     tool_input: dict[str, Any] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
+    expected_output: str = Field(default="", description="What this step should produce")
     status: GoalStatus = GoalStatus.PENDING
     result: str | None = None
     tokens_used: int = 0

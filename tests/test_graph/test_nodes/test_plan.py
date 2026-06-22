@@ -375,3 +375,62 @@ class TestTechniqueInjection:
             system.find("Reasoning techniques to apply:")
             < system.find("Respond with a JSON object")
         )
+
+
+class TestGeneratedStepFieldPreservation:
+    """Regression: GeneratedStep→PlanStep conversion must preserve
+    tool_name, expected_output, AND depends_on.
+
+    Previously plan_node only carried `description` into PlanStep, silently
+    discarding the LLM-emitted tool_name/expected_output (and depends_on was
+    never populated even though PlanStep carried the field). These are exactly
+    the plumbing the atomicity / decomposition passes need, so they must round-trip.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_name_expected_output_and_depends_on_preserved(self) -> None:
+        state = initial_state(
+            "gather data then compute the answer", "thread-fields"
+        )
+        state["strategy"] = Strategy.PLANNING
+        state["current_goal"] = Goal(
+            text="gather data then compute the answer",
+            status=GoalStatus.ACTIVE,
+            complexity=TaskComplexity.COMPLEX,
+        )
+
+        plan_json = (
+            '{"steps": ['
+            '{"description": "Gather data", "tool_name": "web_search", '
+            '"expected_output": "search results", "depends_on": []}, '
+            '{"description": "Compute the answer", "tool_name": "code_executor", '
+            '"expected_output": "computed answer", '
+            '"depends_on": ["Gather data"]}'
+            '], "rationale": "dependency-ordered"}'
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(return_value=LLMResponse(
+            content=plan_json,
+            model="gpt-4o-mini-2024-07-18",
+            provider="openai",
+            input_tokens=10,
+            output_tokens=50,
+            total_tokens=60,
+            cost_usd=0.0001,
+        ))
+
+        result = await plan_node(state, gateway=gateway)
+
+        assert result["phase"] == Phase.RETRIEVE_MEMORY
+        steps = result["plan_steps"]
+        assert len(steps) == 2
+
+        # First step: tool_name + expected_output preserved, no dependencies.
+        assert steps[0].tool_name == "web_search"
+        assert steps[0].expected_output == "search results"
+        assert steps[0].depends_on == []
+
+        # Second step: every field preserved, including the dependency edge.
+        assert steps[1].tool_name == "code_executor"
+        assert steps[1].expected_output == "computed answer"
+        assert steps[1].depends_on == ["Gather data"]

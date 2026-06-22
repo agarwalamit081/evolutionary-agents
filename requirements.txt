@@ -48,6 +48,9 @@ httpx-sse==0.4.3
 aiohttp==3.13.3
 aiofiles==25.1.0
 
+# ─── Scheduling ─────────────────────────────────────────────────
+apscheduler==3.11.2                   # Nightly capability-curve battery feeder (src.scheduler #197)
+
 # ─── Serialization ──────────────────────────────────────────────
 orjson==3.11.9
 msgspec==0.21.1                     # 10x faster than orjson for LLM output streams

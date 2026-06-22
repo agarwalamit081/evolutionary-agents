@@ -1227,6 +1227,61 @@ class WorkerSettings(BaseSettings):
     )
 
 
+class SchedulerSettings(BaseSettings):
+    """Nightly capability-curve battery scheduler (#197 Phase 5).
+
+    There is no time-triggered run path in the deployed stack: runs enter the
+    ``turing:runs`` stream only via the API HTTP endpoint or the host CLI
+    ``--eval``. The capability curve (correctness score over time) therefore only
+    updates when a human runs ``--eval``. This scheduler is the missing feeder:
+    a sidecar (``python -m src.scheduler``) that, on a cron schedule, enqueues
+    every ``BATTERY04_GOALS`` spec as a ``RunJob`` into ``turing:runs`` via the
+    SAME ``RunsQueue.enqueue`` seam the API uses — so the worker (not the host
+    CLI) runs them through the real deployed stack and the eval layer populates
+    ``eval_results`` autonomously. Each run gets a date-suffixed ``run_id``
+    (``battery04_q01-20260622``) so nightly runs are isolated under
+    ``results/<spec>-<date>/`` while the resolver
+    (``runner._resolve_eval_spec_id``) strips the suffix to score against the
+    spec — keeping the curve per-attempt via ``eval_attempt_id``.
+
+    Opt-in: ``enabled`` defaults False so a host-run ``python -m src.scheduler``
+    with no env is a clean no-op (exit 0). The compose ``scheduler`` service is
+    profile-gated AND forces ``SCHEDULER_ENABLED=true`` (mirroring the anchor's
+    forced-topology pattern), so bringing the profile up is the explicit opt-in.
+    """
+
+    enabled: bool = False  # Env: SCHEDULER_ENABLED — opt-in; compose forces true.
+    # 5-field crontab consumed by APScheduler ``CronTrigger.from_crontab``.
+    # Default: nightly 02:00 UTC. Env: SCHEDULER_CRON.
+    cron: str = "0 2 * * *"  # Env: SCHEDULER_CRON
+    # IANA zone for the cron schedule. Env: SCHEDULER_TIMEZONE.
+    timezone: str = "UTC"  # Env: SCHEDULER_TIMEZONE
+    # Optional pinned model for every battery run (registry key or litellm id).
+    # Empty → each run uses its complexity-tiered default. Env: SCHEDULER_MODEL.
+    model: str = ""  # Env: SCHEDULER_MODEL
+    # Battery runs SHOULD exercise evolution (the richest learning signal);
+    # default False (do NOT skip). Env: SCHEDULER_NO_EVOLUTION.
+    no_evolution: bool = False  # Env: SCHEDULER_NO_EVOLUTION
+    # ``strftime`` format appended to each spec id as ``-<suffix>`` for per-night
+    # results isolation. The default ``%Y%m%d`` → ``-20260622``; the resolver
+    # strips a trailing ``-YYYYMMDD`` (8 digits). Changing this to a format with
+    # embedded hyphens (e.g. ``%Y-%m-%d``) would break that strip — keep it
+    # compact. Env: SCHEDULER_DATE_SUFFIX_FORMAT.
+    date_suffix_format: str = "%Y%m%d"  # Env: SCHEDULER_DATE_SUFFIX_FORMAT
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps the documented SCHEDULER_* vars to these fields:
+        # SCHEDULER_ENABLED → enabled, SCHEDULER_CRON → cron, etc. Mirrors the
+        # WorkerSettings pattern (a Phase-2b bug shipped for years because the
+        # prefix was missing) — declared explicitly so these vars are honored.
+        env_prefix="scheduler_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 # ─── Root Settings ──────────────────────────────────────────────────
 
 
@@ -1257,6 +1312,7 @@ class Settings(BaseSettings):
     search: SearchSettings = SearchSettings()  # type: ignore[assignment]
     worker: WorkerSettings = WorkerSettings()  # type: ignore[assignment]
     runner: RunnerSettings = RunnerSettings()  # type: ignore[assignment]
+    scheduler: SchedulerSettings = SchedulerSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

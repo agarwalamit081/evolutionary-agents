@@ -77,8 +77,25 @@ def _new_attempt_id() -> str:
     return f"{stamp}-{uuid.uuid4().hex[:8]}"
 
 
+def _strip_date_suffix(run_id: str) -> str | None:
+    """Strip a trailing ``-YYYYMMDD`` (exactly 8 digits) date suffix, if present.
+
+    The nightly capability-curve scheduler (``src.scheduler``) enqueues each
+    battery spec under a date-suffixed ``run_id`` (``battery04_q01-20260622``)
+    for per-night results isolation. The resolver must still map that back to the
+    spec id (``battery04_q01``) so the verify node scores the run. Returns the
+    stripped id, or ``None`` when no 8-digit suffix follows a hyphen. String-only
+    (no ``re`` import) — ``rpartition`` splits on the LAST hyphen so a spec id
+    containing no hyphen (``battery04_q01``) returns ``None`` untouched.
+    """
+    if "-" not in run_id:
+        return None
+    base, _, tail = run_id.rpartition("-")
+    return base if len(tail) == 8 and tail.isdigit() else None
+
+
 def _resolve_eval_spec_id(run_id: str | None) -> str | None:
-    """Resolve a run_id to its golden GoalSpec id (short or long form).
+    """Resolve a run_id to its golden GoalSpec id (short, long, or date-suffixed).
 
     Accepts either the spec id directly (``battery04_q01``) or the short form
     (``q01`` → ``battery04_q01``) so a battery query opts into Phase-3 eval
@@ -87,6 +104,10 @@ def _resolve_eval_spec_id(run_id: str | None) -> str | None:
     still works — a ``battery04_q01`` run_id would otherwise isolate q1's
     deliverables where q2/q3/q4 could not recall them).
 
+    Also strips a trailing ``-YYYYMMDD`` date suffix the nightly scheduler
+    appends (``battery04_q01-20260622`` → ``battery04_q01``) so scheduled battery
+    runs are scored against their spec while keeping per-night results isolation.
+
     Returns ``None`` when no spec matches (an ordinary run_id is untouched).
     """
     if run_id is None:
@@ -94,11 +115,20 @@ def _resolve_eval_spec_id(run_id: str | None) -> str | None:
     try:
         from src.eval.golden import lookup_goal_spec
 
-        if lookup_goal_spec(run_id) is not None:
-            return run_id
-        candidate = f"battery04_{run_id}"
-        if lookup_goal_spec(candidate) is not None:
-            return candidate
+        def _match(candidate: str) -> str | None:
+            if lookup_goal_spec(candidate) is not None:
+                return candidate
+            prefixed = f"battery04_{candidate}"
+            if lookup_goal_spec(prefixed) is not None:
+                return prefixed
+            return None
+
+        direct = _match(run_id)
+        if direct is not None:
+            return direct
+        stripped = _strip_date_suffix(run_id)
+        if stripped is not None:
+            return _match(stripped)
     except Exception as e:
         logger.debug(f"GoalSpec lookup skipped: {e}")
     return None

@@ -294,6 +294,54 @@ services:
       - turing-net
       - turing-runner-net
 
+  # ─── Phase 5 — nightly capability-curve battery feeder (#197) ───────────
+  # The missing scheduling layer. No run path is time-triggered today: runs
+  # enter turing:runs only via the API or the host CLI --eval, so the capability
+  # curve only updates when a human runs --eval. This sidecar, on SCHEDULER_CRON,
+  # enqueues every BATTERY04_GOALS spec as a RunJob into turing:runs via the SAME
+  # RunsQueue.enqueue seam the API uses — the worker then runs them through the
+  # real deployed stack and eval_results populates the curve autonomously.
+  #
+  # Profile-gated (opt-in): `docker compose --profile scheduler up -d`. The
+  # daemon defaults SCHEDULER_ENABLED=false (a bare host run is a clean no-op),
+  # so the service forces it true here — mirroring the anchor's forced-topology
+  # pattern. LEAST-PRIVILEGE like the runner: Redis ONLY (no DATABASE_URL /
+  # search keys / runner URL / env_file) — it never executes code or touches the
+  # DB; the worker draining these jobs does the work. Defined STANDALONE (not via
+  # the anchor) precisely so it inherits neither .env nor DB/search creds.
+  scheduler:
+    profiles: ["scheduler"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: turing-agent:latest
+    command: ["python", "-m", "src.scheduler"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_ENABLED: "true"
+      SCHEDULER_CRON: ${SCHEDULER_CRON:-0 2 * * *}
+      SCHEDULER_TIMEZONE: ${SCHEDULER_TIMEZONE:-UTC}
+      SCHEDULER_MODEL: ${SCHEDULER_MODEL:-}
+      SCHEDULER_NO_EVOLUTION: ${SCHEDULER_NO_EVOLUTION:-false}
+      # RO rootfs image hygiene (matches the runner): no .pyc writes.
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.25"
+          pids: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - turing-net
+    restart: unless-stopped
+
   # ─── Phase 3b/c — remote no-DinD code-execution runner (#218/#219) ──────
   # The worker's single sink for generated code: both code_executor (untrusted
   # LLM one-off code) and the evolution sandbox (statically vetted code) POST

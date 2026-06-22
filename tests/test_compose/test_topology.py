@@ -211,3 +211,82 @@ def test_api_host_port_is_not_the_conflict_magnet_8000(compose: dict) -> None:
     assert container == "8000", f"api container port drifted from uvicorn 8000: {mapping}"
     assert host, "api host port is empty/unmapped"
     assert host != "8000", f"api host port is still 8000 (conflict magnet): {mapping}"
+
+
+# ── Scheduler: nightly capability-curve battery feeder (#197) ─────────
+
+
+def test_scheduler_service_exists_and_is_profile_gated(compose: dict) -> None:
+    """The nightly capability-curve battery feeder is opt-in behind the
+    `scheduler` profile so `docker compose up -d` (the default stack) does NOT
+    start it — an operator brings it up explicitly:
+    `docker compose --profile scheduler up -d`."""
+    assert "scheduler" in compose["services"], "scheduler service missing"
+    profiles = compose["services"]["scheduler"].get("profiles")
+    assert profiles == ["scheduler"], f"scheduler not profile-gated: {profiles}"
+
+
+def test_scheduler_runs_the_scheduler_module(compose: dict) -> None:
+    """The sidecar runs `python -m src.scheduler`."""
+    scheduler = compose["services"]["scheduler"]
+    assert scheduler.get("command") == ["python", "-m", "src.scheduler"], (
+        scheduler.get("command")
+    )
+
+
+def test_scheduler_is_cred_minimal(compose: dict) -> None:
+    """The scheduler is a pure Redis PRODUCER — it must NOT hold DATABASE_URL /
+    search keys / runner URL. It neither executes code nor touches the DB; the
+    worker draining these jobs does the work. Mirrors the runner's least-privilege
+    posture (see test_runner_has_no_db_redis_search_credentials)."""
+    scheduler = compose["services"]["scheduler"]
+    # No env_file: cred-minimal (does NOT load .env → no inherited DB/search creds).
+    assert scheduler.get("env_file") is None, "scheduler loads an env_file (cred leak)"
+    env = scheduler.get("environment") or {}
+    forbidden = {
+        "DATABASE_URL",
+        "SEARXNG_URL",
+        "MEILISEARCH_URL",
+        "MEILISEARCH_KEY",
+        "RUNNER_URL",
+    }
+    leaked = forbidden & set(env)
+    assert not leaked, f"scheduler leaked credentials: {leaked}"
+    # It MUST have Redis (to enqueue) + SCHEDULER_ENABLED forced on.
+    assert env.get("REDIS_URL") == "redis://redis:6379/0", env.get("REDIS_URL")
+    assert env.get("SCHEDULER_ENABLED") == "true", env.get("SCHEDULER_ENABLED")
+
+
+def test_scheduler_depends_only_on_redis(compose: dict) -> None:
+    """The scheduler talks to Redis ONLY — it must not depend on postgres/searxng/
+    meilisearch/runner (it neither reads the DB nor executes code)."""
+    scheduler = compose["services"]["scheduler"]
+    deps = scheduler.get("depends_on") or {}
+    assert "redis" in deps, f"scheduler must depend_on redis: {deps}"
+    unwanted = {"postgres", "searxng", "meilisearch", "runner"} & set(deps)
+    assert not unwanted, (
+        f"scheduler depends on data/code services it doesn't need: {unwanted}"
+    )
+
+
+def test_scheduler_is_isolated_to_turing_net(compose: dict) -> None:
+    """The scheduler is on turing-net (to reach redis) ONLY — it must NOT be on
+    turing-runner-net (it has no code to route to the runner)."""
+    scheduler = compose["services"]["scheduler"]
+    nets = scheduler.get("networks") or []
+    assert "turing-net" in nets, f"scheduler not on turing-net: {nets}"
+    assert "turing-runner-net" not in nets, (
+        f"scheduler on runner net (it has no code to run): {nets}"
+    )
+
+
+def test_scheduler_drops_all_caps(compose: dict) -> None:
+    """Defense-in-depth: the scheduler drops all Linux caps + blocks privilege
+    escalation (the discipline every app role carries)."""
+    scheduler = compose["services"]["scheduler"]
+    assert "ALL" in (scheduler.get("cap_drop") or []), (
+        f"scheduler did not cap_drop: [ALL]: {scheduler.get('cap_drop')}"
+    )
+    assert "no-new-privileges:true" in (scheduler.get("security_opt") or []), (
+        scheduler.get("security_opt")
+    )

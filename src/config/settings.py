@@ -520,6 +520,12 @@ class ToolLimitsSettings(BaseSettings):
     web_scraper_timeout: float = 20.0  # Env: WEB_SCRAPER_TIMEOUT
     web_scraper_max_bytes: int = 5 * 1024 * 1024  # Env: WEB_SCRAPER_MAX_BYTES
     web_scraper_max_chars: int = 8000  # Env: WEB_SCRAPER_MAX_CHARS
+    # curl-cffi TLS-impersonation anti-bot tier (Gap 7). On an anti-bot signal
+    # (403/429) the scraper retries once with a Chrome-impersonated TLS session,
+    # which bypasses Cloudflare/bot-WAF JA3 blocking that httpx cannot. Opt-in
+    # shape (default on) but degrades to httpx-only if curl_cffi isn't importable.
+    web_scraper_curl_cffi_enabled: bool = True  # Env: WEB_SCRAPER_CURL_CFFI_ENABLED
+    web_scraper_curl_cffi_impersonate: str = "chrome"  # Env: WEB_SCRAPER_CURL_CFFI_IMPERSONATE
     code_executor_timeout: int = 30  # Env: CODE_EXECUTOR_TIMEOUT
     web_search_max_attempts: int = 3  # Env: WEB_SEARCH_MAX_ATTEMPTS
     web_search_delay_min: float = 0.2  # Env: WEB_SEARCH_DELAY_MIN

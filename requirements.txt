@@ -94,6 +94,7 @@ pandas==2.2.3
 ddgs==9.14.2                         # DuckDuckGo search (web_search tool)
 trafilatura==2.0.0                   # URL → clean markdown (web_scraper tool)
 markdownify==1.2.2                   # HTML→markdown fallback for web_scraper (pages trafilatura can't parse; optional — imported defensively)
+curl-cffi==0.15.0                    # TLS-impersonation (Chrome JA3) anti-bot fallback for web_scraper (Cloudflare 403/429; optional — imported defensively)
 pypdf==6.9.1                         # PDF text extraction (document_parser)
 python-docx==1.2.0                   # Word .docx extraction (document_parser)
 openpyxl==3.1.5                      # Excel .xlsx extraction (document_parser)

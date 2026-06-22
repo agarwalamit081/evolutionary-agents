@@ -9,9 +9,11 @@ Extraction stack:
   * ``trafilatura`` for main-content extraction (markdown) + metadata
     (``bare_extraction``: title/description/sitename/author/date/hostname).
   * ``markdownify`` as a fallback for pages trafilatura can't parse.
-  * No ``selectolax`` / ``curl-cffi`` dependency (not installed in this env);
-    metadata comes from trafilatura and the HTTP client is ``httpx``
-    (the curl-cffi anti-bot tier is a documented future enhancement).
+  * HTTP client is ``httpx``; on an anti-bot signal (HTTP 403/429) the fetch
+    retries once via ``curl_cffi`` TLS impersonation (Chrome JA3) — the
+    Cloudflare/bot-WAF bypass tier (Gap 7). Both deps are OPTIONAL and imported
+    defensively so a missing one degrades gracefully (markdownify →
+    trafilatura-only; curl_cffi → httpx-only) and never crashes graph build.
 
 Public surface reused by ``corpus.py``: ``extract_page`` (structured),
 ``chunk_text`` (overlapping chunks), ``compute_content_hash`` (dedup key).
@@ -22,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import tiktoken
@@ -44,10 +46,26 @@ except ModuleNotFoundError:  # optional fallback dep not installed
     _markdownify = None  # type: ignore[assignment]
     _MARKDOWNIFY_AVAILABLE = False
 
+# curl_cffi is the OPTIONAL anti-bot tier (Gap 7): on a 403/429 from httpx, the
+# fetch is retried once with a Chrome-impersonated TLS session (JA3), bypassing
+# Cloudflare/bot-WAF TLS blocking that httpx cannot. Imported defensively so a
+# missing curl_cffi degrades to httpx-only and never crashes graph build.
+try:
+    from curl_cffi import requests as _curl_cffi_requests
+
+    _CURL_CFFI_AVAILABLE = True
+except ModuleNotFoundError:  # optional anti-bot dep not installed
+    _curl_cffi_requests = None  # type: ignore[assignment]
+    _CURL_CFFI_AVAILABLE = False
+
 from src.config.settings import get_settings
 from src.tools.builtin._net_safety import assert_public_host
 
 _USER_AGENT = "Mozilla/5.0 (compatible; TuringAgent/1.0)"
+# Anti-bot signals: Cloudflare/bot-WAF challenge (403) and rate-limit (429).
+# On these, httpx is retried once via curl_cffi TLS impersonation (see
+# ``_fetch_html``). Other 4xx/5xx are NOT retried — they aren't TLS-blocked.
+_ANTIBOT_STATUS: frozenset[int] = frozenset({403, 429})
 # Download-byte cap and fetch timeout are operator-configurable via
 # ToolLimitsSettings (WEB_SCRAPER_MAX_BYTES / WEB_SCRAPER_TIMEOUT). The
 # schema display default below mirrors the settings default; enforcement
@@ -172,10 +190,54 @@ class ExtractedPage:
     metadata: dict[str, str] = field(default_factory=dict)
 
 
-def _fetch_html(url: str, timeout: float, max_bytes: int) -> str:
-    """Fetch the raw HTML with an SSRF guard, size cap, and timeout.
+def _fetch_html_curl_cffi(url: str, timeout: float, max_bytes: int, impersonate: str) -> str:
+    """Retry a fetch with a TLS-impersonated Chrome session (anti-bot tier).
 
-    Raises ``_FetchError`` (carrying a full ``ERROR:`` message) on any failure.
+    Called only from ``_fetch_html`` after httpx hit an anti-bot status
+    (403/429). ``curl_cffi`` replays the request with a Chrome JA3 fingerprint,
+    bypassing Cloudflare/bot-WAF TLS blocking that httpx cannot. Enforces the
+    same byte cap + timeout as the httpx path. Raises ``_FetchError`` (carrying
+    a full ``ERROR:`` message) on any failure — the caller has already fallen
+    through, so this error surfaces to the user rather than masking the block.
+    """
+    assert _curl_cffi_requests is not None  # checked by caller; narrows for type-checkers
+    try:
+        # ``impersonate`` is operator config (a str read from .env); splat it
+        # through a loosely-typed kwargs dict so pyright doesn't narrow it
+        # against curl_cffi's ``BrowserTypeLiteral`` (curl_cffi validates the
+        # value at runtime, raising on an unknown browser identifier).
+        session_kwargs: dict[str, Any] = {"impersonate": impersonate}
+        with _curl_cffi_requests.Session(**session_kwargs) as session:
+            resp = session.get(url, timeout=timeout, allow_redirects=True)
+            status = resp.status_code
+            # Still blocked (or any non-success) → surface it; no further retry.
+            if not (200 <= status < 400):
+                raise _FetchError(f"ERROR: HTTP {status} fetching {url}")
+            # Byte cap: Content-Length pre-check (best-effort) + post-download cap.
+            cl = resp.headers.get("Content-Length") if resp.headers else None
+            if cl and cl.strip().isdigit() and int(cl) > max_bytes:
+                raise _FetchError(
+                    f"ERROR: Page exceeds {max_bytes // (1024 * 1024)} MB download cap"
+                )
+            body = resp.content or b""
+            if len(body) > max_bytes:
+                raise _FetchError(
+                    f"ERROR: Page exceeds {max_bytes // (1024 * 1024)} MB download cap"
+                )
+            return body.decode("utf-8", errors="replace")
+    except _FetchError:
+        raise
+    except Exception as exc:  # curl_cffi raises CurlError etc.; surface as ERROR:
+        raise _FetchError(f"ERROR: curl_cffi fetch failed: {exc}") from exc
+
+
+def _fetch_html(url: str, timeout: float, max_bytes: int) -> str:
+    """Fetch the raw HTML with an SSRF guard, size cap, timeout, and anti-bot tier.
+
+    On an anti-bot signal (HTTP 403/429 from httpx) and when ``curl_cffi`` is
+    enabled + importable, retries once via a Chrome-impersonated TLS session
+    (Cloudflare/bot-WAF bypass — Gap 7). Raises ``_FetchError`` (carrying a full
+    ``ERROR:`` message) on any failure.
     """
     err = assert_public_host(url)
     if err:
@@ -202,7 +264,25 @@ def _fetch_html(url: str, timeout: float, max_bytes: int) -> str:
     except _FetchError:
         raise
     except httpx.HTTPStatusError as exc:
-        raise _FetchError(f"ERROR: HTTP {exc.response.status_code} fetching {url}") from exc
+        status = exc.response.status_code
+        # Anti-bot tier: on a Cloudflare block (403) or rate-limit (429), retry
+        # once with a TLS-impersonated Chrome session if available. Only these
+        # TLS-blocked statuses qualify — a genuine 404/500 is not a fingerprint
+        # block and must not be retried.
+        if status in _ANTIBOT_STATUS:
+            limits = _tool_limits()
+            if (
+                limits.web_scraper_curl_cffi_enabled
+                and _CURL_CFFI_AVAILABLE
+                and _curl_cffi_requests is not None
+            ):
+                logger.debug(
+                    f"web_scraper: anti-bot {status} from {url[:80]}, retrying via curl_cffi"
+                )
+                return _fetch_html_curl_cffi(
+                    url, timeout, max_bytes, limits.web_scraper_curl_cffi_impersonate
+                )
+        raise _FetchError(f"ERROR: HTTP {status} fetching {url}") from exc
     except httpx.HTTPError as exc:
         raise _FetchError(f"ERROR: Fetch failed: {exc}") from exc
 

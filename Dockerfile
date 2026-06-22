@@ -36,8 +36,10 @@ COPY --from=builder /install /usr/local
 COPY src/ src/
 COPY main.py .
 COPY alembic.ini .
-COPY pytest.ini .
-COPY tests/ tests/
+# NOTE: tests/ + pytest.ini are intentionally NOT copied into the prod runtime
+# image (uvicorn / worker / CLI). Pytest runs on the host via the aiml01 venv
+# per CLAUDE.md; no runtime code under src/ or main.py imports tests/. Keeping
+# them out shrinks the image and avoids shipping test fixtures to prod.
 
 # Create non-root user for security. The results dir is pre-created (and
 # owned) so the agent's persisted RESULTS_ROOT (set in docker-compose) is

@@ -143,7 +143,11 @@ services:
     # in-container agent reaches it at http://searxng:8080); the HOST port is
     # mapped to 8081 so this stack never clashes with SearXNG containers other
     # projects may run on the default 8080.
-    image: searxng/searxng:latest
+    # Pinned by immutable digest (not :latest): SearXNG publishes only rolling
+    # :latest + weekly date tags, so a tag still floats. The digest freezes the
+    # EXACT image already pulled locally (no re-pull, no behavior change). Bump
+    # intentionally by pulling a new digest + updating this string.
+    image: searxng/searxng@sha256:754a07a64e926a1fc0a8a30cd7a07d08278188f0ef6143e38ad0b22ea8599c55
     ports:
       - "8081:8080"
     volumes:
@@ -231,6 +235,21 @@ services:
     # of the mapping is non-8000, so nothing in-container references 8000 as a host.
     ports:
       - "8800:8000"
+    healthcheck:
+      # Liveness probe against the root-mounted /health route
+      # (src/api/routes/health.py). start_period covers uvicorn + app startup
+      # (DB pool warm-up) before the first probe; mirrors the runner healthcheck.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     deploy:
       resources:
         limits:

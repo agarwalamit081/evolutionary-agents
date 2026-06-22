@@ -222,6 +222,31 @@ async def store_memory_node(
                 await memory.update_skill_fitness(str(skill_id), success=is_complete)
             except Exception as e:
                 logger.debug(f"Skill fitness update skipped: {e}")
+
+        # Feature E: persist classify's refined_intent (Feature A) as a durable
+        # semantic fact so later runs recall the real desired outcome behind a
+        # recurring goal. Opt-in (persist_intent_facts, default off); best-effort
+        # and non-fatal (CostTracker-resilience pattern — a store hiccup never
+        # aborts the terminal sink). Skipped when no refined_intent was surfaced
+        # (heuristic classify path) so it costs nothing on default runs.
+        try:
+            from src.config import get_settings
+
+            if get_settings().agent.persist_intent_facts:
+                refined_intent = str(state.get("refined_intent") or "").strip()
+                if refined_intent:
+                    goal = state.get("current_goal")
+                    goal_id = getattr(goal, "id", "") or "unknown"
+                    ambiguity_type = str(state.get("ambiguity_type") or "none")
+                    await memory.store_fact(
+                        key=f"intent::{goal_id}",
+                        value=refined_intent,
+                        source="classify",
+                        tags=["intent", ambiguity_type],
+                    )
+                    logger.info("Persisted refined_intent as a fact (Feature E)")
+        except Exception as e:
+            logger.debug(f"Intent-fact persist skipped: {e}")
     else:
         logger.debug("No MemoryManager available, skipping memory storage")
 

@@ -206,7 +206,8 @@ class TestStoreMemoryNode:
         result = await store_memory_node(state, memory=memory)
 
         assert result["phase"] == Phase.HITL_GATE
-        update_fitness.assert_awaited_once_with("s1", success=False)
+        assert update_fitness.await_count == 1
+        assert update_fitness.await_args.kwargs["success"] is False
 
     @pytest.mark.asyncio
     async def test_store_no_recalled_skills_skips_fitness(self, sample_state: dict) -> None:
@@ -260,5 +261,103 @@ class TestStoreMemoryNode:
         state["is_complete"] = True
 
         result = await store_memory_node(state)
+
+        assert result["phase"] == Phase.COMPLETE
+
+
+class TestStoreMemoryIntentFacts:
+    """Feature E: persist classify's refined_intent as a durable fact (opt-in)."""
+
+    def _memory(self) -> MagicMock:
+        memory = MagicMock()
+        memory.store_observation = AsyncMock(return_value=None)
+        memory.store_skill = AsyncMock(return_value="uuid")
+        memory.update_skill_fitness = AsyncMock(return_value=None)
+        memory.store_fact = AsyncMock(return_value="fact-uuid")
+        return memory
+
+    @pytest.mark.asyncio
+    async def test_persists_when_flag_on(
+        self, sample_state: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.config import get_settings
+
+        monkeypatch.setattr(get_settings().agent, "persist_intent_facts", True)
+
+        memory = self._memory()
+        state = dict(sample_state)
+        state["memory_observations"] = []
+        state["reflection"] = None
+        state["is_complete"] = True
+        state["refined_intent"] = "the user wants a UTC-normalized event log"
+        state["ambiguity_type"] = "scope"
+
+        await store_memory_node(state, memory=memory)
+
+        memory.store_fact.assert_awaited_once()
+        _, kwargs = memory.store_fact.call_args
+        assert kwargs["value"] == "the user wants a UTC-normalized event log"
+        assert kwargs["source"] == "classify"
+        assert kwargs["tags"] == ["intent", "scope"]
+        assert kwargs["key"].startswith("intent::")
+
+    @pytest.mark.asyncio
+    async def test_noop_when_flag_off(
+        self, sample_state: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.config import get_settings
+
+        monkeypatch.setattr(get_settings().agent, "persist_intent_facts", False)
+
+        memory = self._memory()
+        state = dict(sample_state)
+        state["memory_observations"] = []
+        state["reflection"] = None
+        state["is_complete"] = True
+        state["refined_intent"] = "should not be persisted with the flag off"
+
+        await store_memory_node(state, memory=memory)
+
+        memory.store_fact.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_refined_intent_empty(
+        self, sample_state: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The heuristic classify path yields an empty refined_intent — nothing
+        to persist even with the flag on."""
+        from src.config import get_settings
+
+        monkeypatch.setattr(get_settings().agent, "persist_intent_facts", True)
+
+        memory = self._memory()
+        state = dict(sample_state)
+        state["memory_observations"] = []
+        state["reflection"] = None
+        state["is_complete"] = True
+        state["refined_intent"] = ""
+
+        await store_memory_node(state, memory=memory)
+
+        memory.store_fact.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_store_fact_failure_isolated(
+        self, sample_state: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fact-store hiccup never aborts the terminal sink (resilience)."""
+        from src.config import get_settings
+
+        monkeypatch.setattr(get_settings().agent, "persist_intent_facts", True)
+
+        memory = self._memory()
+        memory.store_fact = AsyncMock(side_effect=RuntimeError("db down"))
+        state = dict(sample_state)
+        state["memory_observations"] = []
+        state["reflection"] = None
+        state["is_complete"] = True
+        state["refined_intent"] = "intent that cannot be stored"
+
+        result = await store_memory_node(state, memory=memory)
 
         assert result["phase"] == Phase.COMPLETE

@@ -915,6 +915,12 @@ class AgentSettings(BaseSettings):
     # Pure heuristic — zero LLM cost. Default off: plans pass through unchanged.
     plan_atomicity_enforce: bool = False  # Env: PLAN_ATOMICITY_ENFORCE
 
+    # Feature E: persist the classify node's refined_intent (Feature A) as a
+    # durable semantic fact (memory_type="fact") so later runs recall the real
+    # desired outcome behind a recurring goal. Best-effort + non-fatal (a store
+    # hiccup never aborts the terminal sink). Default off.
+    persist_intent_facts: bool = False  # Env: PERSIST_INTENT_FACTS
+
     # Concurrency + loop bounds (previously module constants in
     # src/graph/nodes/execute.py and src/graph/nodes/tool_create.py, and the
     # verify data-tool cap in src/graph/nodes/verify.py).

@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import string
 import threading
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
@@ -136,16 +137,130 @@ _TRACKING_PARAMS = frozenset(
 # ── result cleanup helpers (unchanged — preserved verbatim) ─────────────
 
 
-def _build_query(query: str) -> str:
-    """Normalize the query before sending.
+def _extract_host(site: str) -> str:
+    """Reduce a site spec to its bare hostname for the ``site:`` operator.
 
-    Currently collapses whitespace. This is the extension point for future
-    operator injection (``site:``, ``filetype:``, exact-match quoting) — those
-    are intentionally NOT applied by default because they drastically narrow
-    natural-language queries. Spam domains are filtered post-fetch (robust and
-    deterministic) rather than via fragile query-level ``-site:`` exclusion.
+    Accepts a bare host, a full URL (with or without scheme/path), or a
+    comma-separated list (first entry used); returns the lowercased host with no
+    scheme/path/port, or ``""`` when nothing usable remains.
     """
-    return " ".join(query.split())
+    raw = (site or "").split(",")[0].strip()
+    if not raw:
+        return ""
+    if "://" not in raw and "/" not in raw and " " not in raw and "." in raw:
+        return raw.lower()
+    try:
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    except ValueError:
+        return ""
+    return (parsed.hostname or "").lower()
+
+
+def _clean_filetype(filetype: str) -> str:
+    """Normalize a filetype spec to a bare extension for ``filetype:``."""
+    ext = (filetype or "").strip().lower().lstrip(".")
+    # Keep alnum only; drop anything that would break the operator.
+    cleaned = "".join(c for c in ext if c.isalnum())
+    return cleaned[:16]
+
+
+def _build_query(
+    query: str,
+    *,
+    site: str = "",
+    filetype: str = "",
+    exact: str = "",
+    exclude: str = "",
+) -> str:
+    """Normalize the query and OPTIONALLY append search operators (S13).
+
+    Whitespace is always collapsed. Operators are appended ONLY when the caller
+    supplies them — they drastically narrow natural-language queries, so the
+    default (all empty) keeps the broad-recall NL behavior unchanged. The
+    operators give the agent targeted control:
+
+      * ``site``     → ``site:host`` (bare host extracted from a URL if needed)
+      * ``filetype`` → ``filetype:pdf`` (extension only; leading dot stripped)
+      * ``exact``    → ``"exact phrase"`` (quoted; whitespace-normalized)
+      * ``exclude``  → ``-term`` per token, or ``-site:host`` for a domain-like
+        token (e.g. ``pinterest.com``). Comma-separated list.
+
+    Spam domains are STILL filtered post-fetch (robust + deterministic) rather
+    than via fragile query-level exclusion — ``exclude`` is for explicit,
+    caller-driven narrowing, not the spam list.
+    """
+    base = " ".join(query.split())
+    if not base:
+        return base
+    parts: list[str] = [base]
+    host = _extract_host(site)
+    if host:
+        parts.append(f"site:{host}")
+    ext = _clean_filetype(filetype)
+    if ext:
+        parts.append(f"filetype:{ext}")
+    phrase = " ".join((exact or "").split())
+    if phrase:
+        parts.append(f'"{phrase}"')
+    for tok in (exclude or "").split(","):
+        compact = " ".join(tok.split())
+        if not compact:
+            continue
+        if "." in compact and " " not in compact:
+            parts.append(f"-site:{compact.lower()}")
+        elif " " in compact:
+            parts.append(f'-"{compact}"')
+        else:
+            parts.append(f"-{compact}")
+    return " ".join(parts)
+
+
+# Common English stop words — stripping them focuses keyword engines on the
+# content words, which often matches better than the full natural-language
+# phrasing. Intentionally a small, conservative list (not a full NLP set).
+_QUERY_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "is", "are",
+    "was", "were", "be", "been", "being", "how", "what", "when", "where", "why",
+    "who", "whom", "which", "with", "without", "from", "by", "at", "as", "this",
+    "that", "these", "those", "it", "its", "do", "does", "did", "can", "could",
+})
+
+
+def _strip_stopwords(query: str) -> str:
+    """Drop stop-words and collapse to content words (order-preserving)."""
+    content = [
+        t for t in query.split()
+        if t.strip(string.punctuation).lower() not in _QUERY_STOPWORDS
+    ]
+    return " ".join(content)
+
+
+def expand_query_variants(query: str) -> list[str]:
+    """Deterministic phrasing variants of ``query`` for multi-query recall (S13).
+
+    Issuing several phrasings of the same intent and merging the UNIQUE results
+    broadens recall beyond any single framing. Purely heuristic — no LLM:
+
+      1. the normalized base query (broad),
+      2. stop-word-stripped (content words → stronger keyword match), and
+      3. the whole query wrapped as an exact phrase (precision variant).
+
+    Order-preserving + deduped; the base query always leads. Returns ``[base]``
+    when the query has no exploitable structure (single token, or all stop-words)
+    so ``multi_query`` never issues redundant identical queries.
+    """
+    base = " ".join(query.split())
+    if not base:
+        return []
+    variants: list[str] = [base]
+    stripped = _strip_stopwords(base)
+    if stripped and stripped.lower() != base.lower():
+        variants.append(stripped)
+    if len(base.split()) >= 2:
+        exact_phrase = f'"{base}"'
+        if exact_phrase not in variants:
+            variants.append(exact_phrase)
+    return variants
 
 
 def _unwrap_redirect(url: str) -> str:
@@ -786,6 +901,11 @@ async def web_search(
     timelimit: str = "",
     queries: list[str] | None = None,
     deep_crawl: bool = False,
+    site: str = "",
+    filetype: str = "",
+    exact: str = "",
+    exclude: str = "",
+    multi_query: bool = False,
 ) -> str:
     """Search the web via SearXNG (primary) with automatic paid fallback.
 
@@ -800,6 +920,17 @@ async def web_search(
             ``SEARCH_BATCH_CONCURRENCY``. When set, ``query`` is ignored.
         deep_crawl: Engage heavy providers (Firecrawl/Apify). No-op unless
             ``DEEP_CRAWL_ENABLED=true`` and the provider key is set.
+        site: Restrict results to a host (``site:`` operator) — a bare host or a
+            full URL; e.g. ``"arxiv.org"``. Empty = no restriction.
+        filetype: Restrict to a file type (``filetype:`` operator) — e.g.
+            ``"pdf"``. Empty = any type.
+        exact: Require an exact phrase (quoted) — e.g.
+            ``"transformer attention mechanism"``. Empty = none.
+        exclude: Comma-separated terms to exclude (``-term``); a domain-like
+            token becomes ``-site:host`` (e.g. ``"pinterest.com, quizlet.com"``).
+        multi_query: Broaden recall by issuing several phrasings of ``query``
+            (base + stop-word-stripped + exact-phrase) and merging the unique
+            results. Off by default (one query). Ignored in batch mode.
 
     Returns:
         Formatted search results (title / snippet / URL), one per line, after
@@ -807,7 +938,13 @@ async def web_search(
         mode each query's results are a ``Query: "..."``-prefixed block.
     """
     if queries:
-        built = [q for q in (_build_query(str(q)) for q in queries) if q]
+        built = [
+            q for q in (
+                _build_query(
+                    str(q), site=site, filetype=filetype, exact=exact, exclude=exclude
+                ) for q in queries
+            ) if q
+        ]
         if not built:
             return "ERROR: empty search queries"
         logger.info(f"Web search batch: {len(built)} queries...")
@@ -821,19 +958,37 @@ async def web_search(
                 blocks.append(f'Query: "{q}"\n{_format_results(cleaned)}')
         return "\n\n".join(blocks)
 
-    built_query = _build_query(query)
-    if not built_query:
+    base = " ".join(query.split())
+    if not base:
         return "ERROR: empty search query"
-    logger.info(f"Web search: {built_query[:60]}...")
+    # multi_query: broaden recall by issuing several phrasings and merging the
+    # unique results (S13). Each variant gets the same operators appended; the
+    # merged list is deduped across variants and capped at max_results.
+    variants = expand_query_variants(base) if multi_query else [base]
+    built = [
+        q for q in (
+            _build_query(v, site=site, filetype=filetype, exact=exact, exclude=exclude)
+            for v in variants
+        ) if q
+    ]
+    if not built:
+        return "ERROR: empty search query"
+    logger.info(f"Web search: {built[0][:60]}... ({len(built)} variant(s))")
 
     try:
-        results = await _fetch_results(
-            built_query, max_results, region, timelimit, deep_crawl
-        )
+        if len(built) == 1:
+            results = await _fetch_results(
+                built[0], max_results, region, timelimit, deep_crawl
+            )
+        else:
+            per_variant = await _fetch_batch(
+                built, max_results, region, timelimit, deep_crawl
+            )
+            results = [r for batch in per_variant for r in batch]
     except Exception as exc:
         return f"ERROR: Search failed: {exc}"
 
-    cleaned = _clean_results(results)
+    cleaned = _clean_results(results)[:max_results]
     if not cleaned:
         return f"No results found for: {query}"
 
@@ -848,7 +1003,9 @@ TOOL_DEFINITION = {
         "Returns top results with titles, snippets, and URLs. Useful for finding "
         "current information, documentation, or answers to factual questions. "
         "Pass `queries` (a list) to run several searches in parallel, or "
-        "`deep_crawl=true` for heavy providers (off by default)."
+        "`deep_crawl=true` for heavy providers (off by default). Narrow results "
+        "with `site`/`filetype`/`exact`/`exclude`, or set `multi_query=true` to "
+        "issue several phrasings and merge the unique hits for higher recall."
     ),
     # Idempotent read-only network fetch — safe to cache within/across runs.
     "cacheable": True,
@@ -894,6 +1051,46 @@ TOOL_DEFINITION = {
                 "description": (
                     "Engage heavy providers (Firecrawl). Off by default — "
                     "requires DEEP_CRAWL_ENABLED=true and a provider key."
+                ),
+                "default": False,
+            },
+            "site": {
+                "type": "string",
+                "description": (
+                    "Restrict results to a host via the site: operator — a bare "
+                    "host or full URL (e.g. 'arxiv.org'). Empty = no restriction."
+                ),
+                "default": "",
+            },
+            "filetype": {
+                "type": "string",
+                "description": (
+                    "Restrict to a file type via filetype: (e.g. 'pdf'). "
+                    "Empty = any type."
+                ),
+                "default": "",
+            },
+            "exact": {
+                "type": "string",
+                "description": (
+                    "Require an exact quoted phrase (e.g. 'transformer attention "
+                    "mechanism'). Empty = none."
+                ),
+                "default": "",
+            },
+            "exclude": {
+                "type": "string",
+                "description": (
+                    "Comma-separated terms to exclude (-term); a domain-like "
+                    "token becomes -site:host (e.g. 'pinterest.com, quizlet')."
+                ),
+                "default": "",
+            },
+            "multi_query": {
+                "type": "boolean",
+                "description": (
+                    "Broaden recall: issue several phrasings of `query` and merge "
+                    "the unique hits. Off by default. Ignored in batch mode."
                 ),
                 "default": False,
             },

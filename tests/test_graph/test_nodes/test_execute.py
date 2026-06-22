@@ -17,6 +17,7 @@ from src.graph.nodes.execute import (
     _extract_expected_file_path,
     _extract_goal_deliverable,
     _first_file_output_call,
+    _is_compute_deliverable,
     _is_producing_step,
     _tool_call_args,
     _write_nudge,
@@ -252,20 +253,22 @@ class TestExecuteNodeLLM:
         assert result["current_step_index"] == 1
 
     def test_write_nudge_directs_create_dirs_and_file_writer(self) -> None:
-        """The write nudge must tell the model to set create_dirs=true and use
-        file_writer (not code_executor) for the deliverable file.
+        """For a TEXT deliverable the write nudge must tell the model to set
+        create_dirs=true and use file_writer (not code_executor).
 
         Regression for battery-04 q3: even when file_writer was forced via
         tool_choice, some models omitted create_dirs (defaulting then to False)
         so nested writes silently failed on a missing parent. The nudge now
         spells out create_dirs=true and names file_writer over code_executor.
+        (Compute/data deliverables like .csv have their own branch — see
+        TestComputeDeliverableSteering.)
         """
-        text = _write_nudge("results/q03/retention.csv")
+        text = _write_nudge("results/q03/overview.md", compute=False)
         low = text.lower()
         assert "create_dirs" in low, text
         assert "file_writer" in low, text
-        assert "code_executor" in low, text
-        assert "results/q03/retention.csv" in text
+        assert "code_executor" not in low, text
+        assert "results/q03/overview.md" in text
 
     @pytest.mark.asyncio
     async def test_llm_execute_with_unknown_tool(self, state_with_plan: dict[str, Any]) -> None:
@@ -656,7 +659,7 @@ class TestWriteStepHelpers:
         assert _tool_call_args(tc) == {}
 
     def test_write_nudge_names_path_and_tool(self) -> None:
-        nudge = _write_nudge("results/x.md")
+        nudge = _write_nudge("results/x.md", compute=False)
         assert "results/x.md" in nudge
         assert "file_writer" in nudge
 
@@ -794,6 +797,140 @@ class TestCodeExecutorWriteSatisfiesWriteStep:
         # break. The step still completes; verify flags the gap downstream.
         assert gateway.acompletion_with_tools.call_count > 1
         assert result["completed_steps"][0].status == GoalStatus.COMPLETED
+
+
+class TestComputeDeliverableSteering:
+    """battery-04 q01 fix: a DATA deliverable (.csv/.jsonl/…) must be produced by
+    ``code_executor``, not ``file_writer`` — the model cannot reliably hand-author
+    normalized/transformed rows as text. The write-step steering now branches on
+    ``_is_compute_deliverable(path)``: compute files steer to code_executor
+    (turn-1 step label + a code_executor nudge + NO file_writer tool_choice lock);
+    text files (.md/.txt/.json) stay on file_writer (create_dirs + forced
+    tool_choice on the nudge turn). Regression for q01 where normalized.csv never
+    materialized: the prompt said 'file_writer, NOT code_executor' AND the nudge
+    pinned file_writer via tool_choice, so the agent could only narrate the data
+    and looped plan→execute→reflect→verify to MAX_ITERATIONS — no eval row."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "results/q01/normalized.csv",
+            "results/q01/events.tsv",
+            "results/q01/events.jsonl",
+            "results/q01/events.jsonlines",
+            "results/q01/data.xlsx",
+            "results/q01/data.xls",
+            "results/q01/data.parquet",
+            "results/q01/data.feather",
+        ],
+    )
+    def test_is_compute_deliverable_true_for_data_exts(self, path: str) -> None:
+        assert _is_compute_deliverable(path) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "results/q01/summary.json",
+            "results/q03/overview.md",
+            "results/q9_onboarding.md",
+            "reports/q3.pdf",
+            "results/q01/notes.txt",
+        ],
+    )
+    def test_is_compute_deliverable_false_for_text_exts(self, path: str) -> None:
+        assert _is_compute_deliverable(path) is False
+
+    def test_is_compute_deliverable_case_insensitive(self) -> None:
+        assert _is_compute_deliverable("RESULTS/Q01/NORMALIZED.CSV") is True
+
+    def test_write_nudge_compute_branch_steers_to_code_executor(self) -> None:
+        text = _write_nudge("results/q01/normalized.csv", compute=True)
+        low = text.lower()
+        assert "code_executor" in low, text
+        assert "results/q01/normalized.csv" in text
+        # A compute nudge must NOT mention create_dirs/file_writer — that would
+        # contradict the code_executor instruction and re-lock the wrong tool.
+        assert "create_dirs" not in low, text
+        assert "file_writer" not in low, text
+
+    def test_write_nudge_text_branch_steers_to_file_writer(self) -> None:
+        text = _write_nudge("results/q01/summary.md", compute=False)
+        low = text.lower()
+        assert "file_writer" in low, text
+        assert "create_dirs" in low, text
+        assert "code_executor" not in low, text
+
+    @pytest.mark.asyncio
+    async def test_compute_step_steers_to_code_executor_and_skips_file_writer_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Turn-1 step label for a .csv deliverable steers to code_executor, and
+        a subsequent nudge turn is NOT force-locked to file_writer (so the
+        instructed tool stays callable). Text-only turns force the nudge path
+        deterministically via the on-disk mock."""
+        from src.graph.enums import Strategy
+
+        monkeypatch.setattr(get_settings().agent, "max_write_nudges", 2)
+        # Deliverable absent → nudge fires regardless of ambient results/ state.
+        monkeypatch.setattr("src.graph.nodes.execute._deliverable_on_disk", lambda _path: False)
+
+        state = dict(initial_state(
+            "Ingest+dedupe events, writing results/q01/normalized.csv",
+            "th-q01-compute", 10,
+        ))
+        state["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description="Write the normalized events to results/q01/normalized.csv",
+                status="pending",
+            ),
+        ]
+        state["current_step_index"] = 0
+        state["strategy"] = Strategy.REACT
+
+        narration = ToolCallResponse(
+            content="I will produce the normalized CSV now.",
+            tool_calls=[],
+            model="deepseek-v4-flash", provider="deepseek",
+            input_tokens=10, output_tokens=10, total_tokens=20, cost_usd=0.0001,
+        )
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(side_effect=[narration, narration, narration])
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[
+            {"type": "function", "function": {
+                "name": "file_writer",
+                "description": "Write a file",
+                "parameters": {"type": "object", "properties": {
+                    "file_path": {"type": "string"}, "content": {"type": "string"}}},
+            }},
+            {"type": "function", "function": {
+                "name": "code_executor",
+                "description": "Run code",
+                "parameters": {"type": "object", "properties": {"code": {"type": "string"}}},
+            }},
+        ])
+        tools.get_handler = MagicMock(return_value=AsyncMock(return_value="ok"))
+
+        await execute_node(state, gateway=gateway, tools=tools)
+
+        calls = gateway.acompletion_with_tools.call_args_list
+        assert len(calls) >= 2
+
+        # Turn 1: compute step label steers to code_executor, not file_writer.
+        turn1_blob = " ".join(str(m) for m in calls[0].kwargs.get("messages", [])).lower()
+        assert "code_executor" in turn1_blob, turn1_blob
+        assert "produced by running code" in turn1_blob, turn1_blob
+        # create_dirs is file_writer-specific — absent from the compute label.
+        assert "create_dirs" not in turn1_blob, turn1_blob
+
+        # Turn 2 (nudge): a compute deliverable is NOT force-locked to file_writer
+        # (tool_choice stays None so code_executor remains callable), and the
+        # nudge text itself names code_executor.
+        assert calls[1].kwargs.get("tool_choice") is None
+        turn2_blob = " ".join(str(m) for m in calls[1].kwargs.get("messages", [])).lower()
+        assert "code_executor" in turn2_blob, turn2_blob
+        assert "create_dirs" not in turn2_blob, turn2_blob
 
 
 class TestGoalDeliverableFallback:

@@ -30,6 +30,22 @@ if TYPE_CHECKING:
 # artifact for verification to find.
 FILE_OUTPUT_TOOLS: frozenset[str] = frozenset({"file_writer"})
 
+# Tabular / row-data deliverables that must be PRODUCED BY CODE — the content is
+# derived by reading + transforming/aggregating input data (e.g. normalize a
+# JSONL into a CSV, compute aggregates), so a model cannot reliably hand-author
+# it as text. Such write-steps are steered to code_executor (which writes the
+# file from code), NOT file_writer. Text deliverables (.md/.txt/.json) the model
+# can author directly stay on file_writer. Drives the write-step steering below.
+COMPUTE_DELIVERABLE_EXTS: frozenset[str] = frozenset(
+    {".csv", ".tsv", ".jsonl", ".jsonlines", ".xlsx", ".xls", ".parquet", ".feather"}
+)
+
+
+def _is_compute_deliverable(path: str) -> bool:
+    """True if ``path`` is a data deliverable that must be produced by code."""
+    lower = path.lower()
+    return any(lower.endswith(ext) for ext in COMPUTE_DELIVERABLE_EXTS)
+
 # How many EXTRA LLM turns a write-step gets to actually call a write tool after
 # an explicit nudge. Cheaper models (haiku) frequently narrate the deliverable
 # as prose on turn 1 and only call file_writer once told to. Bounded so a
@@ -283,15 +299,30 @@ def _first_file_output_call(
     return None
 
 
-def _write_nudge(path: str) -> str:
-    """Build the user-role nudge that pushes the LLM to call file_writer."""
+def _write_nudge(path: str, *, compute: bool) -> str:
+    """Build the user-role nudge that pushes the LLM to materialize the file.
+
+    ``compute`` selects the right tool for the deliverable type: a data file
+    (CSV/JSONL/…) that must be produced by code is nudged to code_executor; a
+    text deliverable the model can author directly is nudged to file_writer.
+    """
+    if compute:
+        return (
+            "Your previous turn described the deliverable in text but did not "
+            f"write it to disk. This step requires the data file '{path}', "
+            "which must be produced by running code — you cannot reliably "
+            "hand-author rows of normalized/transformed data as text. Call the "
+            "code_executor tool now with a script that reads the input data, "
+            f"processes it, and writes the result to '{path}'. Do not respond "
+            "with text only — verification reads the filesystem, so the file "
+            "must exist at that path to count as done."
+        )
     return (
         "Your previous turn described the deliverable in text but did not "
         "write it to disk. This step requires producing the file deliverable "
         f"at '{path}'. Call the file_writer tool now with file_path set to "
         "that path, create_dirs set to true (so nested output folders are "
-        "auto-created), and content set to your full deliverable text. Use "
-        "file_writer for the deliverable file — NOT code_executor. Do not "
+        "auto-created), and content set to your full deliverable text. Do not "
         "respond with text only — verification reads the filesystem, so the "
         "deliverable must be written via file_writer to count as done."
     )
@@ -490,15 +521,34 @@ async def _llm_execute(
         # Stating the exact path + tool up front lets the model write the file
         # on the first attempt; the nudge (below) remains as a bounded fallback.
         if expected_path:
-            step_label = (
-                f"{step_label}\n\nThis step's deliverable MUST be written to "
-                f"disk: call the file_writer tool with file_path='{expected_path}', "
-                f"create_dirs=true (so nested output folders are auto-created), "
-                f"and content set to your full deliverable text. Use file_writer "
-                f"for the deliverable file — NOT code_executor. A text-only "
-                f"reply does not count as done — verification reads the "
-                f"filesystem, so the file must exist at that path."
-            )
+            if _is_compute_deliverable(expected_path):
+                # A data deliverable (CSV/JSONL/…) is produced by CODE that
+                # reads + transforms input data and writes the file — a model
+                # cannot reliably hand-author normalized/transformed rows as
+                # text. Steer to code_executor on turn 1 so the file lands on
+                # disk the first time (the disk-check + nudge remain as a
+                # bounded fallback). file_writer cannot transform input data,
+                # so it is actively wrong here (battery-04 q01 normalized.csv
+                # never materialized → infinite verify loop).
+                step_label = (
+                    f"{step_label}\n\nThis step's deliverable is a DATA file "
+                    f"that MUST be produced by running code: call the "
+                    f"code_executor tool with a script that reads/processes "
+                    f"the necessary input data and writes the result to "
+                    f"'{expected_path}'. Do NOT hand-write the data as text — "
+                    f"file_writer cannot transform input data. The file must "
+                    f"exist at that path when this step ends — verification "
+                    f"reads the filesystem."
+                )
+            else:
+                step_label = (
+                    f"{step_label}\n\nThis step's deliverable MUST be written to "
+                    f"disk: call the file_writer tool with file_path='{expected_path}', "
+                    f"create_dirs=true (so nested output folders are auto-created), "
+                    f"and content set to your full deliverable text. A text-only "
+                    f"reply does not count as done — verification reads the "
+                    f"filesystem, so the file must exist at that path."
+                )
 
         # Every LangChain message produced across this step's attempts. On a
         # nudge path this carries the text-only first turn + the nudge + the
@@ -530,7 +580,17 @@ async def _llm_execute(
             # writing still can. Cures the q3/q4 "narrates through all nudges"
             # loop. OpenAI / DashScope-compat / NVIDIA-NIM all honor this.
             forced_tool_choice: dict[str, Any] | None = None
-            if nudge_text is not None and _offers_tool(tool_defs, "file_writer"):
+            # Force-lock to file_writer only for TEXT deliverables. A compute
+            # deliverable (CSV/JSONL/…) nudge steers to code_executor — locking
+            # it to file_writer here would contradict its own nudge and make the
+            # instructed tool (code_executor) structurally un-callable, so the
+            # agent would hand-write data and re-loop. Leave compute nudge turns
+            # free to call code_executor (the disk check still bounds attempts).
+            if (
+                nudge_text is not None
+                and _offers_tool(tool_defs, "file_writer")
+                and not _is_compute_deliverable(expected_path or "")
+            ):
                 forced_tool_choice = {
                     "type": "function",
                     "function": {"name": "file_writer"},
@@ -619,7 +679,9 @@ async def _llm_execute(
                 and not _deliverable_on_disk(expected_path)
             ):
                 if attempt < max_attempts - 1:
-                    nudge_text = _write_nudge(expected_path)
+                    nudge_text = _write_nudge(
+                        expected_path, compute=_is_compute_deliverable(expected_path)
+                    )
                     logger.info(
                         f"Step {step_index + 1} expects deliverable at "
                         f"{expected_path} but no file-output tool was called; "

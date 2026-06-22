@@ -66,6 +66,14 @@ def _meili_timeout() -> float:
     return float(_search_settings().meilisearch_timeout)
 
 
+def _meili_task_poll_interval() -> float:
+    return float(_search_settings().meilisearch_task_poll_interval)
+
+
+def _meili_task_max_polls() -> int:
+    return max(1, int(_search_settings().meilisearch_task_max_polls))
+
+
 def _meili_headers() -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     key = _search_settings().meilisearch_key
@@ -194,10 +202,44 @@ def _meili_doc(
     }
 
 
+async def _meili_wait_for_task(client: httpx.AsyncClient, task_uid: str) -> None:
+    """Poll GET /tasks/{uid} until the Meilisearch task is terminal.
+
+    Indexing is async: POST /documents returns a taskUid and the actual index
+    update runs in the background. Without this wait, a _meili_search in the
+    same coroutine races the still-enqueued task and sees no docs. Bounded by
+    MEILISEARCH_TASK_MAX_POLLS x MEILISEARCH_TASK_POLL_INTERVAL — on exhaustion
+    we return best-effort (the index leg never hangs forever; eventual
+    consistency + a later search covers a slow task). A failed task is logged
+    and treated as a soft miss (one bad doc must not abort the whole batch).
+    """
+    path = f"/tasks/{task_uid}"
+    interval = _meili_task_poll_interval()
+    max_polls = _meili_task_max_polls()
+    for _ in range(max_polls):
+        try:
+            task = await _meili_request(client, "GET", path)
+        except CorpusError as exc:
+            logger.warning(f"corpus: task {task_uid} status poll failed: {exc}")
+            return
+        status = str(task.get("status", "")).lower()
+        if status == "succeeded":
+            return
+        if status == "failed":
+            logger.warning(f"corpus: meilisearch task {task_uid} failed: {task.get('error')}")
+            return
+        await asyncio.sleep(interval)
+    logger.warning(
+        f"corpus: meilisearch task {task_uid} did not finish in "
+        f"{max_polls * interval:.1f}s; proceeding (search may lag)"
+    )
+
+
 async def _meili_add_documents(
     client: httpx.AsyncClient, docs: list[dict[str, str]]
 ) -> str | None:
-    """Index docs into Meilisearch (fire-and-forget task); returns the task uid."""
+    """Index docs into Meilisearch, then await the task so a same-coroutine
+    search sees them. Returns the task uid (None when there is nothing to index)."""
     if not docs:
         return None
     await _ensure_index(client)
@@ -209,7 +251,10 @@ async def _meili_add_documents(
         params={"primaryKey": "id"},
     )
     task = resp.get("taskUid")
-    return str(task) if task is not None else None
+    task_uid = str(task) if task is not None else None
+    if task_uid is not None:
+        await _meili_wait_for_task(client, task_uid)
+    return task_uid
 
 
 async def _meili_search(

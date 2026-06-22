@@ -1091,6 +1091,13 @@ class SearchSettings(BaseSettings):
     meilisearch_key: str = ""  # Env: MEILISEARCH_KEY (master key; empty disables auth in dev)
     meilisearch_index: str = "turing_corpus"  # Env: MEILISEARCH_INDEX
     meilisearch_timeout: float = 10.0  # Env: MEILISEARCH_TIMEOUT
+    # Indexing is async in Meilisearch: POST /documents returns a taskUid whose
+    # task runs in the background. _meili_add_documents polls GET /tasks/{uid}
+    # until terminal (succeeded/failed) so a search in the same coroutine sees
+    # the docs — otherwise it races the still-enqueued task. Bounded so a stuck
+    # task can't hang the index leg; on exhaustion it proceeds (search may lag).
+    meilisearch_task_poll_interval: float = 0.1  # Env: MEILISEARCH_TASK_POLL_INTERVAL (s)
+    meilisearch_task_max_polls: int = 30  # Env: MEILISEARCH_TASK_MAX_POLLS (~3s cap @0.1s)
 
     # Lightweight paid providers tried in order when SearXNG fails/throttles.
     # Each is only attempted if its API key is set. Heavy providers are excluded

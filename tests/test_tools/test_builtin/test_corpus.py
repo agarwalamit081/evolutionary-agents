@@ -142,13 +142,15 @@ class TestMeiliSearch:
 
 class TestMeiliAddDocuments:
     def test_returns_task_uid(self) -> None:
-        """POST /documents returns the enqueued task uid (skip index init)."""
+        """POST /documents returns the task uid; the task is awaited (GET /tasks/{uid})."""
         calls: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls.append(request.url.path)
             if request.url.path.endswith("/documents"):
-                return httpx.Response(202, json={"taskUid": 42, "status": "enqueued"})
+                return httpx.Response(202, json={"taskUid": 42})
+            if request.url.path.endswith("/tasks/42"):
+                return httpx.Response(200, json={"status": "succeeded"})
             return httpx.Response(200, json={})
 
         corpus._INDEX_READY = True  # skip _ensure_index for a focused test
@@ -163,6 +165,120 @@ class TestMeiliAddDocuments:
         task = asyncio.run(run())
         assert task == "42"
         assert any(p.endswith("/documents") for p in calls)
+        assert any(p.endswith("/tasks/42") for p in calls)  # task polled to completion (S11)
+
+
+_SAMPLE_DOC = {"id": "1", "url": "u", "title": "t", "content": "c", "content_hash": "h"}
+
+
+class TestMeiliWaitForTask:
+    """S11: _meili_add_documents awaits the async index task so a search in the
+    SAME coroutine sees the docs. Previously it was fire-and-forget — the search
+    raced the still-enqueued task and saw nothing. httpx.MockTransport; no live
+    Meilisearch."""
+
+    def test_polls_until_succeeded(self) -> None:
+        """The task is polled through enqueued -> succeeded (>=2 GETs)."""
+        corpus._INDEX_READY = True
+        statuses = iter(["enqueued", "succeeded"])
+        polled: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            polled.append(request.url.path)
+            if request.url.path.endswith("/documents"):
+                return httpx.Response(202, json={"taskUid": 7})
+            if request.url.path.endswith("/tasks/7"):
+                return httpx.Response(200, json={"status": next(statuses)})
+            return httpx.Response(200, json={})
+
+        transport = httpx.MockTransport(handler)
+
+        async def run() -> str | None:
+            async with httpx.AsyncClient(transport=transport) as client:
+                return await _meili_add_documents(client, [_SAMPLE_DOC])
+
+        task = asyncio.run(run())
+        assert task == "7"
+        assert sum(1 for p in polled if p.endswith("/tasks/7")) >= 2
+
+    def test_index_then_search_in_same_coroutine_sees_docs(self) -> None:
+        """The S11 fix: after add_documents returns, a search finds the doc.
+
+        The fake Meilisearch only serves the doc on /search once the index task
+        reached 'succeeded' — proving the wait closes the index->search race.
+        """
+        corpus._INDEX_READY = True
+        indexed = {"done": False}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path.endswith("/documents"):
+                return httpx.Response(202, json={"taskUid": 1})
+            if path.endswith("/tasks/1"):
+                indexed["done"] = True
+                return httpx.Response(200, json={"status": "succeeded"})
+            if path.endswith("/search"):
+                hits = [{"title": "T", "content": "C", "url": "U"}] if indexed["done"] else []
+                return httpx.Response(200, json={"hits": hits})
+            return httpx.Response(200, json={})
+
+        transport = httpx.MockTransport(handler)
+
+        async def run() -> list[dict[str, object]]:
+            async with httpx.AsyncClient(transport=transport) as client:
+                await _meili_add_documents(client, [_SAMPLE_DOC])
+                return await _meili_search(client, "C", 5)
+
+        hits = asyncio.run(run())
+        assert hits and hits[0]["title"] == "T"
+
+    def test_wait_is_bounded_and_does_not_hang(self, monkeypatch) -> None:
+        """A task that never completes returns after max_polls (no infinite loop)."""
+        corpus._INDEX_READY = True
+        monkeypatch.setattr(corpus, "_meili_task_max_polls", lambda: 3)
+        monkeypatch.setattr(corpus, "_meili_task_poll_interval", lambda: 0.0)
+        polled: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            polled.append(request.url.path)
+            if request.url.path.endswith("/documents"):
+                return httpx.Response(202, json={"taskUid": 9})
+            if request.url.path.endswith("/tasks/9"):
+                return httpx.Response(200, json={"status": "enqueued"})
+            return httpx.Response(200, json={})
+
+        transport = httpx.MockTransport(handler)
+
+        async def run() -> None:
+            async with httpx.AsyncClient(transport=transport) as client:
+                await _meili_add_documents(client, [_SAMPLE_DOC])
+
+        asyncio.run(run())  # must return, not hang
+        assert sum(1 for p in polled if p.endswith("/tasks/9")) == 3
+
+    def test_failed_task_returns_without_raising(self, monkeypatch) -> None:
+        """A failed task is logged + treated as a soft miss (index leg never raises)."""
+        corpus._INDEX_READY = True
+        monkeypatch.setattr(corpus, "_meili_task_poll_interval", lambda: 0.0)
+        polled: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            polled.append(request.url.path)
+            if request.url.path.endswith("/documents"):
+                return httpx.Response(202, json={"taskUid": 5})
+            if request.url.path.endswith("/tasks/5"):
+                return httpx.Response(200, json={"status": "failed", "error": {"message": "boom"}})
+            return httpx.Response(200, json={})
+
+        transport = httpx.MockTransport(handler)
+
+        async def run() -> str | None:
+            async with httpx.AsyncClient(transport=transport) as client:
+                return await _meili_add_documents(client, [_SAMPLE_DOC])
+
+        task = asyncio.run(run())
+        assert task == "5"
+        assert sum(1 for p in polled if p.endswith("/tasks/5")) == 1  # terminal → no extra polls
 
 
 class TestMeiliRetry:

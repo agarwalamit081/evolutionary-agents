@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir \
     pandas numpy pyyaml jinja2 Pillow \
     sympy \
     pydantic pydantic-settings orjson json-repair \
-    markdown-it-py \
+    unstructured markdown-it-py \
     redis \
     python-dateutil jsonschema tenacity loguru \
     scipy scikit-learn openpyxl tabulate aiofiles trafilatura libcst

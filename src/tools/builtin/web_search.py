@@ -1018,13 +1018,16 @@ TOOL_DEFINITION = {
     "name": "web_search",
     "handler": web_search,
     "description": (
-        "Search the web via SearXNG (primary) with automatic paid fallback. "
-        "Returns top results with titles, snippets, and URLs. Useful for finding "
-        "current information, documentation, or answers to factual questions. "
-        "Pass `queries` (a list) to run several searches in parallel, or "
-        "`deep_crawl=true` for heavy providers (off by default). Narrow results "
-        "with `site`/`filetype`/`exact`/`exclude`, or set `multi_query=true` to "
-        "issue several phrasings and merge the unique hits for higher recall."
+        "Ground facts, figures, dates, and current events here — search the web "
+        "via SearXNG (free, primary) with automatic paid fallback, rather than "
+        "answering from memory (which risks stale or fabricated detail). Returns "
+        "top results with titles, snippets, and URLs. For anything newer than "
+        "your training, set `timelimit` ('d'/'w'/'m'/'y'); narrow with "
+        "`site`/`filetype`/`exact`/`exclude`; set `multi_query=true` to issue "
+        "several phrasings and merge the unique hits for higher recall; or pass "
+        "`queries` (a list) to run several searches in parallel. To read a "
+        "chosen result page in full, follow this call with `web_scraper` on its "
+        "URL (avoids costly self-browsing)."
     ),
     # Idempotent read-only network fetch — safe to cache within/across runs.
     "cacheable": True,

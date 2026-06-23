@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 from loguru import logger
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import MemoryEmbedding, WarmMemory
@@ -106,34 +107,96 @@ class WarmMemoryStore:
         confidence: float = 0.5,
         tags: list[str] | None = None,
     ) -> str:
-        """Store a durable fact in the semantic/fact tier (Phase 5).
+        """Store a durable fact in the semantic/fact tier, deduped on ``fact_key``.
 
-        Facts are entity-ish knowledge de-conflicted from skills/procedures
-        (``memory_type="fact"``). Source + confidence land in ``extra_data`` so
-        they survive without a schema migration; ``fitness_score`` mirrors
-        confidence so the existing fitness-ordered retrieval and decay reuse it.
-        The embedding is built from ``"<key>: <value>"``.
+        Facts are entity-ish knowledge (``memory_type="fact"``) distinct from
+        skills/procedures. A real ``fact_key`` column + partial unique index backs
+        an ``ON CONFLICT (fact_key) DO UPDATE`` upsert, so re-running a goal
+        updates the existing fact rather than duplicating it — the race-free form
+        (concurrent memory folds can both extract the same fact). The surviving
+        row's id is RETURNING-ed so its embedding is refreshed in place; source,
+        confidence, content, tags, and fitness all update.
+
+        The dedup index is partial (``memory_type='fact' AND expires_at IS NULL``)
+        so a retired fact never shadows a freshly-extracted one (``retrieve_facts``
+        already filters ``expires_at IS NULL``). Non-fact rows carry NULL
+        ``fact_key`` (NULLs are distinct) and never collide.
 
         Args:
-            key: Short stable identifier / entity name.
+            key: Short stable identifier / entity name (== fact_key).
             value: The durable fact.
             source: Provenance label (e.g. "fold_2_episode").
             confidence: Extraction confidence 0.0-1.0 (also the fitness seed).
             tags: Extra tags; "fact" is always prepended.
 
         Returns:
-            The UUID of the created fact.
+            The UUID of the surviving (inserted-or-updated) fact.
         """
+        import uuid
+
         clamped = max(0.0, min(1.0, float(confidence)))
-        return await self.store(
-            memory_type="fact",
-            name=key,
-            content=value,
-            tags=["fact", *(tags or [])],
-            fitness_score=clamped,
-            extra_data={"source": source, "confidence": clamped, "fact_key": key},
-            embed_text=f"{key}: {value}",
+        tags_list = ["fact", *(tags or [])]
+        extra_data: dict[str, Any] = {
+            "source": source,
+            "confidence": clamped,
+            "fact_key": key,
+        }
+        new_id = uuid.uuid4()
+
+        # Upsert on fact_key. set_ omits id/title/fact_key so the surviving row
+        # keeps its identity; content/provenance/fitness/tags/updated_at refresh.
+        stmt = (
+            postgresql.insert(WarmMemory)
+            .values(
+                id=new_id,
+                memory_type="fact",
+                title=key,
+                content=value,
+                tags=tags_list,
+                fitness_score=clamped,
+                extra_data=extra_data,
+                fact_key=key,
+                access_count=0,
+            )
+            .on_conflict_do_update(
+                index_elements=["fact_key"],
+                index_where=sa.text("memory_type = 'fact' AND expires_at IS NULL"),
+                set_={
+                    "content": value,
+                    "fitness_score": clamped,
+                    "extra_data": extra_data,
+                    "tags": tags_list,
+                    "updated_at": sa.func.now(),
+                },
+            )
+            .returning(WarmMemory.id)
         )
+        result = await self._session.execute(stmt)
+        memory_id: uuid.UUID = result.scalar_one()
+
+        # Refresh the embedding on the surviving row (delete-then-add). Best-effort
+        # — an embedding failure must never block the fact write (mirrors store()).
+        if self._generator is not None:
+            try:
+                embedding = await self._generator.generate(f"{key}: {value}")
+                await self._session.execute(
+                    sa.delete(MemoryEmbedding).where(
+                        MemoryEmbedding.memory_id == memory_id
+                    )
+                )
+                self._session.add(
+                    MemoryEmbedding(
+                        memory_id=memory_id,
+                        embedding=embedding,
+                        embedding_model=self._generator.model,
+                    )
+                )
+            except Exception as e:  # embedding is non-critical; fact store must not fail
+                logger.debug(f"Fact embedding skipped: {e}")
+
+        await self._session.commit()
+        logger.info(f"Fact stored (upserted): {key} (id={str(memory_id)[:8]})")
+        return str(memory_id)
 
     async def retrieve_facts(
         self,

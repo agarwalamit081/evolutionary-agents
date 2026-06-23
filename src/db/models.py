@@ -183,6 +183,11 @@ class WarmMemory(Base):
     )
     tags: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     extra_data: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    # A5: durable dedup key for facts (memory_type='fact'). NULL for every other
+    # memory type, so the partial unique index below dedups facts without ever
+    # colliding with skills/procedures (NULLs are distinct). Upserted by
+    # WarmMemoryStore.store_fact via ON CONFLICT (fact_key).
+    fact_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
@@ -214,6 +219,17 @@ class WarmMemory(Base):
             "memory_type",
             "fitness_score",
             postgresql_where="expires_at IS NULL",
+        ),
+        # A5: partial unique index backing fact dedup. Scoped to ACTIVE facts so a
+        # retired (expires_at-set) fact never shadows a freshly-extracted one —
+        # retrieve_facts filters expires_at IS NULL, so a full index would silently
+        # redirect re-extraction onto a retired row (invisible to recall). NULL
+        # fact_key on every non-fact row means they never collide here either.
+        Index(
+            "uq_warm_memories_fact_key",
+            "fact_key",
+            unique=True,
+            postgresql_where="memory_type = 'fact' AND expires_at IS NULL",
         ),
     )
 

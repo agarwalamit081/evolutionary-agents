@@ -784,11 +784,9 @@ class AgentSettings(BaseSettings):
     max_iterations: int = 60
     # Run caps — single source of truth for tool/sub-agent creation limits.
     # Enforcement sites (tool generator, agent_spawn, structure_analysis) read
-    # these; the module-level MAX_TOOLS_PER_RUN / MAX_SUB_AGENTS_PER_RUN
-    # constants remain only as the matching default, not the enforced value.
-    # (max_sub_agents previously lived here but was never read — the live cap
-    # was the MAX_SUB_AGENTS_PER_RUN constant — so it is folded into this
-    # overridable field. Env: MAX_TOOLS_PER_RUN, MAX_SUB_AGENTS_PER_RUN.)
+    # these fields directly; there are NO module-level MAX_*_PER_RUN constants
+    # (they were dead/stale and have been removed).
+    # Env: MAX_TOOLS_PER_RUN, MAX_SUB_AGENTS_PER_RUN.
     max_tools_per_run: int = 12
     max_sub_agents_per_run: int = 5
     # Tool-handler code generation: route to a code-strong model instead of the

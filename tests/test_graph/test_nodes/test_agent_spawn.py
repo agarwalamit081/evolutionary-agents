@@ -213,11 +213,13 @@ class TestAgentSpawnNode:
 
     @pytest.mark.asyncio
     async def test_respects_max_sub_agents_limit(self, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock) -> None:
-        """Stops spawning when MAX_SUB_AGENTS_PER_RUN limit reached."""
-        from src.agents.registry import MAX_SUB_AGENTS_PER_RUN
+        """Stops spawning when max_sub_agents_per_run limit reached."""
+        from src.config.settings import get_settings
 
-        sample_state["pending_agent_gaps"] = [f"gap {i}" for i in range(MAX_SUB_AGENTS_PER_RUN + 2)]
-        sample_state["sub_agents_spawned"] = [{"name": f"agent_{i}"} for i in range(MAX_SUB_AGENTS_PER_RUN)]
+        max_sub = get_settings().agent.max_sub_agents_per_run
+
+        sample_state["pending_agent_gaps"] = [f"gap {i}" for i in range(max_sub + 2)]
+        sample_state["sub_agents_spawned"] = [{"name": f"agent_{i}"} for i in range(max_sub)]
 
         # Even though we have gaps, should not spawn any new agents (limit reached)
         result = await agent_spawn_node(
@@ -231,7 +233,7 @@ class TestAgentSpawnNode:
         assert len(result["sub_agents_spawned"]) == 0
         # Remaining gaps should be converted to tool gaps, not agent gaps
         assert result["pending_agent_gaps"] == []
-        assert len(result["pending_tool_gaps"]) == MAX_SUB_AGENTS_PER_RUN + 2
+        assert len(result["pending_tool_gaps"]) == max_sub + 2
 
     @pytest.mark.asyncio
     async def test_validation_failure_skips_agent(self, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock) -> None:

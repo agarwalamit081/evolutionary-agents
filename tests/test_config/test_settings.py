@@ -128,6 +128,16 @@ class TestAgentSettings:
         assert agent.max_tools_per_run == 12
         assert agent.max_sub_agents_per_run == 5
 
+    def test_no_module_level_max_per_run_constants(self) -> None:
+        """Regression: the dead module-level MAX_TOOLS_PER_RUN / MAX_SUB_AGENTS_PER_RUN
+        constants were removed — settings.agent.* is the single source of truth.
+        Importing either name must now fail (no readers exist in src/)."""
+        import src.agents.registry as registry_mod
+        import src.tools.dynamic.allowlist as allowlist_mod
+
+        assert not hasattr(allowlist_mod, "MAX_TOOLS_PER_RUN")
+        assert not hasattr(registry_mod, "MAX_SUB_AGENTS_PER_RUN")
+
     def test_max_iterations_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The iteration cap is env-overridable. Settings read case-insensitively, so a
         lowercase env var matches the lowercase field name."""

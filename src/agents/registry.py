@@ -48,7 +48,6 @@ def _is_stale(
 
 # ── Limits ──────────────────────────────────────────────────────────────
 
-MAX_SUB_AGENTS_PER_RUN: int = 3
 DEPRECATION_SUCCESS_RATE_THRESHOLD: float = 0.3
 DEPRECATION_MIN_RUNS: int = 10
 # Stale-capability window for the runtime check_deprecation default (days). The

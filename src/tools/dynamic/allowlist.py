@@ -136,9 +136,6 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     "highspy",
 })
 
-# Maximum number of tools that can be created per agent run.
-MAX_TOOLS_PER_RUN: int = 3
-
 # Packages that can be pip-installed in the sandbox.
 # Only packages in this set may be requested for installation.
 # Dist (pip) names — the matching import name may differ (see ALLOWED_MODULES).

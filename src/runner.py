@@ -230,12 +230,17 @@ async def execute_run(
     else:
         os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
-    # Per-query logging — creates a dedicated log file for this run
+    # Per-query logging — creates a dedicated log file for this run. The
+    # handler id is captured so the sink is torn down before returning: a
+    # long-lived worker/battery process must not bleed this run's sink into the
+    # next run's log file (the #313 "goal drift" was two separate runs merged
+    # into one log by exactly this leak).
+    query_sink_id: int | None = None
     if run_id is not None:
         try:
             from src.observability.logging import add_query_log_sink
 
-            add_query_log_sink(run_id, settings.logging)
+            query_sink_id = add_query_log_sink(run_id, settings.logging)
         except Exception as e:
             logger.debug(f"Per-query logging setup skipped: {e}")
 
@@ -460,6 +465,19 @@ async def execute_run(
                 await close_checkpointer(checkpointer)
             except Exception as e:
                 logger.debug(f"Checkpointer close skipped: {e}")
+        # Tear down this run's per-query log sink so a long-lived worker/battery
+        # process does not bleed it into the next run's log file (#313). Placed
+        # in ``finally`` so the sink is removed even when ``ainvoke`` raises (the
+        # realistic exception path) — without this the worker's next job would
+        # dump its logs into THIS run's ``logs/<run_id>.log``. None-safe; never
+        # raises out of finally.
+        if query_sink_id is not None:
+            try:
+                from src.observability.logging import remove_query_log_sink
+
+                remove_query_log_sink(query_sink_id)
+            except Exception as e:
+                logger.debug(f"Per-query sink teardown skipped: {e}")
 
     # Save results file to results/ directory
     try:

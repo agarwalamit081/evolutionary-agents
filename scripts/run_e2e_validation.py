@@ -254,11 +254,14 @@ async def _run_single_query(
 
     start_time = time.monotonic()
 
-    # Per-query log sink
+    # Per-query log sink — handler id captured so the sink is torn down before
+    # this query returns, preventing two queries' logs from merging in one file
+    # under parallel/sequential execution (#313).
+    query_sink_id = None
     try:
         from src.observability.logging import add_query_log_sink
 
-        add_query_log_sink(query_id, query_settings.logging)
+        query_sink_id = add_query_log_sink(query_id, query_settings.logging)
     except Exception as e:
         logger.debug(f"Per-query logging skipped: {e}")
 
@@ -458,6 +461,16 @@ async def _run_single_query(
         f"cost=${total_cost:.4f}, "
         f"duration={elapsed:.1f}s"
     )
+
+    # Tear down this query's per-query log sink so a subsequent (or concurrent)
+    # query does not bleed its logs into this file (#313). None-safe; best-effort.
+    if query_sink_id is not None:
+        try:
+            from src.observability.logging import remove_query_log_sink
+
+            remove_query_log_sink(query_sink_id)
+        except Exception as e:
+            logger.debug(f"Per-query sink teardown skipped: {e}")
 
     return metrics
 

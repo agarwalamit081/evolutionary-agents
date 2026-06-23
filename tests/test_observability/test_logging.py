@@ -11,7 +11,9 @@ from src.observability.logging import (
     LOG_CATEGORIES,
     PIIRedactor,
     _make_module_filter,
+    add_query_log_sink,
     get_logger,
+    remove_query_log_sink,
     reset_logging,
     setup_logging,
 )
@@ -155,3 +157,104 @@ class TestCategorySinks:
         assert (tmp_path / "errors.log").exists()
 
         reset_logging()
+
+
+class TestQueryLogSink:
+    """Tests for the per-query log sink add/remove lifecycle (#313)."""
+
+    def test_add_returns_handler_id(self, tmp_path: Path) -> None:
+        """add_query_log_sink returns a truthy handler id for teardown."""
+        reset_logging()
+        settings = LoggingSettings(log_dir=str(tmp_path))
+        setup_logging(settings)
+        try:
+            sink_id = add_query_log_sink("query_alpha", settings)
+            assert sink_id is not None
+            assert isinstance(sink_id, int)
+        finally:
+            remove_query_log_sink(sink_id)  # type: ignore[arg-type]
+            reset_logging()
+
+    async def test_removed_sink_does_not_capture_subsequent_logs(
+        self, tmp_path: Path
+    ) -> None:
+        """After remove_query_log_sink the file captures no further messages.
+
+        Regression for #313: a per-query sink that was never torn down caused
+        the *next* run's logs to bleed into the prior run's log file — which
+        merged a separate q01 benchmark run into ``showcase-vector-db-2.log``
+        and created the illusion of goal drift + non-termination. With teardown,
+        run B's messages must NOT appear in run A's file.
+        """
+        reset_logging()
+        settings = LoggingSettings(log_dir=str(tmp_path))
+        setup_logging(settings)
+        log_file = tmp_path / "run_a.log"
+        try:
+            sink_id = add_query_log_sink("run_a", settings)
+            assert sink_id is not None
+            # A marker that SHOULD be captured (logged while the sink is live).
+            logger.info("RUN_A_MESSAGE_BEFORE_TEARDOWN")
+            # enqueue=True writes via a background thread queue, so explicitly
+            # await logger.complete() to guarantee RUN_A is on disk before we
+            # tear the sink down (logger.complete returns a coroutine — only
+            # awaited is it effective; a bare call in a sync test never drains).
+            await logger.complete()
+            # The fix: tear the sink down — the file stops capturing here.
+            remove_query_log_sink(sink_id)
+            # A marker for a *different* run, logged AFTER teardown — it must
+            # NOT bleed into run_a.log (the bug it would have under #313).
+            logger.info("RUN_B_MESSAGE_AFTER_TEARDOWN")
+            await logger.complete()
+        finally:
+            reset_logging()
+
+        content = log_file.read_text(encoding="utf-8")
+        assert "RUN_A_MESSAGE_BEFORE_TEARDOWN" in content
+        assert "RUN_B_MESSAGE_AFTER_TEARDOWN" not in content
+
+    async def test_without_teardown_subsequent_logs_leak_into_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Without teardown a second run's logs DO leak into the first file.
+
+        This is the inverse guard of
+        :meth:`test_removed_sink_does_not_capture_subsequent_logs`: it proves the
+        regression test is actually exercising the leak path (run B's marker
+        appears in run_a.log when the sink is left open). It pins the #313
+        failure mode so a regression to the old never-teardown code fails loudly.
+        """
+        reset_logging()
+        settings = LoggingSettings(log_dir=str(tmp_path))
+        setup_logging(settings)
+        log_file = tmp_path / "run_a.log"
+        try:
+            sink_id = add_query_log_sink("run_a", settings)
+            assert sink_id is not None
+            logger.info("RUN_A_MESSAGE_BEFORE_TEARDOWN")
+            # NO teardown — the sink stays live, so run B leaks in.
+            logger.info("RUN_B_MESSAGE_AFTER_TEARDOWN")
+            await logger.complete()
+            remove_query_log_sink(sink_id)
+        finally:
+            reset_logging()
+
+        content = log_file.read_text(encoding="utf-8")
+        assert "RUN_A_MESSAGE_BEFORE_TEARDOWN" in content
+        # This assertion documents the leak that the fix exists to prevent.
+        assert "RUN_B_MESSAGE_AFTER_TEARDOWN" in content
+
+    def test_remove_is_none_safe(self, tmp_path: Path) -> None:
+        """remove_query_log_sink(None) and a bogus id never raise.
+
+        Callers may not have captured an id (e.g. add_query_log_sink was mocked
+        or raised), and remove must tolerate a stale/unknown id without raising.
+        """
+        reset_logging()
+        settings = LoggingSettings(log_dir=str(tmp_path))
+        setup_logging(settings)
+        try:
+            remove_query_log_sink(None)  # caller captured no id
+            remove_query_log_sink(999999)  # already-removed / unknown id
+        finally:
+            reset_logging()

@@ -7,6 +7,7 @@ from src.observability.logging import (
     get_logger,
     logger,
     pii_redaction_filter,
+    remove_query_log_sink,
     reset_logging,
     setup_logging,
 )
@@ -20,4 +21,5 @@ __all__ = [
     "pii_redaction_filter",
     "InterceptHandler",
     "add_query_log_sink",
+    "remove_query_log_sink",
 ]

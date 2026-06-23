@@ -210,6 +210,16 @@ def _make_module_filter(prefixes: list[str]) -> Any:
 # Track if setup has been called to ensure idempotency
 _logging_configured: bool = False
 
+# Handler ids of every per-query sink added via ``add_query_log_sink``. Tracked
+# so a long-lived process (queue worker / battery harness / e2e script) can tear
+# down a prior run's sink before the next run starts — otherwise run B's logs
+# bleed into run A's ``logs/<run_id>.log`` (the #313 "goal drift" was two
+# separate runs merged into one log file by exactly this leak). Only sinks added
+# through ``add_query_log_sink`` are tracked; the setup_logging sinks (console,
+# turing_agent.log, category logs) are added via direct ``logger.add`` and are
+# never touched by the query-sink teardown.
+_active_query_sink_ids: list[int] = []
+
 
 def setup_logging(settings: LoggingSettings | None = None) -> None:
     """Configure loguru logging for the application.
@@ -350,20 +360,43 @@ def reset_logging() -> None:
     After calling this, setup_logging() will run again.
     """
     global _logging_configured
+    global _active_query_sink_ids
     logger.remove()
     _logging_configured = False
+    # logger.remove() above cleared every handler, so the tracked query-sink ids
+    # are now stale — drop them so a later remove_query_log_sink() doesn't try to
+    # remove handlers that no longer exist (logger.remove on a dead id raises).
+    _active_query_sink_ids = []
 
 
-def add_query_log_sink(run_id: str, settings: LoggingSettings | None = None) -> None:
+def add_query_log_sink(
+    run_id: str, settings: LoggingSettings | None = None
+) -> int | None:
     """Add a query-specific log file alongside the main logs.
 
-    Creates ``logs/<run_id>.log`` that captures all messages for this
-    specific query run.  Call once per e2e query to get per-query logs.
+    Creates ``logs/<run_id>.log`` that captures all messages for this specific
+    query run.  Call once per query to get per-query logs, then tear the sink
+    down with :func:`remove_query_log_sink` (passing the returned id) when the
+    run finishes — otherwise a long-lived process (worker/battery) blends this
+    run's logs into the *next* run's file (the #313 "goal drift" was two
+    separate runs merged into one log by exactly this leak).
+
+    Loguru sinks are process-global, so per-query isolation is by teardown, not
+    by filter: a caller that runs queries concurrently will see every active
+    sink capture every message. That is why teardown is explicit rather than
+    self-healing — a self-healing ``add`` (tearing down all prior sinks) would
+    clobber a concurrently-active sibling sink.
 
     Args:
         run_id: Unique identifier for the query run (e.g. "query_1").
         settings: Optional logging settings.  Falls back to defaults.
+
+    Returns:
+        The loguru handler id for the added sink — pass it to
+        :func:`remove_query_log_sink` for teardown at end of run — or ``None``
+        if the sink could not be added.
     """
+    global _active_query_sink_ids
     if settings is None:
         try:
             settings = get_settings().logging
@@ -375,7 +408,7 @@ def add_query_log_sink(run_id: str, settings: LoggingSettings | None = None) -> 
 
     query_log_path = log_dir / f"{run_id}.log"
 
-    logger.add(
+    sink_id = logger.add(
         query_log_path,
         format=_get_file_format(),
         level=settings.log_level,
@@ -387,8 +420,30 @@ def add_query_log_sink(run_id: str, settings: LoggingSettings | None = None) -> 
         filter=pii_redaction_filter,
         enqueue=True,
     )
-
+    _active_query_sink_ids.append(sink_id)
     logger.info(f"Per-query logging enabled: {query_log_path}")
+    return sink_id
+
+
+def remove_query_log_sink(sink_id: int | None) -> None:
+    """Tear down a per-query sink added by :func:`add_query_log_sink`.
+
+    Pairs with the handler id :func:`add_query_log_sink` returns so a caller can
+    close its sink when the run finishes, preventing the next run's logs from
+    bleeding into this run's ``logs/<run_id>.log`` (#313). ``None``-safe (the
+    caller may not have captured an id). Never raises.
+
+    Args:
+        sink_id: The handler id returned by ``add_query_log_sink``, or ``None``.
+    """
+    global _active_query_sink_ids
+    if sink_id is None:
+        return
+    try:
+        logger.remove(sink_id)
+    except (ValueError, KeyError):
+        pass
+    _active_query_sink_ids = [s for s in _active_query_sink_ids if s != sink_id]
 
 
 # ─── Module Exports ─────────────────────────────────────────────────────
@@ -403,4 +458,6 @@ __all__ = [
     "InterceptHandler",
     "LOG_CATEGORIES",
     "_make_module_filter",
+    "add_query_log_sink",
+    "remove_query_log_sink",
 ]

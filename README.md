@@ -474,6 +474,7 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | `MAX_ITERATIONS_SIMPLE` | `15` | Runtime cap for a SIMPLE goal (default when complexity is unset) |
 | `MAX_ITERATIONS_COMPLEX` | `60` | Runtime cap for a COMPLEX goal (keeps full headroom) |
 | `MAX_ITERATIONS_CRITICAL` | `60` | Runtime cap for a CRITICAL goal (keeps full headroom) |
+| `CONVERGENCE_STABLE_THRESHOLD` | `3` | Convergence early-exit — if verify produces an identical output fingerprint across this many consecutive passes AND the plan is exhausted, accept the partial result via `store_memory` instead of looping to the iteration hard-cap. 3: one transient repeat is common; three unchanged passes is a real plateau. Does not set `is_complete` (stuck, not done) |
 | `EVOLUTION_ENABLED` | `true` | Enable self-evolution |
 | `EVOLUTION_INTERVAL` | `10` | Evolution trigger interval (tasks) |
 | `HITL_ENABLED` | `true` | Enable human-in-the-loop gates |

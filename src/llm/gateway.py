@@ -227,7 +227,7 @@ class LLMGateway:
 
         # Budget check
         if self._cost_tracker:
-            within_budget, budget_msg = await self._cost_tracker.check_budget()
+            within_budget, budget_msg = await self._cost_tracker.check_budget(self._run_id)
             if not within_budget:
                 logger.error(f"Budget exhausted: {budget_msg}")
                 # Try fallback to cheaper model

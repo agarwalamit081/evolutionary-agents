@@ -89,8 +89,27 @@ class CostTracker:
         )
         return cost_usd
 
-    async def check_budget(self) -> tuple[bool, str]:
+    async def check_budget(self, run_id: str | None = None) -> tuple[bool, str]:
         """Check if the budget allows another LLM call.
+
+        Enforces two independent caps (findings.md Fact 1 / A2·B2):
+
+        1. **Daily cost** cap (``max_cost_usd``) — the historical pool, checked
+           against ``get_daily_spend()``. At the critical/warn thresholds the
+           call is allowed and the gateway downgrades the model tier.
+        2. **Per-run token** cap (``per_task_token_limit``) — bounds a single
+           runaway run independent of the daily pool, so one hard query cannot
+           consume the whole day. Only enforced when a ``run_id`` is bound
+           (the gateway binds it from the graph ``thread_id``).
+
+        Both caps reuse the gateway's existing not-within-budget path: it
+        downgrades to a cheaper model, and only hard-``raise``s when no cheaper
+        fallback remains — so a capped run is pushed onto the cheapest tier and
+        then stops, rather than aborting abruptly.
+
+        Args:
+            run_id: Optional per-run correlation key (the graph ``thread_id``).
+                When provided, the per-run token cap is also enforced.
 
         Returns:
             Tuple of (is_within_budget, message).
@@ -100,6 +119,16 @@ class CostTracker:
 
         if daily_total >= daily_limit:
             return False, f"Daily budget exhausted: ${daily_total:.2f} / ${daily_limit:.2f}"
+
+        per_run_limit = self._budget.per_task_token_limit
+        if run_id is not None and per_run_limit > 0:
+            run_tokens = await self.get_run_token_usage(run_id)
+            if run_tokens >= per_run_limit:
+                return (
+                    False,
+                    f"Per-run token cap reached: {run_tokens} / {per_run_limit} "
+                    f"tokens (run {run_id})",
+                )
 
         if daily_total >= daily_limit * self._budget.budget_critical_threshold:
             return True, f"WARNING: Daily budget at {self._budget.budget_critical_threshold:.0%}: ${daily_total:.2f} / ${daily_limit:.2f}"
@@ -159,6 +188,26 @@ class CostTracker:
             )
         )
         return float(result.scalar_one())
+
+    async def get_run_token_usage(self, run_id: str) -> int:
+        """Total tokens attributed to a single run.
+
+        Sums ``total_tokens`` over every cost_ledger row carrying ``run_id``.
+        Backs the per-run token cap in ``check_budget`` (findings.md A2/B2). A
+        run with no rows (or whose calls predate run-attribution) returns ``0``.
+
+        Args:
+            run_id: The graph ``thread_id`` of the run (e.g. ``cli-q05``).
+
+        Returns:
+            Total tokens consumed by that run.
+        """
+        result = await self._session.execute(
+            sa.select(sa.func.coalesce(sa.func.sum(CostLedger.total_tokens), 0)).where(
+                CostLedger.run_id == run_id
+            )
+        )
+        return int(result.scalar_one())
 
     async def get_runs_summary(self) -> list[dict[str, object]]:
         """Aggregate spend per run, most-expensive first.

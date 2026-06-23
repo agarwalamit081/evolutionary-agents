@@ -334,6 +334,81 @@ class TestCheckBudget:
         assert "80%" in msg
 
 
+# ─── check_budget — per-run token cap (findings.md A2/B2) ─────────────────
+
+
+class TestCheckBudgetPerRunTokenCap:
+    """The per-run token cap is independent of the daily cost pool.
+
+    check_budget enforces a per-run token ceiling (``per_task_token_limit``)
+    so one runaway run cannot consume the whole day. The cap only fires when a
+    ``run_id`` is bound — the gateway binds it from the graph ``thread_id``.
+    Existing TestCheckBudget tests call ``check_budget()`` with no ``run_id``
+    (→ None), so this branch is untouched for them; here we exercise it directly.
+    """
+
+    @staticmethod
+    def _make_tracker(per_task_token_limit: int) -> CostTracker:
+        """A tracker whose daily spend is low ($0.50 / $10.00) so only the
+        per-run token cap can trip — isolating the A2/B2 branch."""
+        settings = MagicMock()
+        settings.budget.max_cost_usd = 10.0
+        settings.budget.budget_warn_threshold = 0.7
+        settings.budget.budget_critical_threshold = 0.9
+        settings.budget.per_task_token_limit = per_task_token_limit
+        tracker = CostTracker(session=MagicMock(), settings=settings)
+        tracker.get_daily_spend = AsyncMock(return_value=0.5)
+        return tracker
+
+    @pytest.mark.asyncio
+    async def test_over_per_run_cap_returns_false(self) -> None:
+        """At/over the per-run token cap, returns (False, 'Per-run token cap')."""
+        tracker = self._make_tracker(per_task_token_limit=1000)
+        tracker.get_run_token_usage = AsyncMock(return_value=1500)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-runaway")
+
+        assert is_ok is False
+        assert "Per-run token cap" in msg
+        assert "cli-runaway" in msg
+
+    @pytest.mark.asyncio
+    async def test_under_per_run_cap_passes(self) -> None:
+        """Below the per-run token cap, the run is allowed (falls through to OK)."""
+        tracker = self._make_tracker(per_task_token_limit=1000)
+        tracker.get_run_token_usage = AsyncMock(return_value=100)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-ok")
+
+        assert is_ok is True
+        assert "Budget OK" in msg
+
+    @pytest.mark.asyncio
+    async def test_no_run_id_skips_per_run_check(self) -> None:
+        """Without a bound run_id, the per-run cap is not consulted at all."""
+        tracker = self._make_tracker(per_task_token_limit=1000)
+        # Would cap if checked — proving it is NOT checked.
+        tracker.get_run_token_usage = AsyncMock(return_value=999_999)
+
+        is_ok, msg = await tracker.check_budget()  # run_id defaults to None
+
+        assert is_ok is True
+        assert "Budget OK" in msg
+        tracker.get_run_token_usage.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disabled_per_run_cap_when_zero(self) -> None:
+        """per_task_token_limit=0 disables the per-run cap entirely."""
+        tracker = self._make_tracker(per_task_token_limit=0)
+        tracker.get_run_token_usage = AsyncMock(return_value=999_999)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-uncapped")
+
+        assert is_ok is True
+        assert "Budget OK" in msg
+        tracker.get_run_token_usage.assert_not_called()
+
+
 # ─── get_daily_spend ──────────────────────────────────────────────────────
 
 
@@ -479,6 +554,34 @@ class TestRunSpendAttribution:
         total = await tracker.get_run_spend("cli-nonexistent")
 
         assert total == 0.0
+
+    @pytest.mark.asyncio
+    async def test_get_run_token_usage_returns_sum(
+        self, tracker: CostTracker, mock_session: MagicMock
+    ) -> None:
+        """get_run_token_usage returns the summed total_tokens for a run (int)."""
+        mock_result = MagicMock()
+        mock_result.scalar_one.return_value = 4821
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        tokens = await tracker.get_run_token_usage("cli-q05")
+
+        assert isinstance(tokens, int)
+        assert tokens == 4821
+        mock_session.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_run_token_usage_zero_when_no_rows(
+        self, tracker: CostTracker, mock_session: MagicMock
+    ) -> None:
+        """A run with no cost rows returns 0 (coalesced), not None."""
+        mock_result = MagicMock()
+        mock_result.scalar_one.return_value = 0
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        tokens = await tracker.get_run_token_usage("cli-nonexistent")
+
+        assert tokens == 0
 
     @pytest.mark.asyncio
     async def test_get_runs_summary_groups_by_run(

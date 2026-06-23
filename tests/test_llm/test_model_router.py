@@ -447,3 +447,104 @@ class TestModelRouterPerNodeRouting:
         for (_complexity, _node), (_tier, chain_key) in NODE_TIER_MAP.items():
             assert chain_key in MODEL_REGISTRY, f"{chain_key} not in MODEL_REGISTRY"
             assert chain_key in FALLBACK_CHAINS, f"{chain_key} not in FALLBACK_CHAINS"
+
+
+class TestCrossProviderFallbackInvariant:
+    """Lock requirement 2 (#311): every routing primary has at least one
+    *registered* fallback on a *different provider* in its FALLBACK_CHAINS.
+
+    A fallback chain that is entirely same-provider is useless when the primary's
+    own provider caps/burns balance or rate-limits — the whole chain dies with it.
+    This cross-provider property is what lets the gateway pivot to another provider
+    on failure. It is already true in FALLBACK_CHAINS; these tests pin it so a
+    future edit can't silently collapse a chain onto one provider.
+
+    Note: the invariant is "at least one cross-provider member", NOT "the first
+    member is cross-provider" — several primaries deliberately front a same-
+    provider sibling (e.g. qwen3.6-flash → qwen3.5-flash, both alibaba) so a
+    model promotion never strands its predecessor. The first member may share a
+    provider; what matters is that a different provider is reachable.
+    """
+
+    @staticmethod
+    def _routing_primaries() -> set[str]:
+        """Distinct model IDs the router can ever return as a primary.
+
+        Union of COMPLEXITY_TIER_MAP values, NODE_TIER_MAP values, the
+        DEFAULT_COMPLEXITY_TIER fallback, and the configured reasoning model
+        (route_reasoning's primary on verify/reflect for complex/critical goals).
+        """
+        from src.config.settings import LLMProviderSettings
+        from src.llm.model_router import (
+            COMPLEXITY_TIER_MAP,
+            DEFAULT_COMPLEXITY_TIER,
+            NODE_TIER_MAP,
+        )
+
+        primaries: set[str] = set()
+        for entry in COMPLEXITY_TIER_MAP.values():
+            primaries.add(entry[1])
+        for entry in NODE_TIER_MAP.values():
+            primaries.add(entry[1])
+        primaries.add(DEFAULT_COMPLEXITY_TIER[1])
+        reasoning = LLMProviderSettings.model_fields["reasoning_llm_model"].default
+        if isinstance(reasoning, str):
+            primaries.add(reasoning)
+        return primaries
+
+    @staticmethod
+    def _cross_provider_offenders(models: set[str]) -> dict[str, list[str]]:
+        """For each model, report its chain if it lacks a registered
+        cross-provider fallback. Empty dict ⇒ invariant holds for every model.
+
+        A named-but-unregistered fallback is silently skipped by
+        ``_route_from_chain`` (no key lookup), so membership must be registered to
+        count; a same-provider fallback dies with the primary, so it must be
+        cross-provider to count.
+        """
+        from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY
+
+        offenders: dict[str, list[str]] = {}
+        for model in models:
+            chain = FALLBACK_CHAINS.get(model, [])
+            provider = ModelRouter._extract_provider(model)
+            has_cross = any(
+                member in MODEL_REGISTRY
+                and ModelRouter._extract_provider(member) != provider
+                for member in chain
+            )
+            if not has_cross:
+                offenders[model] = chain
+        return offenders
+
+    def test_routing_primaries_all_define_a_fallback_chain(self) -> None:
+        """Every routing primary is a key in FALLBACK_CHAINS — else the gateway
+        has no fallback path at all for that primary."""
+        from src.config.model_registry import FALLBACK_CHAINS
+
+        missing = [p for p in self._routing_primaries() if p not in FALLBACK_CHAINS]
+        assert not missing, f"Routing primaries without a FALLBACK_CHAINS entry: {missing}"
+
+    def test_every_routing_primary_has_registered_cross_provider_fallback(self) -> None:
+        """Every routing primary's chain has >=1 fallback that is BOTH registered
+        AND on a different provider — so a single-provider outage can never strand
+        a primary with no escape."""
+        offenders = self._cross_provider_offenders(self._routing_primaries())
+        assert not offenders, (
+            "Routing primaries whose fallback chain has no registered "
+            "cross-provider fallback (would strand on a single-provider outage): "
+            f"{offenders}"
+        )
+
+    def test_candidate_models_have_cross_provider_fallback(self) -> None:
+        """Promotion safety for the plan-named candidates (qwen3-coder-next,
+        gpt-5-nano-2025-08-07, kimi-k2.6): each already satisfies the
+        cross-provider-fallback invariant, so promoting any to a routing primary
+        later cannot strand its chain. Not current primaries (owner decision: no
+        routing edits), but locked pre-emptively."""
+        candidates = {"qwen3-coder-next", "gpt-5-nano-2025-08-07", "kimi-k2.6"}
+        offenders = self._cross_provider_offenders(candidates)
+        assert not offenders, (
+            "Candidate models (promotion targets) whose fallback chain has no "
+            f"registered cross-provider fallback: {offenders}"
+        )

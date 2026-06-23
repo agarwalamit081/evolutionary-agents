@@ -73,6 +73,7 @@ async def agent_spawn_node(
     created_count = len(state.get("sub_agents_spawned", []))
 
     max_sub_agents = get_settings().agent.max_sub_agents_per_run
+    max_active_sub_agents = get_settings().agent.max_active_sub_agents
     for gap_description in pending_gaps:
         # Rate limit check
         if created_count >= max_sub_agents:
@@ -81,6 +82,26 @@ async def agent_spawn_node(
                 f"converting remaining agent gaps to tool gaps"
             )
             # Convert remaining unhandled agent gaps into tool creation opportunities
+            remaining_idx = pending_gaps.index(gap_description)
+            converted_tool_gaps = [
+                f"tool to handle subtask: {g}"
+                for g in pending_gaps[remaining_idx:]
+            ]
+            break
+
+        # Active-population cap (findings.md A3): the total stored/active
+        # population must never grow past max_active_sub_agents mid-run. A
+        # pre-spawn gate is strictly safer than a post-spawn enforce_caps,
+        # which could retire a capability the plan is about to delegate to
+        # (a race). Remaining gaps convert to tool gaps, matching the per-run
+        # cap's behavior. ``active_count`` counts only is_active specs (loaded
+        # active agents + those spawned this run).
+        if sub_agent_registry.active_count >= max_active_sub_agents:
+            logger.warning(
+                f"Active sub-agent population at cap "
+                f"({sub_agent_registry.active_count}/{max_active_sub_agents}), "
+                f"converting remaining agent gaps to tool gaps"
+            )
             remaining_idx = pending_gaps.index(gap_description)
             converted_tool_gaps = [
                 f"tool to handle subtask: {g}"

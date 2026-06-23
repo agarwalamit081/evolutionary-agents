@@ -58,6 +58,20 @@ class TestToolRegistry:
         result = registry.get_handler("nonexistent_tool")
         assert result is None
 
+    def test_generated_count_excludes_non_generated(self) -> None:
+        """A3: generated_count is the active dynamic-tool population — it counts
+        only LLM-generated tools (generated=True), excluding builtins/MCP
+        (generated=False). This is the measure ToolGenerator's pre-register cap
+        gates on, mirroring AgentSettings.max_active_tools."""
+        registry = ToolRegistry()
+        registry.register(name="builtin_a", handler=_dummy_handler)
+        registry.register(name="builtin_b", handler=_dummy_handler, generated=False)
+        registry.register(name="gen_a", handler=_dummy_handler, generated=True)
+        registry.register(name="gen_b", handler=_dummy_handler, generated=True)
+
+        assert registry.count == 4
+        assert registry.generated_count == 2
+
 
 class TestCreateDefaultRegistry:
     """Tests for the create_default_registry factory function."""

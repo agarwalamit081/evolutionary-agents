@@ -157,6 +157,28 @@ class ToolGenerator:
         Returns:
             Result dict with 'success', 'reason', 'safety_result', 'sandbox_result'.
         """
+        # Active-population cap (findings.md A3): the generated-tool population
+        # must never grow past max_active_tools mid-run. A pre-register gate is
+        # strictly safer than a post-register enforce_caps, which could retire a
+        # tool the run is about to invoke (a race). Skip registration (return a
+        # failure result) so the gap becomes a failed attempt, NOT a registry
+        # entry. The per-run cap (max_tools_per_run) already bounds how many
+        # generations reach this point.
+        max_active_tools = get_settings().agent.max_active_tools
+        if registry.generated_count >= max_active_tools:
+            logger.warning(
+                f"Active generated-tool population at cap "
+                f"({registry.generated_count}/{max_active_tools}), "
+                f"skipping registration of '{tool.tool_name}'"
+            )
+            return {
+                "success": False,
+                "reason": (
+                    f"Active tool cap reached "
+                    f"({registry.generated_count}/{max_active_tools})"
+                ),
+            }
+
         # Step 1: Safety pipeline validation
         safety_result = await self._safety.validate(
             code=tool.handler_code,

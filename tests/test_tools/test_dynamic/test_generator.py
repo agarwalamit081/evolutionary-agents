@@ -16,6 +16,11 @@ from src.tools.registry import ToolRegistry
 assert json  # noqa: S101
 
 
+async def _dummy_handler() -> str:
+    """Minimal async handler for tool registrations in cap-population tests."""
+    return "ok"
+
+
 def _make_gateway(response_content: str) -> MagicMock:
     """Create a mock gateway with a canned LLM response."""
     from src.llm.models import LLMResponse
@@ -224,6 +229,42 @@ class TestToolGeneratorValidate:
                 # generate() does. So this should still succeed.
                 # The limit is in generate(), not validate_and_register().
                 assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_skips_register_when_active_population_at_cap(self) -> None:
+        """A3: when generated_count >= max_active_tools, validate_and_register's
+        pre-register gate skips registration — returns success=False with the cap
+        reason, WITHOUT running safety/sandbox/materialize or incrementing the
+        per-run counter. The active population never grows past the cap mid-run.
+        """
+        from src.config import get_settings
+
+        cap = get_settings().agent.max_active_tools
+        gateway = _make_gateway("")
+        gen = ToolGenerator(gateway=gateway, safety_pipeline=SafetyPipeline())
+        registry = ToolRegistry()
+        # Pre-fill the active generated population to the cap (as if loaded from
+        # prior runs). Builtin-style tools (generated=False) do not count.
+        for i in range(cap):
+            registry.register(name=f"gen_{i}", handler=_dummy_handler, generated=True)
+        assert registry.generated_count == cap
+
+        tool = GeneratedTool(
+            tool_name="adder",
+            description="Add two numbers",
+            input_schema={"type": "object", "properties": {}},
+            handler_code=(
+                "async def adder(a: int, b: int) -> str:\n"
+                "    return str(a + b)\n"
+            ),
+        )
+        result = await gen.validate_and_register(tool, registry)
+
+        assert result["success"] is False
+        assert "Active tool cap" in result["reason"]
+        # No new tool registered; per-run counter unchanged (gate ran before step 1)
+        assert registry.generated_count == cap
+        assert gen._tools_created == 0
 
 
 class TestToolGeneratorGenerate:

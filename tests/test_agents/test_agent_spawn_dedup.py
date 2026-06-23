@@ -64,6 +64,10 @@ def mock_registry() -> MagicMock:
     registry.list_names = MagicMock(return_value=[])
     registry.register = MagicMock()
     registry.get = MagicMock(return_value=None)
+    # active_count is an int in production (SubAgentRegistry.active_count
+    # property); model it as 0 so the A3 pre-spawn active-population gate's
+    # `>=` comparison evaluates instead of TypeError-ing on a MagicMock.
+    registry.active_count = 0
     return registry
 
 

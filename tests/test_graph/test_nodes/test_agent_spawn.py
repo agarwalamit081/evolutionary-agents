@@ -37,6 +37,11 @@ def mock_registry() -> MagicMock:
     registry.has = MagicMock(return_value=False)
     registry.list_names = MagicMock(return_value=[])
     registry.register = MagicMock()
+    # active_count is an int property on the real registry (active specs).
+    # Default 0 so the A3 active-population gate (which compares it to
+    # max_active_sub_agents) does not trip for existing tests; the at-cap test
+    # overrides this to the cap.
+    registry.active_count = 0
     return registry
 
 
@@ -234,6 +239,39 @@ class TestAgentSpawnNode:
         # Remaining gaps should be converted to tool gaps, not agent gaps
         assert result["pending_agent_gaps"] == []
         assert len(result["pending_tool_gaps"]) == max_sub + 2
+
+    @pytest.mark.asyncio
+    async def test_skips_spawn_when_active_population_at_cap(
+        self, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock
+    ) -> None:
+        """A3: when the active sub-agent population is at cap, no new agent is
+        spawned and the gap converts to a tool gap — a pre-spawn gate that is
+        strictly safer than a mid-run enforce_caps (which could retire a
+        capability the run is about to delegate to)."""
+        from src.config.settings import get_settings
+
+        max_active = get_settings().agent.max_active_sub_agents
+
+        # Per-run count BELOW the per-run cap (created_count=0) so ONLY the
+        # active-population gate can fire.
+        sample_state["sub_agents_spawned"] = []
+        sample_state["pending_agent_gaps"] = ["need a data analyst"]
+        mock_registry.active_count = max_active  # active population at cap
+
+        result = await agent_spawn_node(
+            sample_state,
+            gateway=mock_gateway,
+            tools=mock_tools,
+            sub_agent_registry=mock_registry,
+        )
+
+        # No agent spawned; the gate fired before the LLM call
+        assert result["phase"] == Phase.EXECUTE
+        assert result["sub_agents_spawned"] == []
+        assert result["pending_agent_gaps"] == []
+        # The gap was converted to a tool gap, not left dangling
+        assert len(result["pending_tool_gaps"]) == 1
+        mock_gateway.acompletion.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_validation_failure_skips_agent(self, sample_state: dict[str, Any], mock_gateway: MagicMock, mock_tools: MagicMock, mock_registry: MagicMock) -> None:

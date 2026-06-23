@@ -191,3 +191,16 @@ class ToolRegistry:
     def count(self) -> int:
         """Number of registered tools."""
         return len(self._tools)
+
+    @property
+    def generated_count(self) -> int:
+        """Number of LLM-generated dynamic tools currently registered.
+
+        This is the active *dynamic-tool* population: builtins and MCP-loaded
+        tools (``generated=False``) are excluded, so it mirrors exactly what
+        ``AgentSettings.max_active_tools`` caps at the governance layer. Used by
+        ``ToolGenerator.validate_and_register``'s pre-register active-population
+        gate (findings.md A3) so a single run cannot push the generated-tool
+        count past the cap mid-run.
+        """
+        return sum(1 for t in self._tools.values() if t.get("generated"))

@@ -150,6 +150,8 @@ All providers accessed through **litellm** as a unified gateway. Models assigned
 | **Groq** | `llama-3.1-8b-instant` | `llama-3.3-70b-versatile` | — |
 | **Ollama** | `phi4-mini:3.8b` | `qwen3.5:latest` | — |
 
+> **Note (temporary, revert by 2026-07-01):** Anthropic is currently **disabled from routing** — the key is under an account usage cap (returns 400/quota, which does not trip the circuit breaker). Until the cap resets, the COMPLEX/SIMPLE primaries fall through to `deepseek-v4-flash` / `glm-4.7` and anthropic is skipped in every fallback chain. This is config-gated in `src/llm/model_router.py` (`_TEMPORARY_DISABLED_PROVIDERS`) and reverts with a one-line change; the Anthropic `ModelSpec`s and fallback chains remain defined (inert) so the routing topology is unchanged. All other providers above work normally.
+
 See `docs/ARCHITECTURE.md` for the full architectural overview.
 
 ---
@@ -467,6 +469,11 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | `REASONING_LLM_MODEL` | `claude-sonnet-4-6` | Reasoning model for complex tasks |
 | `DAILY_TOKEN_BUDGET` | `500000` | Daily token budget |
 | `PER_TASK_TOKEN_LIMIT` | `100000` | Per-task token limit |
+| `MAX_ITERATIONS` | `60` | Graph-build recursion-limit basis (`recursion_limit = max(max_iterations*8, 100)`); must be ≥ the largest tier cap below (validated at startup) |
+| `MAX_ITERATIONS_TRIVIAL` | `12` | Complexity-aware runtime cap — a TRIVIAL goal stops loop-hunting early. Only applies when no explicit cap is pinned (no `--max-iterations` / worker job / eval spec); an explicit cap always wins |
+| `MAX_ITERATIONS_SIMPLE` | `15` | Runtime cap for a SIMPLE goal (default when complexity is unset) |
+| `MAX_ITERATIONS_COMPLEX` | `60` | Runtime cap for a COMPLEX goal (keeps full headroom) |
+| `MAX_ITERATIONS_CRITICAL` | `60` | Runtime cap for a CRITICAL goal (keeps full headroom) |
 | `EVOLUTION_ENABLED` | `true` | Enable self-evolution |
 | `EVOLUTION_INTERVAL` | `10` | Evolution trigger interval (tasks) |
 | `HITL_ENABLED` | `true` | Enable human-in-the-loop gates |
@@ -483,6 +490,16 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | `LLM_BATCH_ENABLED` | `false` | Enable concurrent request batching via `LLMGateway.abatch`; `LLM_BATCH_MAX_CONCURRENCY` (default `5`) caps in-flight calls |
 | `REASONING_CONTROL_ENABLED` | `false` | Enable per-tier extended thinking (complex/critical on, trivial/simple off, provider-native); `REASONING_CONTROL_*` tunes the effort + Anthropic budgets |
 | `NATIVE_STRUCTURED_OUTPUT_ENABLED` | `false` | Enable provider-native JSON-schema `response_format` for structured outputs (OpenAI/DeepSeek strict, Anthropic `output_format`, Gemini `response_schema`) |
+
+---
+
+## Known Limitations & Validation Status
+
+**Validated end-to-end on default routing (2026-06-23, `showcase-vector-db-2`):** a single complex research→analysis→report query exercised the full feature set live — runtime tool creation + reuse (`vector_db_comparator` created, registered, executed), web search (62 SearXNG queries, 5 sources cited), sub-agent delegation, the prompting-technique selector (`step_back` / `generated_knowledge` / `chain-of-thought` / `self_ask` / `first_principles` / `checklist`), 3 autonomous memory folds, and **a live evolution cycle** (a PROMPT mutation deployed to `src/prompts/system_prompt.md`). The primary deliverable was written and verified present. Total ≈ $0.22.
+
+**Resolved — per-query log sink leak (#313, commit `30b5cf6`, local-only).** The "post-success non-termination + goal drift" once attributed to this run was a **misdiagnosis**: the run actually **succeeded and terminated correctly** on its objective (evolution fired ~03:05; the immutable `submitted_goal` anchor kept `verify` on the vector-db objective throughout). The symptom — unrelated q01 `Goal:` lines appearing in the showcase log — was caused by `add_query_log_sink` adding a process-global loguru sink and discarding the returned handler id with no teardown, so the lingering sink captured the *next* run's logs (a separate `bench-battery04_q01-*` benchmark merged into the showcase log). **Fix:** `add_query_log_sink` now returns the handler id and `remove_query_log_sink` (None-safe) tears it down in `execute_run`'s `finally` block and in `_run_single_query`. Short/converging runs always terminated normally.
+
+**Anthropic temporarily disabled** from routing (account usage cap; revert by 2026-07-01) — see the note under *Provider Support* above.
 
 ---
 

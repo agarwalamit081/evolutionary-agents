@@ -228,7 +228,7 @@ class TestCodeExecutorCWD:
     async def test_subdir_writes_auto_create_parents(self, tmp_path: Path) -> None:
         """F8: ``open('results/subdir/file')`` auto-creates the subdir.
 
-        The ``_WRITE_BOOTSTRAP`` shim patches ``builtins.open`` so a generator
+        The ``_write_bootstrap`` shim patches ``builtins.open`` so a generator
         script that writes to a relative nested path under results/ (e.g.
         ``results/design_patterns/x.md``) succeeds instead of failing on a missing
         parent directory — the gap that left ``results/design_patterns/`` empty.
@@ -244,6 +244,58 @@ class TestCodeExecutorCWD:
         target = tmp_path / "results" / "design_patterns" / "singleton.md"
         assert target.exists()
         assert target.read_text() == "pattern"
+
+    @pytest.mark.asyncio
+    async def test_bare_write_relocates_into_results_not_project_root(
+        self, tmp_path: Path
+    ) -> None:
+        """#314: a BARE relative write (no ``results/`` prefix) must NOT pollute
+        the project root.
+
+        ``code_executor`` runs the subprocess with ``cwd = project_root()``
+        (the results dir's parent). Without relocation, an LLM script doing
+        ``open("vector_db_comparator.py", "w")`` wrote the file into the repo
+        root — polluting ``ruff check .`` and shadowing real modules on
+        ``sys.path``. The bootstrap relocates bare relative writes into
+        ``results/`` so the deliverable lands there instead.
+        """
+        from src.config.settings import AgentSettings
+
+        mock_settings = AgentSettings(results_root=str(tmp_path / "results"))
+        with patch("src.config.settings.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+            await code_executor(
+                "with open('vector_db_comparator.py', 'w') as f:\n"
+                "    f.write('handler source')\n"
+            )
+
+        # Relocated into results/ …
+        relocated = tmp_path / "results" / "vector_db_comparator.py"
+        assert relocated.exists()
+        assert relocated.read_text() == "handler source"
+        # … and NOT leaked into the project root (the cwd / repo root).
+        assert not (tmp_path / "vector_db_comparator.py").exists()
+
+    @pytest.mark.asyncio
+    async def test_results_prefixed_write_not_relocated_or_double_nested(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-regression for #314: a write already under ``results/`` is left
+        exactly where the ``results/<file>`` contract puts it — not relocated
+        away, and not double-nested to ``results/results/<file>``."""
+        from src.config.settings import AgentSettings
+
+        mock_settings = AgentSettings(results_root=str(tmp_path / "results"))
+        with patch("src.config.settings.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+            await code_executor(
+                "with open('results/report.md', 'w') as f:\n"
+                "    f.write('body')\n"
+            )
+
+        assert (tmp_path / "results" / "report.md").exists()
+        assert (tmp_path / "results" / "report.md").read_text() == "body"
+        # No double-nesting, no project-root leak.
+        assert not (tmp_path / "results" / "results" / "report.md").exists()
+        assert not (tmp_path / "report.md").exists()
 
 
 class TestFileWriterResultsDir:

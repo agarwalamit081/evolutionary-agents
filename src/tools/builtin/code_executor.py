@@ -32,23 +32,69 @@ def _tool_sandbox() -> ToolSandboxSettings:
     return get_settings().tool_sandbox
 
 
-# Prepended to every executed script. The subprocess CWD is already the results
-# directory, so relative-path writes persist — but a generator script that does
-# ``open("design_patterns/x.md", "w")`` without first ``os.makedirs``-ing the
-# subdir fails silently, leaving deliverables missing (the F8 gap). This shim
-# auto-creates parent directories for relative write/append/exclusive paths so
-# such scripts succeed. Absolute paths and read modes are left untouched.
-_WRITE_BOOTSTRAP = (
-    "import builtins as _turing_b, os as _turing_os\n"
-    "_turing_open_orig = _turing_b.open\n"
-    "def _turing_open(p, m='r', *a, **k):\n"
-    "    if any(c in str(m) for c in 'wax'):\n"
-    "        _d = _turing_os.path.dirname(str(p))\n"
-    "        if _d and not _turing_os.path.isabs(str(p)):\n"
-    "            _turing_os.makedirs(_d, exist_ok=True)\n"
-    "    return _turing_open_orig(p, m, *a, **k)\n"
-    "_turing_b.open = _turing_open\n"
-)
+def _write_bootstrap(results_root_abs: str) -> str:
+    """Build the shim prepended to every executed script.
+
+    For write/append/exclusive opens (``w``/``a``/``x``) the shim has two
+    responsibilities:
+
+    1. Auto-create parent dirs for relative writes (the F8 fix) so a script
+       doing ``open("results/sub/x.md", "w")`` without ``os.makedirs`` still
+       succeeds instead of leaving the deliverable missing.
+    2. When ``results_root_abs`` (the absolute results dir for THIS mode) is
+       given, RELOCATE a *bare* relative write — one NOT already under
+       ``results/`` — into that dir. The host subprocess runs with
+       ``cwd = project_root()`` (the results dir's PARENT, not the results dir
+       itself), so without this a script doing
+       ``open("vector_db_comparator.py", "w")`` writes straight into the
+       project root — polluting the repo, tripping ``ruff check .``, and
+       shadowing real modules on ``sys.path`` (#314). Reads, absolute paths,
+       and writes already under ``results/`` are left untouched; a relocation
+       that would escape ``results/`` (path traversal like ``../x``) falls back
+       to the original path, so the shim is never worse than today.
+
+    ``results_root_abs=""`` yields the legacy parent-mkdir-only shim (no
+    relocation): the mode for the remote runner, whose results dir lives inside
+    a disposable container the worker cannot name — bare writes there land in
+    that isolated container, never the repo root.
+    """
+    # Absolute-path + read-mode opens are never touched; only relative writes
+    # are mkdir'd and (when a results root is given) relocated.
+    if not results_root_abs:
+        return (
+            "import builtins as _turing_b, os as _turing_os\n"
+            "_turing_open_orig = _turing_b.open\n"
+            "def _turing_open(p, m='r', *a, **k):\n"
+            "    if any(c in str(m) for c in 'wax'):\n"
+            "        _d = _turing_os.path.dirname(str(p))\n"
+            "        if _d and not _turing_os.path.isabs(str(p)):\n"
+            "            _turing_os.makedirs(_d, exist_ok=True)\n"
+            "    return _turing_open_orig(p, m, *a, **k)\n"
+            "_turing_b.open = _turing_open\n"
+        )
+    # Escape the injected path so an odd config (backslash/quote) cannot break
+    # out of the literal. POSIX results paths have neither, but stay safe.
+    root_literal = results_root_abs.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        "import builtins as _turing_b, os as _turing_os\n"
+        "_turing_open_orig = _turing_b.open\n"
+        f'_TURING_RESULTS = "{root_literal}"\n'
+        "def _turing_open(p, m='r', *a, **k):\n"
+        "    if any(c in str(m) for c in 'wax'):\n"
+        "        _s = str(p)\n"
+        "        if not _turing_os.path.isabs(_s):\n"
+        "            _here = _turing_os.path.abspath(_s)\n"
+        "            if not (_here == _TURING_RESULTS or _here.startswith(_TURING_RESULTS + _turing_os.sep)):\n"
+        "                _re = _turing_os.path.abspath(_turing_os.path.join(_TURING_RESULTS, _s))\n"
+        "                if _re == _TURING_RESULTS or _re.startswith(_TURING_RESULTS + _turing_os.sep):\n"
+        "                    _s = _re\n"
+        "            _d = _turing_os.path.dirname(_s)\n"
+        "            if _d:\n"
+        "                _turing_os.makedirs(_d, exist_ok=True)\n"
+        "            p = _s\n"
+        "    return _turing_open_orig(p, m, *a, **k)\n"
+        "_turing_b.open = _turing_open\n"
+    )
 
 
 async def code_executor(code: str, timeout: Optional[int] = None) -> str:
@@ -128,10 +174,12 @@ async def _run_host_subprocess(code: str, timeout: int) -> str:
     cwd_dir = project_root()
     cwd_dir.mkdir(parents=True, exist_ok=True)
 
+    # Relocating bootstrap keyed on the host results dir: a bare relative write
+    # (``open("x.py", "w")``) lands under results/ instead of the project root.
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", prefix="turing_exec_", delete=False
     ) as tmp:
-        tmp.write(_WRITE_BOOTSTRAP + code)
+        tmp.write(_write_bootstrap(str(results_root())) + code)
         tmp_path = tmp.name
 
     try:
@@ -214,6 +262,14 @@ async def _run_in_sandbox(code: str, timeout: int, mode: str) -> str:
     # the bind source docker mode uses — harmless to ensure-exist for runner.)
     Path(mount_src).mkdir(parents=True, exist_ok=True)
 
+    # The relocating bootstrap needs the results dir as the SCRIPT sees it.
+    # Docker mounts results_root at the container path ``workdir_dest`` (CWD is
+    # its parent), so relocate bare writes there. The runner executes in its
+    # OWN container whose results dir the worker can't name — pass "" for the
+    # legacy mkdir-only shim (bare writes there land in the isolated container,
+    # never the repo root).
+    bootstrap_root = ts.code_executor_sandbox_workdir_dest if mode == "docker" else ""
+
     sandbox = SandboxExecutor(
         SimpleNamespace(
             evolution_sandbox_mode=mode,
@@ -223,7 +279,7 @@ async def _run_in_sandbox(code: str, timeout: int, mode: str) -> str:
         )
     )
     result = await sandbox.execute_runtime_code(
-        _WRITE_BOOTSTRAP + code,
+        _write_bootstrap(bootstrap_root) + code,
         timeout=timeout,
         workdir=mount_src,
         workdir_dest=ts.code_executor_sandbox_workdir_dest,
@@ -241,10 +297,13 @@ TOOL_DEFINITION = {
         "is the PROJECT ROOT, so reference deliverables by their results/ path "
         "(e.g. glob('results/*.md'), open('results/out.md')). Write any scratch "
         "or generated files explicitly under results/ (parent directories are "
-        "created automatically); for final deliverables prefer file_writer. A "
-        "configurable timeout (default 30s) is enforced: avoid infinite loops, "
-        "and use http_request/web_scraper for network access instead of raw "
-        "sockets (which can hang until the timeout fires)."
+        "created automatically). A bare relative write like "
+        "open('helper.py', 'w') is auto-routed under results/ too, so generated "
+        "modules never pollute the project root — prefer an explicit "
+        "'results/<file>' path for clarity; for final deliverables prefer "
+        "file_writer. A configurable timeout (default 30s) is enforced: avoid "
+        "infinite loops, and use http_request/web_scraper for network access "
+        "instead of raw sockets (which can hang until the timeout fires)."
     ),
     "parameters": {
         "type": "object",

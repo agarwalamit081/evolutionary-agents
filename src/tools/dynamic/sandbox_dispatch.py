@@ -111,11 +111,11 @@ def _build_driver(handler_code: str, func_name: str, args: dict[str, Any]) -> st
     literal — a Python string literal that round-trips exactly, so a tool-call
     arg containing quotes / newlines cannot break out of the literal.
     """
-    from src.tools.builtin.code_executor import _WRITE_BOOTSTRAP
+    from src.tools.builtin.code_executor import _write_bootstrap
 
     args_json = json.dumps(args)  # JSON (controlled) -> safe to embed as a literal
     parts: list[str] = [
-        _WRITE_BOOTSTRAP,
+        _write_bootstrap(""),  # mkdir-only shim; handler runs inside the sandbox
         handler_code,
         "\n",
         "# --- turing generated-tool sandbox dispatch driver (untrusted handler) ---\n",

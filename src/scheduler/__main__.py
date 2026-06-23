@@ -67,6 +67,29 @@ async def _run() -> int:
     enqueuer = BatteryEnqueuer(queue, sched_settings)
     scheduler = make_battery_scheduler(enqueuer, sched_settings)
 
+    # Phase 2 C1f: the nightly curve regression→rollback gate. Registers on the
+    # SAME scheduler as the battery job, only when CAPABILITY_CURVE_GATE_ENABLED.
+    # Fires at capability_curve.curve_cron (default 05:00 UTC — after the 02:00
+    # battery so it reads the just-written night). Auto-rollback is a separate,
+    # independent opt-in (CAPABILITY_CURVE_AUTO_ROLLBACK).
+    curve_settings = settings.capability_curve
+    if curve_settings.gate_enabled:
+        from src.eval.curve import CapabilityCurve  # noqa: PLC0415
+        from src.eval.store import EvalStore  # noqa: PLC0415
+        from src.evolution.curve_gate import (  # noqa: PLC0415
+            CurveRegressionGate,
+            add_curve_gate_job,
+        )
+        from src.evolution.promote import PromotionGate  # noqa: PLC0415
+
+        curve = CapabilityCurve(EvalStore())
+        gate = CurveRegressionGate(curve, PromotionGate(), settings=curve_settings)
+        add_curve_gate_job(scheduler, gate, curve_settings)
+        logger.info(
+            f"Capability-curve gate registered — cron={curve_settings.curve_cron!r} "
+            f"tz={curve_settings.timezone} auto_rollback={curve_settings.auto_rollback}"
+        )
+
     stop_event = asyncio.Event()
 
     def _request_stop(*_: object) -> None:

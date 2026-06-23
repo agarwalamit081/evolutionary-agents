@@ -62,6 +62,30 @@ _DELIVERABLE_CONTINUATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Goal-deliverable LABEL cues. The goal often names its PRIMARY deliverable with
+# an explicit label rather than a save-verb — e.g. "DELIVERABLE: final report
+# results/vector_db_brief.md", "final output: results/answer.json", "output file
+# results/out.csv" — where the word immediately preceding the path is a
+# deliverable-descriptor noun ("report"/"output"/"answer"), not a save-verb.
+# _SAVE_TO_RE (save/write/export/…) and _DIR_OUTPUT_RE (create/generate/… +
+# preposition) both MISS such a path, so the primary deliverable reads as absent.
+# Because ``_goal_deliverables_satisfied`` returns True only when ALL goal-named
+# deliverables are on disk, a missed path silently drops from the required set,
+# which can flip goal_satisfied=True on the captured-but-present secondaries
+# alone and let ``_force_complete_on_evidence`` prematurely force-complete the
+# run with the primary deliverable never written (observed: showcase vector-db
+# run ended 50% at iter 12 — vector_db_brief.md dropped, comparison.csv alone
+# satisfied). These label cues capture the path that follows the label; the
+# [^.]*? skip (mirroring _SAVE_TO_RE) tolerates a descriptor between the label
+# and the path ("final report <path>"). Goal-only: applied exclusively in
+# ``_extract_goal_deliverables`` so it cannot perturb plan-level extraction.
+_GOAL_DELIVERABLE_LABEL_RE = re.compile(
+    r"\b(?:deliverable|final\s+deliverable|final\s+report|final\s+output|"
+    r"final\s+answer|final\s+result|output\s+file|report\s+file)\b[^.]*?"
+    r"\b([A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+)\b",
+    re.IGNORECASE,
+)
+
 # Phrasal-cue captures that are clearly not deliverable paths. _DIR_OUTPUT_RE
 # can grab the determiner/pronoun right after the preposition ("Create the tool
 # in a module" → captures "a"; "Produce the report under the results dir" →
@@ -921,6 +945,24 @@ def _extract_goal_deliverables(state: AgentState) -> list[str]:
                 _add(cand)
     for match in _DIR_OUTPUT_RE.findall(blob):
         _add(match.rstrip("/"))
+    # Explicit deliverable LABELS ("DELIVERABLE: final report <path>",
+    # "final output: <path>", "output file <path>"). See _GOAL_DELIVERABLE_LABEL_RE
+    # for why _SAVE_TO_RE/_DIR_OUTPUT_RE miss these and how a missed primary
+    # deliverable prematurely force-completes a run. The continuation walk reuses
+    # _DELIVERABLE_CONTINUATION_RE for label-introduced lists, mirroring the
+    # _SAVE_TO_RE block above.
+    for m in _GOAL_DELIVERABLE_LABEL_RE.finditer(blob):
+        deliverables = [m.group(1)]
+        pos = m.end()
+        while True:
+            cm = _DELIVERABLE_CONTINUATION_RE.match(blob, pos)
+            if not cm:
+                break
+            deliverables.append(cm.group(1))
+            pos = cm.end()
+        for cand in deliverables:
+            if cand not in excluded:
+                _add(cand)
 
     return paths
 

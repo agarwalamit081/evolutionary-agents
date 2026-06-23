@@ -1133,6 +1133,71 @@ class TestExtractGoalDeliverables:
         state = initial_state("A goal with no named output file.", "thread-f4-none")
         assert _extract_goal_deliverables(state) == []
 
+    # ── Goal-deliverable LABEL cues (_GOAL_DELIVERABLE_LABEL_RE) ──────────────
+    # The goal often names its PRIMARY deliverable with an explicit label
+    # ("DELIVERABLE: final report results/vector_db_brief.md") where the word
+    # preceding the path is a descriptor noun ("report"), not a save-verb.
+    # _SAVE_TO_RE/_DIR_OUTPUT_RE both miss such a path, so the primary
+    # deliverable silently drops from the required set and goal_satisfied can
+    # flip True on present secondaries alone → premature force-complete with the
+    # primary never written (showcase vector-db run ended 50% this way). These
+    # lock the label-cue capture.
+
+    def test_extracts_label_cue_deliverable_capitalized(self) -> None:
+        """'DELIVERABLE: final report results/vector_db_brief.md' — the
+        showcase phrasing. The label regex captures the brief despite the
+        'report' descriptor between the label and the path."""
+        state = initial_state(
+            "Build a competitive-intelligence brief. "
+            "DELIVERABLE: final report results/vector_db_brief.md embedding "
+            "the comparison table and a recommendation.",
+            "thread-label-brief",
+        )
+        assert "results/vector_db_brief.md" in _extract_goal_deliverables(state)
+
+    def test_extracts_final_output_label_deliverable(self) -> None:
+        state = initial_state(
+            "Compute the score and produce it. final output: results/answer.json",
+            "thread-label-output",
+        )
+        assert "results/answer.json" in _extract_goal_deliverables(state)
+
+    def test_extracts_output_file_label_deliverable(self) -> None:
+        state = initial_state(
+            "Analyze the dataset. output file results/out.csv must list every row.",
+            "thread-label-outfile",
+        )
+        assert "results/out.csv" in _extract_goal_deliverables(state)
+
+    def test_label_deliverable_and_save_verb_deliverable_both_captured(self) -> None:
+        """A goal naming a label-deliverable AND a save-verb deliverable
+        captures BOTH — so goal_satisfied cannot satisfy on the secondary alone.
+
+        This is the exact showcase scenario: comparison.csv (write-verb) +
+        vector_db_brief.md (DELIVERABLE label). Before the fix only
+        comparison.csv was captured, so a present comparison.csv read as
+        goal-satisfied and the run force-completed with the brief absent.
+        """
+        state = initial_state(
+            "3. COMPARISON: write results/comparison.csv via the tool. "
+            "5. DELIVERABLE: final report results/vector_db_brief.md with the "
+            "comparison table and trade-offs.",
+            "thread-label-both",
+        )
+        captured = _extract_goal_deliverables(state)
+        assert "results/comparison.csv" in captured
+        assert "results/vector_db_brief.md" in captured
+
+    def test_label_cue_ignores_non_path_descriptor(self) -> None:
+        """A label cue NOT followed by a path-like token (only prose) captures
+        nothing — 'final report embedding a recommendation' has no dotted path,
+        so the [^.]*? skip finds no deliverable and no phantom is invented."""
+        state = initial_state(
+            "DELIVERABLE: final report embedding a thorough recommendation.",
+            "thread-label-nopath",
+        )
+        assert _extract_goal_deliverables(state) == []
+
 
 class TestForceCompleteGoalCrossCheck:
     """F4 regression: force-complete must decline when the agent produced only

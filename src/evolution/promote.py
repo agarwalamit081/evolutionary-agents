@@ -230,6 +230,30 @@ class PromotionGate:
             return []
         return [s for s in suffixes if isinstance(s, str)]
 
+    def active_promotions(self) -> list[dict[str, Any]]:
+        """List currently-active promoted nodes with metadata (curve-gate suspect scan).
+
+        Returns one dict per node carrying an ``active`` entry: ``node``, ``active``
+        (the version file), ``promoted_at`` (ISO), and ``canary_score``. Nodes with
+        no active promotion are omitted. Used by ``CurveRegressionGate`` to find the
+        recent PROMPT promotions that are prime regression suspects (a CODE/TOOL
+        mutation is shadow/DB-governed and not rollback-eligible here).
+        """
+        pointer = self._read_pointer()
+        out: list[dict[str, Any]] = []
+        for node, entry in pointer.items():
+            if not isinstance(entry, dict) or not entry.get("active"):
+                continue
+            out.append(
+                {
+                    "node": node,
+                    "active": entry.get("active"),
+                    "promoted_at": entry.get("promoted_at"),
+                    "canary_score": entry.get("canary_score"),
+                }
+            )
+        return out
+
     async def promote(self, proposal: dict[str, Any]) -> dict[str, Any]:
         """Canary-gate a PROMPT proposal and promote it on a passing score.
 

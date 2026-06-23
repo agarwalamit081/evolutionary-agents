@@ -1410,7 +1410,7 @@ class CapabilityCurveSettings(BaseSettings):
     # default False so a host run with no env does nothing.
     gate_enabled: bool = False  # Env: CAPABILITY_CURVE_GATE_ENABLED
     # 5-field crontab for the gate. Default 05:00 UTC (after the 02:00 battery).
-    cron: str = "0 5 * * *"  # Env: CAPABILITY_CURVE_CURVE_CRON
+    curve_cron: str = "0 5 * * *"  # Env: CAPABILITY_CURVE_CURVE_CRON
     # IANA zone for the gate cron. Env: CAPABILITY_CURVE_TIMEZONE.
     timezone: str = "UTC"  # Env: CAPABILITY_CURVE_TIMEZONE
     # Minimum drop (best_prior - current) to call a regression. Env:

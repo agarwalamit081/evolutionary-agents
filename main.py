@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import click
 from loguru import logger
@@ -56,6 +58,16 @@ from src.runner import _create_gateway, execute_run
     is_flag=True,
     help="Clear this run's results subfolder before starting (requires --run-id)",
 )
+@click.option(
+    "--capability-curve",
+    "run_curve",
+    is_flag=True,
+    help="Print the nightly battery capability curve + regression verdict (read-only; no LLM, no DB writes)",
+)
+@click.option("--since", "curve_since", default=None, help="With --capability-curve: window start (ISO date/datetime, e.g. 2026-06-01)")
+@click.option("--until", "curve_until", default=None, help="With --capability-curve: window end (ISO date/datetime; date-only is end-of-day inclusive)")
+@click.option("--export", "curve_export", default=None, help="With --capability-curve: write JSON/CSV (.json/.csv by suffix) and exit")
+@click.option("--plot", "curve_plot", default=None, help="With --capability-curve: write a PNG of the battery trend (matplotlib optional)")
 def main(
     goal_text: str | None,
     interactive: bool,
@@ -70,6 +82,11 @@ def main(
     resume_run_id: str | None,
     results_dir: str | None,
     clean: bool,
+    run_curve: bool,
+    curve_since: str | None,
+    curve_until: str | None,
+    curve_export: str | None,
+    curve_plot: str | None,
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -85,6 +102,19 @@ def main(
     # --eval: run the golden Battery-04 suite end-to-end with correctness scoring.
     if run_eval:
         asyncio.run(_run_eval_suite(model))
+        return
+
+    # --capability-curve: read-only inspection of the nightly battery trend +
+    # regression verdict (the measured-self-improvement evidence). No LLM/DB writes.
+    if run_curve:
+        asyncio.run(
+            _run_capability_curve(
+                since=curve_since,
+                until=curve_until,
+                export=curve_export,
+                plot=curve_plot,
+            )
+        )
         return
 
     # --resume: continue a prior run from its last checkpoint. The goal lives in
@@ -243,6 +273,116 @@ async def _run_eval_suite(model: str | None = None) -> None:
             f"{spec_id:<16} {'yes' if complete else 'no':<10} "
             f"{_fmt_score(score):<8} ${cost:<9.4f} {iters}"
         )
+
+
+def _parse_window(value: str | None, *, end_of_day: bool = False) -> datetime | None:
+    """Parse an ISO date/datetime CLI arg to an aware datetime (None when absent).
+
+    Date-only values (e.g. ``2026-06-01``) are interpreted as UTC midnight; when
+    ``end_of_day`` is set (the ``--until`` bound) a date-only value is widened to
+    23:59:59.999999 of that day so the whole calendar day is included. Naive
+    datetimes are assumed UTC (``eval_results.created_at`` is TIMESTAMPTZ).
+    """
+    if not value:
+        return None
+    s = value.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError as exc:
+        raise click.BadParameter(f"bad ISO date/datetime: {value!r}") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    date_only = ("T" not in s) and (" " not in s)
+    if date_only and end_of_day:
+        dt = (dt + timedelta(days=1)) - timedelta(microseconds=1)
+    return dt
+
+
+async def _run_capability_curve(
+    *,
+    since: str | None,
+    until: str | None,
+    export: str | None,
+    plot: str | None,
+) -> None:
+    """Print the battery capability curve + regression verdict (read-only).
+
+    Pure read of ``eval_results``: the per-night battery mean, the latest per-goal
+    score, and the grounded regression verdict — the measured-self-improvement
+    evidence. No LLM, no DB writes. ``--export`` writes JSON/CSV by suffix;
+    ``--plot`` writes a PNG (matplotlib optional).
+    """
+    from src.eval.curve import CapabilityCurve  # noqa: PLC0415
+    from src.eval.store import EvalStore  # noqa: PLC0415
+
+    win_since = _parse_window(since, end_of_day=False)
+    win_until = _parse_window(until, end_of_day=True)
+    curve = CapabilityCurve(EvalStore())
+    snap = await curve.snapshot(since=win_since, until=win_until)
+
+    click.echo("=" * 60)
+    click.echo("📈 Capability curve — nightly battery mean correctness")
+    click.echo("=" * 60)
+
+    battery = snap["battery_trend"]
+    if not battery:
+        click.echo(
+            "No eval_results rows in the window. Run a battery first: "
+            "`python main.py --eval` or the scheduler."
+        )
+    else:
+        click.echo(f"{'date':<12} {'mean':<8} {'n_goals':<8}")
+        for row in battery:
+            click.echo(
+                f"{str(row.get('date')):<12} "
+                f"{_fmt_score(row.get('mean_score')):<8} {row.get('n_goals', 0):<8}"
+            )
+
+    click.echo("\n" + "-" * 60)
+    click.echo("Latest per-goal score")
+    click.echo("-" * 60)
+    click.echo(f"{'goal':<18} {'date':<12} {'mean':<8} {'n_checks':<8}")
+    for row in snap["latest_per_goal"]:
+        click.echo(
+            f"{str(row.get('goal_id')):<18} {str(row.get('date') or '-'):<12} "
+            f"{_fmt_score(row.get('mean_score')):<8} {row.get('n_checks', 0):<8}"
+        )
+
+    verdict = snap["verdict"]
+    min_points = get_settings().capability_curve.min_points
+    click.echo("\n" + "-" * 60)
+    if verdict.get("inconclusive"):
+        click.echo(
+            f"Regression verdict: INCONCLUSIVE — only {verdict.get('n_points')} night(s) "
+            f"in window (need >= {min_points}; see CAPABILITY_CURVE_MIN_POINTS)"
+        )
+    else:
+        status = "REGRESSED ⚠" if verdict.get("regressed") else "OK"
+        click.echo(
+            f"Regression verdict: {status}  current={_fmt_score(verdict.get('current'))} "
+            f"best_prior={_fmt_score(verdict.get('best_prior'))} "
+            f"delta={_fmt_score(verdict.get('delta'))} "
+            f"(floor={verdict.get('floor')} delta_floor={verdict.get('delta_floor')} "
+            f"n={verdict.get('n_points')})"
+        )
+
+    if export:
+        suffix = Path(export).suffix.lower()
+        if suffix == ".json":
+            curve.export_json(export, snap)
+            click.echo(f"\nExported JSON → {export}")
+        elif suffix == ".csv":
+            curve.export_csv(export, snap)
+            click.echo(f"\nExported CSV → {export}")
+        else:
+            raise click.BadParameter(
+                f"--export supports .json/.csv (got {suffix or 'no suffix'}); use --plot for PNG"
+            )
+    if plot:
+        if curve.plot_png(plot, snap):
+            click.echo(f"\nExported PNG → {plot}")
+        else:
+            click.echo("\nPNG skipped (matplotlib unavailable; install it or use --export .json/.csv).")
 
 
 async def _stream_final_answer(

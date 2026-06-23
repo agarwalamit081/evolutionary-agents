@@ -6,12 +6,40 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.graph.enums import Phase
+from src.graph.enums import Confidence, Phase
 from src.graph.factory import initial_state
 from src.graph.models import ReflectionResult
-from src.graph.nodes.memory import retrieve_memory_node, store_memory_node
+from src.graph.nodes.memory import (
+    _episode_importance,
+    retrieve_memory_node,
+    store_memory_node,
+)
 
 # PlanStep imported indirectly via conftest fixtures
+
+
+class TestEpisodeImportance:
+    """A6: ``_episode_importance`` maps completion + confidence → a non-flat score."""
+
+    def test_complete_high_confidence(self) -> None:
+        assert _episode_importance(True, Confidence.HIGH) == pytest.approx(0.95)
+
+    def test_complete_very_high_confidence(self) -> None:
+        assert _episode_importance(True, Confidence.VERY_HIGH) == pytest.approx(0.95)
+
+    def test_complete_medium_confidence(self) -> None:
+        assert _episode_importance(True, Confidence.MEDIUM) == pytest.approx(0.9)
+
+    def test_incomplete_medium_confidence(self) -> None:
+        assert _episode_importance(False, Confidence.MEDIUM) == pytest.approx(0.4)
+
+    def test_incomplete_very_high_confidence(self) -> None:
+        assert _episode_importance(False, Confidence.VERY_HIGH) == pytest.approx(0.45)
+
+    def test_none_confidence_keeps_base(self) -> None:
+        # Heuristic-fallback path (no confidence on state) keeps the base value.
+        assert _episode_importance(True, None) == pytest.approx(0.9)
+        assert _episode_importance(False, None) == pytest.approx(0.4)
 
 
 class TestRetrieveMemoryNode:
@@ -109,6 +137,32 @@ class TestRetrieveMemoryNode:
         # The recalled skill's id is surfaced so store_memory_node can feed the
         # skill-fitness EMA (findings-05 D).
         assert result["recalled_skill_ids"] == ["skill-uuid-1"]
+
+    @pytest.mark.asyncio
+    async def test_retrieve_recalls_error_episodes(self) -> None:
+        """A7: prior error episodes are recalled and surfaced as tier='error_episode'."""
+        memory = MagicMock()
+        memory.retrieve_context = AsyncMock(return_value=[])
+        memory.warm = MagicMock()
+        memory.warm.retrieve = AsyncMock(return_value=[])  # evolved/folded empty
+        memory.retrieve_facts = AsyncMock(return_value=[])  # facts empty
+        memory.retrieve_skills = AsyncMock(return_value=[])  # skills empty
+        memory.cold = MagicMock()
+        memory.cold.search_by_query = AsyncMock(
+            return_value=[
+                {"content": "Failed approach for X: timeout", "similarity": 0.7},
+            ]
+        )
+        state = initial_state("normalize timestamps", "thread-errors")
+        result = await retrieve_memory_node(state, memory=memory)
+
+        assert result["phase"] == Phase.EXECUTE
+        ep_entries = [m for m in result["retrieved_memories"] if m.get("tier") == "error_episode"]
+        assert len(ep_entries) == 1
+        assert "Failed approach for X" in ep_entries[0]["content"]
+        assert ep_entries[0]["score"] == pytest.approx(0.7)
+        # The recall query was scoped to error episodes.
+        assert memory.cold.search_by_query.await_args.kwargs["episode_type"] == "error"
 
 
 
@@ -263,6 +317,100 @@ class TestStoreMemoryNode:
         result = await store_memory_node(state)
 
         assert result["phase"] == Phase.COMPLETE
+
+
+class TestStoreMemoryImportance:
+    """A6: store_memory_node derives non-flat importance from completion + confidence."""
+
+    @staticmethod
+    def _memory() -> MagicMock:
+        memory = MagicMock()
+        memory.store_observation = AsyncMock(return_value=None)
+        memory.store_skill = AsyncMock(return_value="uuid")
+        memory.update_skill_fitness = AsyncMock(return_value=None)
+        return memory
+
+    @pytest.mark.asyncio
+    async def test_complete_high_confidence_passes_high_importance(
+        self, sample_state: dict
+    ) -> None:
+        memory = self._memory()
+        state = dict(sample_state)
+        state["memory_observations"] = ["obs1"]
+        state["reflection"] = None
+        state["is_complete"] = True
+        state["confidence"] = Confidence.HIGH
+
+        await store_memory_node(state, memory=memory)
+
+        memory.store_observation.assert_awaited_once()
+        assert memory.store_observation.await_args.kwargs["importance"] == pytest.approx(0.95)
+
+    @pytest.mark.asyncio
+    async def test_incomplete_passes_low_importance(self, sample_state: dict) -> None:
+        memory = self._memory()
+        state = dict(sample_state)
+        state["memory_observations"] = ["obs1"]
+        state["reflection"] = None
+        state["is_complete"] = False
+        state["confidence"] = Confidence.MEDIUM
+
+        await store_memory_node(state, memory=memory)
+
+        assert memory.store_observation.await_args.kwargs["importance"] == pytest.approx(0.4)
+
+
+class TestStoreMemoryErrorEpisodes:
+    """A7: a run with errors persists one ``episode_type='error'`` cold episode."""
+
+    @staticmethod
+    def _memory() -> MagicMock:
+        memory = MagicMock()
+        memory.store_observation = AsyncMock(return_value=None)
+        memory.store_skill = AsyncMock(return_value="uuid")
+        memory.update_skill_fitness = AsyncMock(return_value=None)
+        return memory
+
+    @pytest.mark.asyncio
+    async def test_error_episode_written_on_failure(self, sample_state: dict) -> None:
+        memory = self._memory()
+        state = dict(sample_state)
+        state["memory_observations"] = []
+        state["reflection"] = None
+        state["is_complete"] = False
+        state["errors"] = ["timeout calling api", "csv malformed"]
+
+        await store_memory_node(state, memory=memory)
+
+        # Exactly one episode_type='error' store (the cross-run failure tier); the
+        # most-recent error carries the actionable signal.
+        error_calls = [
+            c
+            for c in memory.store_observation.await_args_list
+            if c.kwargs.get("episode_type") == "error"
+        ]
+        assert len(error_calls) == 1
+        assert error_calls[0].kwargs["importance"] == pytest.approx(0.7)
+        assert "csv malformed" in error_calls[0].kwargs["content"]
+        assert error_calls[0].kwargs["tags"][0] == "error"
+
+    @pytest.mark.asyncio
+    async def test_no_error_episode_when_no_errors(self, sample_state: dict) -> None:
+        memory = self._memory()
+        state = dict(sample_state)
+        state["memory_observations"] = []
+        state["reflection"] = None
+        state["is_complete"] = True
+        state["errors"] = []
+
+        await store_memory_node(state, memory=memory)
+
+        error_calls = [
+            c
+            for c in memory.store_observation.await_args_list
+            if c.kwargs.get("episode_type") == "error"
+        ]
+        assert error_calls == []
 
 
 class TestStoreMemoryIntentFacts:

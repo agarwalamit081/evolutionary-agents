@@ -6,8 +6,23 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from src.graph.enums import Phase
+from src.graph.enums import Confidence, Phase
 from src.graph.state import AgentState, objective_goal_text
+
+
+def _episode_importance(is_complete: bool, confidence: Confidence | None) -> float:
+    """Derive a non-flat episode importance from completion + confidence (A6).
+
+    Episodes were stored with flat 0.5 importance, so cold recall ranked them by
+    similarity alone — a hard-won success ranked the same as a dead-end.
+    Completion is the dominant signal (0.9 vs 0.4); HIGH/VERY_HIGH confidence
+    nudges it up. Clamped to [0,1] for ``cold.store``. A ``None`` confidence
+    (heuristic-fallback path) keeps the base value unchanged.
+    """
+    base = 0.9 if is_complete else 0.4
+    if confidence in (Confidence.HIGH, Confidence.VERY_HIGH):
+        base += 0.05
+    return max(0.0, min(1.0, base))
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
@@ -145,6 +160,27 @@ async def retrieve_memory_node(
                 )
         except Exception as e:
             logger.debug(f"Skill recall skipped: {e}")
+
+        # A7: recall prior error episodes (the cross-run failure / anti-pattern
+        # tier). store_memory_node persists one episode_type='error' cold episode
+        # per failed run; this surfaces them ranked by semantic similarity to the
+        # objective so planning sees what approaches already failed. Distinct
+        # from positive recall (skills/facts = what worked) and best-effort
+        # (search_by_query returns [] when no generator is wired).
+        try:
+            failed = await memory.cold.search_by_query(
+                query=goal_text, episode_type="error", limit=2
+            )
+            for entry in failed:
+                retrieved.append({
+                    "content": entry.get("content", ""),
+                    "tier": "error_episode",
+                    "score": entry.get("similarity", 0.5),
+                })
+            if failed:
+                logger.info(f"Loaded {len(failed)} prior error episode(s)")
+        except Exception as e:
+            logger.debug(f"Error-episode recall skipped: {e}")
     else:
         logger.debug("No MemoryManager available, returning empty memories")
 
@@ -188,11 +224,18 @@ async def store_memory_node(
     if memory is not None:
         stored_count = 0
 
+        # A6: non-flat importance. An episode's weight in cold recall now reflects
+        # whether the run completed and how confident it was — not a flat 0.5.
+        episode_importance = _episode_importance(
+            is_complete, state.get("confidence")
+        )
+
         # Store each observation as hot memory
         for obs in memory_observations:
             try:
                 await memory.store_observation(
                     content=obs,
+                    importance=episode_importance,
                     tags=["reflection", "complete" if is_complete else "incomplete"],
                 )
                 stored_count += 1
@@ -211,6 +254,29 @@ async def store_memory_node(
                 logger.warning(f"Failed to store lessons: {e}")
 
         logger.info(f"Stored {stored_count}/{observations_count} observations to memory")
+
+        # A7: cross-run failure tier. When the run accumulated errors, persist one
+        # ``episode_type='error'`` cold episode describing the failed approach so a
+        # later run on the same objective can recall "this approach failed last
+        # time" (see retrieve_memory_node's error_episode recall). store_memory is
+        # terminal, so this writes once per run — no bloat. The most recent error
+        # carries the actionable signal. Fixed 0.7 importance — a failure is
+        # valuable learning regardless of confidence. Non-fatal (a hiccup never
+        # aborts the terminal sink).
+        errors = state.get("errors", [])
+        if errors:
+            try:
+                goal_text = objective_goal_text(state)
+                reason = str(errors[-1])[:300]
+                await memory.store_observation(
+                    content=f"Failed approach for {goal_text[:80]}: {reason}",
+                    episode_type="error",
+                    importance=0.7,
+                    tags=["error", goal_text[:50]],
+                )
+                logger.info(f"Stored error episode (reason: {reason[:60]})")
+            except Exception as e:
+                logger.warning(f"Failed to store error episode: {e}")
 
         # Feed the skill-fitness EMA (findings-05 D). Each skill recalled this
         # run (retrieve_memory_node populated recalled_skill_ids) gets

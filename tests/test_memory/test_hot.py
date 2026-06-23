@@ -359,3 +359,74 @@ class TestHotMemoryClear:
         count = await hot_memory.clear()
 
         assert count == 0
+
+
+@pytest.fixture
+def fake_async_redis() -> Any:
+    """A fresh real in-memory async Redis per test (fakeredis 2.36).
+
+    A MagicMock cannot prove ZSET ordering — add_observation/search_recent are
+    exercised against a real sorted-set so the recency contract is genuine.
+    """
+    import fakeredis
+
+    return fakeredis.FakeAsyncRedis()
+
+
+class TestHotMemoryRecency:
+    """A4: recency-ranked recall via the observation ZSET (newest-first).
+
+    Replaces the legacy unordered hot.search('obs:*')[:2]. The ZSET is scored
+    by time (add_observation) and search_recent returns highest-score members
+    first (ZREVRANGE), skipping any whose STRING has TTL-expired.
+    """
+
+    @pytest.mark.asyncio
+    async def test_search_recent_returns_by_recency(self, fake_async_redis: Any) -> None:
+        """Four observations → search_recent returns the newest N, descending."""
+        mem = HotMemory(redis_client=fake_async_redis, ttl_seconds=3600)
+        # Explicit increasing scores → deterministic order, independent of
+        # sub-microsecond time.time() collisions in a tight insertion loop.
+        await mem.add_observation("obs:exec:1", {"content": "oldest"}, score=1.0)
+        await mem.add_observation("obs:exec:2", {"content": "old"}, score=2.0)
+        await mem.add_observation("obs:exec:3", {"content": "new"}, score=3.0)
+        await mem.add_observation("obs:exec:4", {"content": "newest"}, score=4.0)
+
+        results = await mem.search_recent("obs:", limit=2)
+
+        assert [r["content"] for r in results] == ["newest", "new"]
+
+    @pytest.mark.asyncio
+    async def test_add_observation_also_writes_string(self, fake_async_redis: Any) -> None:
+        """add_observation writes the keyed STRING too (back-compat with set())."""
+        mem = HotMemory(redis_client=fake_async_redis, ttl_seconds=3600)
+        await mem.add_observation("obs:exec:9", {"content": "x"}, score=1.0)
+
+        val = await mem.get("obs:exec:9")
+        assert val == {"content": "x"}
+
+    @pytest.mark.asyncio
+    async def test_search_recent_skips_expired_string(self, fake_async_redis: Any) -> None:
+        """A ZSET member whose STRING has TTL-expired is skipped, not returned
+        as None/garbage — search_recent yields the next live member instead."""
+        mem = HotMemory(redis_client=fake_async_redis, ttl_seconds=3600)
+        await mem.add_observation("obs:exec:1", {"content": "stale"}, score=1.0)
+        await mem.add_observation("obs:exec:2", {"content": "live"}, score=2.0)
+        # Simulate the STRING expiring while the ZSET member lingers.
+        await fake_async_redis.delete("turing:hot:obs:exec:1")
+
+        results = await mem.search_recent("obs:", limit=2)
+
+        assert results == [{"content": "live"}]
+
+    @pytest.mark.asyncio
+    async def test_search_recent_respects_limit(self, fake_async_redis: Any) -> None:
+        """search_recent caps at `limit` even when more members exist."""
+        mem = HotMemory(redis_client=fake_async_redis, ttl_seconds=3600)
+        for i in range(5):
+            await mem.add_observation(f"obs:exec:{i}", {"content": str(i)}, score=float(i))
+
+        results = await mem.search_recent("obs:", limit=3)
+
+        assert [r["content"] for r in results] == ["4", "3", "2"]
+

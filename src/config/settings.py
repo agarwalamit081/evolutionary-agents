@@ -879,6 +879,12 @@ class AgentSettings(BaseSettings):
     # Tertiary context-size trigger (chars // 4 estimate).
     memory_folding_message_token_estimate: int = 8_000
 
+    # Hot-memory recall: how many recent observations retrieve_context surfaces
+    # from the recency-ranked ZSET (newest-first). The legacy hot.search() path
+    # had no ordering guarantee and hard-capped at 2; this knob makes the count
+    # explicit and deterministic. Env: MEMORY_HOT_RECALL_SIZE
+    memory_hot_recall_size: int = 3
+
     # Planning: cap generated plan length to the iteration budget so large
     # multi-unit goals decompose within max_iterations instead of blowing the
     # run budget (the binding constraint — money budget is secondary). 30 lets
@@ -966,6 +972,7 @@ class AgentSettings(BaseSettings):
         "memory_folding_max_tokens",
         "tool_persist_max_attempts",
         "clarifying_max_queries",
+        "memory_hot_recall_size",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:

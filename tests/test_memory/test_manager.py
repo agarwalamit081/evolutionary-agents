@@ -35,6 +35,8 @@ def mock_settings() -> MagicMock:
     settings.budget.max_cost_usd = 10.0
     # Embedding config read by MemoryManager (§10.2).
     settings.llm.embedding_dim = 768
+    # A4: hot-recall count read by retrieve_context (settings.agent.memory_hot_recall_size).
+    settings.agent.memory_hot_recall_size = 3
     return settings
 
 
@@ -43,8 +45,10 @@ def mock_hot() -> MagicMock:
     """Create a mock HotMemoryStore."""
     hot = MagicMock()
     hot.set = AsyncMock()
+    hot.add_observation = AsyncMock()
     hot.get = AsyncMock(return_value=None)
     hot.search = AsyncMock(return_value=[])
+    hot.search_recent = AsyncMock(return_value=[])
     hot.delete = AsyncMock()
     hot.clear = AsyncMock(return_value=0)
     return hot
@@ -202,8 +206,8 @@ class TestStoreObservation:
             episode_type="execution",
         )
 
-        manager._mock_hot.set.assert_called_once()
-        call = manager._mock_hot.set.call_args
+        manager._mock_hot.add_observation.assert_called_once()
+        call = manager._mock_hot.add_observation.call_args
         # Key starts with "obs:execution:"
         assert call[1]["key"].startswith("obs:execution:")
         assert call[1]["value"]["content"] == "agent performed task"
@@ -240,7 +244,7 @@ class TestStoreObservation:
         """When tags is None, hot tier should receive empty list."""
         await manager.store_observation(content="no tags")
 
-        hot_call = manager._mock_hot.set.call_args
+        hot_call = manager._mock_hot.add_observation.call_args
         assert hot_call[1]["value"]["tags"] == []
 
         cold_call = manager._mock_cold.store.call_args
@@ -251,7 +255,7 @@ class TestStoreObservation:
         """Default episode_type should be 'execution'."""
         await manager.store_observation(content="default type")
 
-        hot_call = manager._mock_hot.set.call_args
+        hot_call = manager._mock_hot.add_observation.call_args
         assert hot_call[1]["key"].startswith("obs:execution:")
 
         cold_call = manager._mock_cold.store.call_args
@@ -314,7 +318,7 @@ class TestRetrieveContext:
         self, manager: _MockedManager
     ) -> None:
         """retrieve_context should aggregate results from hot, warm, and cold tiers."""
-        manager._mock_hot.search = AsyncMock(return_value=[
+        manager._mock_hot.search_recent = AsyncMock(return_value=[
             {"content": "recent obs"},
         ])
         manager._mock_warm.retrieve = AsyncMock(return_value=[
@@ -339,7 +343,7 @@ class TestRetrieveContext:
     @pytest.mark.asyncio
     async def test_respects_limit(self, manager: _MockedManager) -> None:
         """retrieve_context should truncate results to the specified limit."""
-        manager._mock_hot.search = AsyncMock(return_value=[
+        manager._mock_hot.search_recent = AsyncMock(return_value=[
             {"content": f"hot-{i}"} for i in range(5)
         ])
         manager._mock_warm.retrieve = AsyncMock(return_value=[
@@ -364,7 +368,7 @@ class TestRetrieveContext:
         The query now drives semantic cold recall even without tags; only the
         explicit tag filter remains tag-gated.
         """
-        manager._mock_hot.search = AsyncMock(return_value=[])
+        manager._mock_hot.search_recent = AsyncMock(return_value=[])
         manager._mock_warm.retrieve = AsyncMock(return_value=[])
 
         await manager.retrieve_context(query="semantic query", tags=None, limit=5)
@@ -379,7 +383,7 @@ class TestRetrieveContext:
         self, manager: _MockedManager
     ) -> None:
         """Semantic cold recall results appear as cold-tier items with similarity."""
-        manager._mock_hot.search = AsyncMock(return_value=[])
+        manager._mock_hot.search_recent = AsyncMock(return_value=[])
         manager._mock_warm.retrieve = AsyncMock(return_value=[])
         manager._mock_cold.search_by_query = AsyncMock(return_value=[
             {"id": "c1", "content": "semantically relevant", "similarity": 0.9},
@@ -397,7 +401,7 @@ class TestRetrieveContext:
         self, manager: _MockedManager
     ) -> None:
         """A memory returned by both semantic and tag search appears once."""
-        manager._mock_hot.search = AsyncMock(return_value=[])
+        manager._mock_hot.search_recent = AsyncMock(return_value=[])
         manager._mock_warm.retrieve = AsyncMock(return_value=[])
         shared = {"id": "c1", "content": "both paths match"}
         manager._mock_cold.search_by_query = AsyncMock(return_value=[shared])
@@ -409,23 +413,25 @@ class TestRetrieveContext:
         assert cold_ids == ["c1"]  # deduped, not duplicated
 
     @pytest.mark.asyncio
-    async def test_hot_search_uses_obs_pattern(
+    async def test_hot_recall_uses_obs_prefix_and_configured_size(
         self, manager: _MockedManager
     ) -> None:
-        """Hot tier search should use 'obs:*' pattern."""
-        manager._mock_hot.search = AsyncMock(return_value=[])
+        """A4: hot recall goes through search_recent with the 'obs:' prefix and
+        the configured recall size (not the legacy unordered search('obs:*')[:2])."""
+        manager._mock_hot.search_recent = AsyncMock(return_value=[])
         manager._mock_warm.retrieve = AsyncMock(return_value=[])
 
         await manager.retrieve_context(query="test", tags=None, limit=5)
 
-        manager._mock_hot.search.assert_called_once_with("obs:*")
+        manager._mock_hot.search_recent.assert_called_once_with("obs:", 3)
+        manager._mock_hot.search.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_warm_retrieve_with_tags_and_min_fitness(
         self, manager: _MockedManager
     ) -> None:
         """Warm tier retrieve should pass tags and min_fitness=0.3."""
-        manager._mock_hot.search = AsyncMock(return_value=[])
+        manager._mock_hot.search_recent = AsyncMock(return_value=[])
         manager._mock_warm.retrieve = AsyncMock(return_value=[])
         manager._mock_cold.search_by_tags = AsyncMock(return_value=[])
 
@@ -444,7 +450,7 @@ class TestRetrieveContext:
     @pytest.mark.asyncio
     async def test_cold_search_with_tags(self, manager: _MockedManager) -> None:
         """Cold tier should search by tags when tags are provided."""
-        manager._mock_hot.search = AsyncMock(return_value=[])
+        manager._mock_hot.search_recent = AsyncMock(return_value=[])
         manager._mock_warm.retrieve = AsyncMock(return_value=[])
         manager._mock_cold.search_by_tags = AsyncMock(return_value=[])
 
@@ -462,7 +468,7 @@ class TestRetrieveContext:
     @pytest.mark.asyncio
     async def test_results_include_tier_field(self, manager: _MockedManager) -> None:
         """Each result dict should include a 'tier' field."""
-        manager._mock_hot.search = AsyncMock(return_value=[
+        manager._mock_hot.search_recent = AsyncMock(return_value=[
             {"content": "hot item"},
         ])
         manager._mock_warm.retrieve = AsyncMock(return_value=[

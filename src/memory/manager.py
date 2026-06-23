@@ -63,8 +63,10 @@ class MemoryManager:
             tags: Context tags.
             episode_type: Episode type classification.
         """
-        # Store in hot memory for immediate access
-        await self.hot.set(
+        # Store in hot memory for immediate access AND index it in the recency
+        # ZSET so retrieve_context recalls the newest observations first
+        # (legacy hot.set + search had no ordering guarantee).
+        await self.hot.add_observation(
             key=f"obs:{episode_type}:{hash(content) % 10000}",
             value={"content": content, "tags": tags or []},
             ttl=3600,  # 1 hour
@@ -125,9 +127,14 @@ class MemoryManager:
         """
         results: list[dict[str, Any]] = []
 
-        # Hot memory: recent observations
-        hot_results = await self.hot.search("obs:*")
-        for item in hot_results[:2]:
+        # Hot memory: recent observations, newest-first via the recency ZSET
+        # (A4). The count is configurable (agent.memory_hot_recall_size) instead
+        # of the legacy hard-coded [:2] slice over an unordered scan.
+        hot_results = await self.hot.search_recent(
+            "obs:",
+            self._settings.agent.memory_hot_recall_size,
+        )
+        for item in hot_results:
             results.append({"tier": "hot", **item})
 
         # Warm memory: skills and procedures

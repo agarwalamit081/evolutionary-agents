@@ -7,6 +7,7 @@ from typing import Any
 from loguru import logger
 
 from src.graph.enums import Phase
+from src.graph.iteration_cap import effective_max_iterations
 from src.graph.state import AgentState
 
 
@@ -24,7 +25,7 @@ async def error_handler_node(state: AgentState) -> dict[str, Any]:
     """
     errors = state.get("errors", [])
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations", 25)
+    max_iterations = effective_max_iterations(state)
 
     if not errors:
         # Reaching the error handler with nothing in ``errors`` is itself a

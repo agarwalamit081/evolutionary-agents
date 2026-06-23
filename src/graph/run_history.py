@@ -165,7 +165,7 @@ class RunHistoryGenerator:
         # Metrics
         lines.append("## Metrics")
         lines.append("")
-        lines.append(f"- **Iterations**: {state.get('iteration_count', 0)} / {state.get('max_iterations', 25)}")
+        lines.append(f"- **Iterations**: {state.get('iteration_count', 0)} / {state.get('max_iterations') or 'auto'}")
         lines.append(f"- **Tokens used**: {state.get('total_tokens_used', 0)}")
 
         cost_records = state.get("cost_records", [])

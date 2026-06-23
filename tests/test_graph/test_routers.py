@@ -6,7 +6,8 @@ from typing import Any
 
 
 from src.config.settings import get_settings
-from src.graph.enums import Confidence
+from src.graph.enums import Confidence, TaskComplexity
+from src.graph.iteration_cap import effective_max_iterations
 from src.graph.models import PlanStep, ReflectionResult, ToolResult
 from src.graph.routers import (
     route_after_error,
@@ -37,34 +38,35 @@ class TestRouteAfterExecute:
         result = route_after_execute(sample_state)
         assert result == "reflect"
 
-    def test_route_after_execute_falls_back_to_settings_max_iterations(self) -> None:
-        """When state omits max_iterations, routing uses settings.agent.max_iterations
-        (single source of truth) — not a hardcoded literal.
+    def test_route_after_execute_is_complexity_aware(self) -> None:
+        """B1: when state omits an explicit cap, routing terminates at the goal's
+        complexity tier (via ``effective_max_iterations``), not a flat cap.
 
-        Same state, two settings caps: iteration_count=5 reflects when the cap
-        is 5 but continues executing when the cap is 100.
+        A TRIVIAL goal reflects once iteration_count reaches its low tier cap; a
+        COMPLEX goal at the same count keeps executing (its tier cap is higher).
+        The cap is derived from settings, not a hardcoded literal.
         """
-        import types
-        from unittest.mock import patch
+        from types import SimpleNamespace
 
-        def _state() -> dict[str, Any]:
-            # No max_iterations key — exercises the settings fallback.
+        def _state(complexity: TaskComplexity, iters: int) -> dict[str, Any]:
+            # No max_iterations key — exercises the complexity-tier fallback.
             return {
-                "iteration_count": 5,
+                "iteration_count": iters,
                 "errors": [],
                 "tool_results": [],
                 "plan_steps": [],
                 "current_step_index": 0,
                 "messages": [],
+                "current_goal": SimpleNamespace(complexity=complexity),
             }
 
-        cap_5 = types.SimpleNamespace(agent=types.SimpleNamespace(max_iterations=5))
-        cap_100 = types.SimpleNamespace(agent=types.SimpleNamespace(max_iterations=100))
-
-        with patch("src.graph.routers.get_settings", return_value=cap_5):
-            assert route_after_execute(_state()) == "reflect"  # 5 >= 5
-        with patch("src.graph.routers.get_settings", return_value=cap_100):
-            assert route_after_execute(_state()) == "execute"  # 5 < 100
+        trivial_cap = effective_max_iterations(_state(TaskComplexity.TRIVIAL, 0))
+        complex_cap = effective_max_iterations(_state(TaskComplexity.COMPLEX, 0))
+        # The tiers genuinely differ — a TRIVIAL goal caps lower than a COMPLEX one.
+        assert trivial_cap < complex_cap
+        # At the TRIVIAL cap → reflect; a COMPLEX goal at the same count → execute.
+        assert route_after_execute(_state(TaskComplexity.TRIVIAL, trivial_cap)) == "reflect"
+        assert route_after_execute(_state(TaskComplexity.COMPLEX, trivial_cap)) == "execute"
 
     def test_route_after_execute_to_error(self, sample_state: dict[str, Any]) -> None:
         """When authentication errors are present, route to error_handler."""

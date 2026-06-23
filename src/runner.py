@@ -215,8 +215,14 @@ async def execute_run(
     from src.graph.task_graph import compile_task_graph
 
     settings = get_settings()
-    if max_iterations is None:
-        max_iterations = settings.agent.max_iterations
+    # max_iterations stays as the caller provided (possibly None). When None
+    # (the CLI/worker default) state["max_iterations"] is left unset so the
+    # routers derive the cap from the classified goal complexity via
+    # effective_max_iterations (B1). An explicit pin (CLI --max-iterations, an
+    # eval spec, or a worker job) is written into state and always wins. The
+    # recursion-limit basis below uses the flat AgentSettings.max_iterations
+    # regardless — it is computed before classify, so it cannot be complexity-
+    # aware (see src/graph/iteration_cap.py).
 
     # Configure LangSmith tracing from settings
     if settings.langsmith.is_configured:
@@ -392,7 +398,10 @@ async def execute_run(
             cost_session_cm = None
 
     logger.info(f"Starting agent with goal: {goal_text[:80]}")
-    recursion_limit = max(max_iterations * 8, 100)
+    # Build-time fan-out ceiling. max_iterations may be None (derive-at-runtime);
+    # the recursion limit always uses the flat basis so a COMPLEX run never hits
+    # GraphRecursionError before its complexity cap (B1).
+    recursion_limit = max((max_iterations or settings.agent.max_iterations) * 8, 100)
     # Key checkpoints by thread_id when a checkpointer is wired so a later
     # --resume can continue the run. On resume, pass None as the input so
     # LangGraph continues from the last checkpoint rather than restarting.

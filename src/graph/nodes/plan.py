@@ -251,7 +251,7 @@ async def _llm_plan(
         if memories:
             memory_ctx = "\n".join(f"- {m}" for m in memories[:5])
 
-        max_iterations = state.get("max_iterations", 20)
+        max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
         iteration_count = state.get("iteration_count", 0)
         remaining_iterations = max(0, max_iterations - iteration_count)
         # Deliverable-aware re-plan: when verify already scored this run's

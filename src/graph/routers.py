@@ -9,6 +9,7 @@ from loguru import logger
 
 from src.config import get_settings
 from src.graph.enums import Confidence
+from src.graph.iteration_cap import effective_max_iterations
 from src.graph.nodes.reflect import _ground_should_evolve
 from src.graph.state import AgentState
 
@@ -24,7 +25,7 @@ def route_after_execute(state: AgentState) -> str:
     errors = state.get("errors", [])
     tool_results = state.get("tool_results", [])
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
+    max_iterations = effective_max_iterations(state)
     plan_steps = state.get("plan_steps", [])
     step_index = state.get("current_step_index", 0)
 
@@ -123,7 +124,7 @@ def route_after_reflect(state: AgentState) -> str:
     # recursion limit crashes the run (GraphRecursionError). Route to verify,
     # which accepts the partial result and terminates. See F12 (T2 crash).
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
+    max_iterations = effective_max_iterations(state)
     if iteration_count >= max_iterations:
         logger.info(
             f"Max iterations ({max_iterations}) reached on reflect; "
@@ -308,7 +309,7 @@ def route_after_verify(state: AgentState) -> str:
     confidence = state.get("confidence", Confidence.MEDIUM)
     reflection = state.get("reflection")
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
+    max_iterations = effective_max_iterations(state)
     plan_steps = state.get("plan_steps", [])
     step_index = state.get("current_step_index", 0)
 
@@ -415,7 +416,7 @@ def route_after_store(state: AgentState) -> str:
     """
     is_complete = state.get("is_complete", False)
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
+    max_iterations = effective_max_iterations(state)
 
     if is_complete:
         # Normal completion. HITL can be enabled via config.
@@ -458,7 +459,7 @@ def route_after_error(state: AgentState) -> str:
     """
     errors = state.get("errors", [])
     iteration_count = state.get("iteration_count", 0)
-    max_iterations = state.get("max_iterations") or get_settings().agent.max_iterations
+    max_iterations = effective_max_iterations(state)
 
     if not errors:
         # No error to handle is an anomaly (genuine errors populate ``errors``;

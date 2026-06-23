@@ -71,19 +71,18 @@ class TestInitialState:
         assert goal.text == goal_text
         assert goal.status == GoalStatus.ACTIVE
 
-    def test_initial_state_default_iterations(self) -> None:
-        """initial_state resolves max_iterations from settings when not specified
-        (the configured cap, e.g. .env MAX_ITERATIONS) — not a hardcoded literal."""
-        from src.config import get_settings
-
+    def test_initial_state_default_iterations_defers_to_complexity(self) -> None:
+        """initial_state leaves max_iterations=None when unspecified (B1) so the
+        routers derive the cap from the classified goal complexity via
+        effective_max_iterations — not a flat literal."""
         state = initial_state(
             goal_text="Test goal",
             thread_id="thread-003",
         )
-        assert state["max_iterations"] == get_settings().agent.max_iterations
+        assert state["max_iterations"] is None
 
     def test_initial_state_custom_iterations(self) -> None:
-        """initial_state accepts a custom max_iterations value."""
+        """initial_state accepts a custom max_iterations value (an explicit pin)."""
         state = initial_state(
             goal_text="Test goal",
             thread_id="thread-004",
@@ -91,17 +90,15 @@ class TestInitialState:
         )
         assert state["max_iterations"] == 50
 
-    def test_initial_state_none_iterations_seeds_from_settings(self) -> None:
-        """initial_state(max_iterations=None) resolves the cap from settings —
-        the single source of truth, not a hardcoded literal."""
-        from src.config import get_settings
-
+    def test_initial_state_none_iterations_defers_to_complexity(self) -> None:
+        """initial_state(max_iterations=None) leaves the cap unset (B1) so it is
+        derived from goal complexity at routing time, not seeded from settings."""
         state = initial_state(
             goal_text="Test goal",
             thread_id="thread-seed",
             max_iterations=None,
         )
-        assert state["max_iterations"] == get_settings().agent.max_iterations
+        assert state["max_iterations"] is None
 
     def test_initial_state_thread_id(self) -> None:
         """initial_state stores the provided thread_id."""

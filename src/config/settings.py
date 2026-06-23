@@ -782,6 +782,22 @@ class AgentSettings(BaseSettings):
     """Core agent execution limits and safety controls."""
 
     max_iterations: int = 60
+    # Complexity-aware runtime iteration cap (B1). The routers and error handler
+    # terminate a run at ``effective_max_iterations(state)`` (src/graph/
+    # iteration_cap.py), which falls back to the tier below when no explicit cap
+    # is pinned. A TRIVIAL/SIMPLE goal stops loop-hunting early; COMPLEX/CRITICAL
+    # keep full headroom. An explicit per-run cap (CLI ``--max-iterations``, an
+    # eval spec, or the worker schema → ``state["max_iterations"]``) ALWAYS wins.
+    # NOTE: ``max_iterations`` above stays the recursion_limit BASIS (runner.py
+    # computes ``recursion_limit = max(max_iterations*8, 100)`` at graph-build
+    # time, before complexity is classified, so it cannot be complexity-aware).
+    # The @model_validator below guards the invariant
+    # ``max_iterations >= max(max_iterations_complex, max_iterations_critical)``.
+    # Env: MAX_ITERATIONS_TRIVIAL/SIMPLE/COMPLEX/CRITICAL.
+    max_iterations_trivial: int = 12
+    max_iterations_simple: int = 15
+    max_iterations_complex: int = 60
+    max_iterations_critical: int = 60
     # Run caps — single source of truth for tool/sub-agent creation limits.
     # Enforcement sites (tool generator, agent_spawn, structure_analysis) read
     # these fields directly; there are NO module-level MAX_*_PER_RUN constants
@@ -973,6 +989,10 @@ class AgentSettings(BaseSettings):
         "tool_persist_max_attempts",
         "clarifying_max_queries",
         "memory_hot_recall_size",
+        "max_iterations_trivial",
+        "max_iterations_simple",
+        "max_iterations_complex",
+        "max_iterations_critical",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
@@ -980,6 +1000,28 @@ class AgentSettings(BaseSettings):
         if v < 1:
             raise ValueError(f"Must be a positive integer. Got: {v}")
         return v
+
+    @model_validator(mode="after")
+    def validate_iteration_cap_basis(self) -> AgentSettings:
+        """The recursion_limit basis must cover every tier cap (B1 invariant).
+
+        ``runner.py`` computes ``recursion_limit = max(max_iterations*8, 100)``
+        at graph-build time using ``max_iterations``. If a complexity tier cap
+        exceeded it, a run on that tier would hit ``GraphRecursionError`` before
+        its tier cap — silently trapping COMPLEX/CRITICAL runs. Require the
+        basis to be >= the largest tier cap.
+        """
+        tier_max = max(
+            self.max_iterations_complex,
+            self.max_iterations_critical,
+        )
+        if self.max_iterations < tier_max:
+            raise ValueError(
+                f"max_iterations ({self.max_iterations}) must be >= "
+                f"max(max_iterations_complex, max_iterations_critical) "
+                f"({tier_max}) — it is the recursion_limit basis."
+            )
+        return self
 
     @field_validator("clarifying_severity_threshold", "clarifying_hitl_threshold")
     @classmethod

@@ -52,7 +52,14 @@ class AgentState(TypedDict, total=False):
     # ─── Graph Control ──────────────────────────────────────────────────
     phase: Phase
     iteration_count: int
-    max_iterations: int
+    # The runtime iteration cap. ``None`` (no explicit CLI/worker/eval pin) means
+    # "derive from the classified goal complexity at routing time" via
+    # ``effective_max_iterations`` (src/graph/iteration_cap.py) — a TRIVIAL goal
+    # stops early, a COMPLEX goal keeps headroom. An int is an explicit pin that
+    # always wins. Complexity isn't known until classify runs, so this is None at
+    # graph-build time and the recursion_limit basis uses the flat
+    # ``AgentSettings.max_iterations`` instead.
+    max_iterations: int | None
     # Single-shot guard: structure_analysis runs its proactive detection at most
     # once per run, preventing re-seed loops regardless of reducer semantics.
     structure_analysis_done: bool

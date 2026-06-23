@@ -13,6 +13,7 @@ from loguru import logger
 
 from src.config.settings import get_settings
 from src.graph.enums import Confidence, Phase, TaskComplexity
+from src.graph.iteration_cap import effective_max_iterations
 from src.graph.state import AgentState, objective_goal_text
 from src.tools._paths import resolve_existing, results_root, strip_results_prefix
 
@@ -713,7 +714,7 @@ async def _run_correctness_checks(
 
     if settings.eval.eval_enforce and not correctness.passed:
         iteration = state.get("iteration_count", 0)
-        max_iter = state.get("max_iterations", 60)
+        max_iter = effective_max_iterations(state)
         if iteration < max_iter - 1:
             # Surface WHY each check failed so the re-plan is actionable, not a
             # blind retry. battery-04 q4: a {"passed":0,"failed":0} deliverable

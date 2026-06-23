@@ -140,11 +140,15 @@ class TestAgentSettings:
 
     def test_max_iterations_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The iteration cap is env-overridable. Settings read case-insensitively, so a
-        lowercase env var matches the lowercase field name."""
+        lowercase env var matches the lowercase field name.
+
+        The value must satisfy the B1 validator (max_iterations >= max tier cap) so
+        the recursion-limit basis covers every complexity tier — hence 75, not 15.
+        """
         from src.config.settings import AgentSettings
 
-        monkeypatch.setenv("max_iterations", "15")
-        assert AgentSettings(_env_file=None).max_iterations == 15
+        monkeypatch.setenv("max_iterations", "75")
+        assert AgentSettings(_env_file=None).max_iterations == 75
 
     def test_run_caps_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Tool/sub-agent run caps are env-overridable (case-insensitive matching)."""
@@ -168,11 +172,11 @@ class TestAgentSettings:
         """
         from src.config.settings import AgentSettings
 
-        monkeypatch.setenv("MAX_ITERATIONS", "19")
+        monkeypatch.setenv("MAX_ITERATIONS", "75")  # >= tier caps (B1 validator)
         monkeypatch.setenv("MAX_TOOLS_PER_RUN", "2")
         monkeypatch.setenv("MAX_SUB_AGENTS_PER_RUN", "4")
         agent = AgentSettings(_env_file=None)
-        assert agent.max_iterations == 19
+        assert agent.max_iterations == 75
         assert agent.max_tools_per_run == 2
         assert agent.max_sub_agents_per_run == 4
 

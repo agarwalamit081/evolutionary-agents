@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
-from src.config import get_settings
 from src.graph.enums import (
     Confidence,
     GoalStatus,
@@ -27,9 +26,13 @@ def initial_state(
     Args:
         goal_text: The user-provided goal description.
         thread_id: LangGraph thread ID for checkpointing.
-        max_iterations: Maximum graph iterations before forced stop. ``None``
-            resolves to ``AgentSettings.max_iterations`` (the single source of
-            truth), so callers need not hardcode the default.
+        max_iterations: The explicit runtime iteration cap, or ``None`` to defer
+            to the classified goal complexity (``effective_max_iterations`` derives
+            the tier cap at routing time). ``None`` is the desired default for the
+            CLI/worker paths so a TRIVIAL goal caps early and a COMPLEX goal keeps
+            headroom; an eval spec pins an int. NOT collapsed to
+            ``AgentSettings.max_iterations`` here — that value is the recursion-
+            limit BASIS (runner.py), not the runtime cap.
         no_evolution: Skip the ``evolve`` node. Propagated via STATE (read by
             ``route_after_verify``) rather than RunnableConfig, because LangGraph
             passes ``config=None`` to conditional-edge routers in this graph.
@@ -37,8 +40,6 @@ def initial_state(
     Returns:
         AgentState: Initialized state dictionary.
     """
-    if max_iterations is None:
-        max_iterations = get_settings().agent.max_iterations
     return AgentState(
         phase=Phase.CLASSIFY,
         iteration_count=0,
@@ -142,15 +143,19 @@ def validate_state(state: AgentState) -> list[str]:
     if goal and not goal.text.strip():
         violations.append("current_goal.text must not be empty")
 
-    max_iter = state.get("max_iterations", 0)
-    if max_iter <= 0:
-        violations.append("max_iterations must be positive")
+    # max_iterations may be None — "derive from goal complexity at routing
+    # time" (B1). Pre-classify we cannot validate against an unknown cap, so the
+    # check only fires when an explicit pin is present.
+    max_iter = state.get("max_iterations")
+    if max_iter is not None:
+        if max_iter <= 0:
+            violations.append("max_iterations must be positive")
 
-    iter_count = state.get("iteration_count", 0)
-    if iter_count > max_iter:
-        violations.append(
-            f"iteration_count ({iter_count}) exceeds max_iterations ({max_iter})"
-        )
+        iter_count = state.get("iteration_count", 0)
+        if iter_count > max_iter:
+            violations.append(
+                f"iteration_count ({iter_count}) exceeds max_iterations ({max_iter})"
+            )
 
     step_index = state.get("current_step_index", 0)
     plan_steps = state.get("plan_steps", [])

@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from src.eval.models import CheckResult, CorrectnessResult
 from src.eval.store import EvalStore
@@ -55,6 +56,27 @@ class _RaisingCM:
 
     async def __aenter__(self) -> Any:
         raise RuntimeError("connection refused")
+
+    async def __aexit__(self, *_args: Any) -> bool:
+        return False
+
+
+class _StatementCapturingSession:
+    """Async session that records each executed statement and yields no rows.
+
+    Used to assert on the compiled SQL a store method emits (the JSONB columns
+    block a real aiosqlite round-trip), mirroring test_warm_facts.py.
+    """
+
+    def __init__(self) -> None:
+        self.executed: list[Any] = []
+
+    async def execute(self, stmt: Any) -> _FakeResult:
+        self.executed.append(stmt)
+        return _FakeResult([])
+
+    async def __aenter__(self) -> _StatementCapturingSession:
+        return self
 
     async def __aexit__(self, *_args: Any) -> bool:
         return False
@@ -268,3 +290,74 @@ class TestEvalStoreAttemptId:
         with patch("src.db.session.get_session", lambda: _RaisingCM()):
             rows = await EvalStore().query_latest_attempt("anything")
         assert rows == []
+
+
+class TestEvalStoreFetchRows:
+    """``fetch_rows`` emits the right goal/window/order/limit SELECT.
+
+    The eval_results ``evidence`` column is JSONB, which blocks a real aiosqlite
+    round-trip (the SQLite compiler can't render JSONB). Following the
+    test_warm_facts.py convention, the contract is asserted on the compiled
+    statement that actually runs against Postgres — goal_id IN (...), the
+    created_at window, ORDER BY created_at DESC, and LIMIT. Row-shape/resilience
+    is covered by the fake-session tests above; the curve's data shaping is
+    covered by test_curve.py.
+    """
+
+    @pytest.mark.asyncio
+    async def test_filters_by_goal_orders_newest_first_and_limits(self) -> None:
+        session = _StatementCapturingSession()
+        with patch("src.db.session.get_session", lambda: session):
+            await EvalStore().fetch_rows(["battery04_q01", "battery04_q02"], limit=5)
+
+        assert session.executed, "fetch_rows must execute a SELECT"
+        sql = str(
+            session.executed[0].compile(
+                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "FROM eval_results" in sql
+        assert "goal_id IN ('battery04_q01', 'battery04_q02')" in sql  # goal filter
+        assert "ORDER BY eval_results.created_at DESC" in sql  # newest-first
+        assert "LIMIT 5" in sql  # row cap honored
+
+    @pytest.mark.asyncio
+    async def test_window_until_emits_created_at_bound(self) -> None:
+        from datetime import datetime, timezone
+
+        session = _StatementCapturingSession()
+        with patch("src.db.session.get_session", lambda: session):
+            await EvalStore().fetch_rows(
+                ["battery04_q01"],
+                until=datetime(2026, 6, 2, tzinfo=timezone.utc),
+            )
+        sql = str(session.executed[0].compile(dialect=postgresql.dialect()))
+        assert "eval_results.created_at <=" in sql  # window upper bound applied
+
+    @pytest.mark.asyncio
+    async def test_window_since_emits_created_at_bound(self) -> None:
+        from datetime import datetime, timezone
+
+        session = _StatementCapturingSession()
+        with patch("src.db.session.get_session", lambda: session):
+            await EvalStore().fetch_rows(
+                ["battery04_q01"],
+                since=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            )
+        sql = str(session.executed[0].compile(dialect=postgresql.dialect()))
+        assert "eval_results.created_at >=" in sql
+
+    @pytest.mark.asyncio
+    async def test_empty_goal_list_returns_empty_without_query(self) -> None:
+        session = _StatementCapturingSession()
+        with patch("src.db.session.get_session", lambda: session):
+            rows = await EvalStore().fetch_rows([])
+        assert rows == []
+        assert not session.executed  # short-circuit: no SELECT for an empty goal set
+
+    @pytest.mark.asyncio
+    async def test_failure_returns_empty(self) -> None:
+        with patch("src.db.session.get_session", lambda: _RaisingCM()):
+            rows = await EvalStore().fetch_rows(["battery04_q01"])
+        assert rows == []
+

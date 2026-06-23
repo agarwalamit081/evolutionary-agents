@@ -1382,6 +1382,71 @@ class SchedulerSettings(BaseSettings):
     )
 
 
+class CapabilityCurveSettings(BaseSettings):
+    """Battery capability-curve trend + regression→rollback gate (Phase 2 C1).
+
+    The agent's central claim is that it self-improves. The nightly battery
+    (``src/scheduler``) already *collects* per-check correctness scores over
+    time in ``eval_results``; the promotion gate already rolls back a PROMPT
+    mutation whose *single-goal canary* regressed at promotion time. What was
+    missing: a *temporal* regression gate that watches the battery **trend**
+    across nights and reverts a promotion whose benefit did not hold. This
+    settings group drives that analytics + gate layer
+    (``src/eval/curve.py`` + ``src/evolution/curve_gate.py``).
+
+    Regression definition (the conjunction prevents noise from ever firing a
+    rollback): ``current < score_floor`` AND ``(best_prior - current) >=
+    regression_delta`` AND >= ``min_points`` nights observed. Detection is
+    always-on and read-only (cheap); **auto-rollback is opt-in** (default
+    False) matching the codebase's promotion/capabilities default-off
+    convention. When ``auto_rollback`` is off the gate still sets the
+    ``capability_curve_score`` gauge, increments ``capability_curve_regressions_total``,
+    records telemetry, and logs a WARNING — the safety evidence without the
+    risk. ``curve_cron`` defaults to 05:00 UTC (after the 02:00 battery) so the
+    gate reads the just-written night.
+    """
+
+    # Register the nightly curve-gate job at all. Opt-in like the scheduler:
+    # default False so a host run with no env does nothing.
+    gate_enabled: bool = False  # Env: CAPABILITY_CURVE_GATE_ENABLED
+    # 5-field crontab for the gate. Default 05:00 UTC (after the 02:00 battery).
+    cron: str = "0 5 * * *"  # Env: CAPABILITY_CURVE_CURVE_CRON
+    # IANA zone for the gate cron. Env: CAPABILITY_CURVE_TIMEZONE.
+    timezone: str = "UTC"  # Env: CAPABILITY_CURVE_TIMEZONE
+    # Minimum drop (best_prior - current) to call a regression. Env:
+    # CAPABILITY_CURVE_REGRESSION_DELTA. With score_floor this is the AND of
+    # the floor+delta conjunction — a delta-only dip below a held floor is NOT
+    # a regression (the noise guard).
+    regression_delta: float = 0.1  # Env: CAPABILITY_CURVE_REGRESSION_DELTA
+    # Absolute score floor: current must be BELOW this to be a regression at
+    # all (a curve holding above 0.5 is healthy even if it wiggles). Env:
+    # CAPABILITY_CURVE_SCORE_FLOOR.
+    score_floor: float = 0.5  # Env: CAPABILITY_CURVE_SCORE_FLOOR
+    # Only promotions made within this many days are suspect rollback targets
+    # (a regression is most plausibly the most-recent active promotion). Env:
+    # CAPABILITY_CURVE_LOOKBACK_DAYS.
+    lookback_days: int = 30  # Env: CAPABILITY_CURVE_LOOKBACK_DAYS
+    # Minimum nights of battery history before a regression can be declared
+    # (too few points is inconclusive, never a rollback). Env:
+    # CAPABILITY_CURVE_MIN_POINTS.
+    min_points: int = 2  # Env: CAPABILITY_CURVE_MIN_POINTS
+    # When True, a confirmed regression reverts the suspect recent PROMPT
+    # promotion via ``PromotionGate.rollback``. Default False (detect + log +
+    # telemetry only) — the human opts into automatic reversion. Env:
+    # CAPABILITY_CURVE_AUTO_ROLLBACK.
+    auto_rollback: bool = False  # Env: CAPABILITY_CURVE_AUTO_ROLLBACK
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps CAPABILITY_CURVE_* vars to these fields, mirroring the
+        # Scheduler/Worker pattern (a missing prefix silently ignores vars).
+        env_prefix="capability_curve_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 # ─── Root Settings ──────────────────────────────────────────────────
 
 
@@ -1413,6 +1478,7 @@ class Settings(BaseSettings):
     worker: WorkerSettings = WorkerSettings()  # type: ignore[assignment]
     runner: RunnerSettings = RunnerSettings()  # type: ignore[assignment]
     scheduler: SchedulerSettings = SchedulerSettings()  # type: ignore[assignment]
+    capability_curve: CapabilityCurveSettings = CapabilityCurveSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

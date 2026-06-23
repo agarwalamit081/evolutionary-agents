@@ -130,6 +130,22 @@ TOOL_CALL_DURATION = _histogram(
     ["tool_name"],
 )
 
+# ─── Capability Curve Metrics ───────────────────────────────────────
+# The nightly battery's correctness score over time, plus the regression gate.
+# CAPABILITY_CURVE_SCORE is the latest nightly battery mean (set every gate
+# run); CAPABILITY_CURVE_REGRESSIONS counts detected regressions. Both are
+# observability-only — the gate's detect step is read-only and never raises.
+
+CAPABILITY_CURVE_SCORE = _gauge(
+    "capability_curve_score",
+    "Latest nightly battery mean correctness score",
+)
+
+CAPABILITY_CURVE_REGRESSIONS = _counter(
+    "capability_curve_regressions_total",
+    "Battery-curve regressions detected (floor + delta + min-points)",
+)
+
 
 def record_llm_request(
     model: str,

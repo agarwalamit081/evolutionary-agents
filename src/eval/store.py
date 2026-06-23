@@ -9,6 +9,7 @@ cycle. Writes are gated behind ``EvalSettings.eval_store_enabled``.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -221,6 +222,56 @@ class EvalStore:
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "EvalStore query_latest_attempt failed for run={}: {}", run_id, exc
+            )
+            return []
+
+    async def fetch_rows(
+        self,
+        goal_ids: list[str],
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        """Goal-scoped rows in a ``created_at`` window, newest-first (empty on failure).
+
+        A single ``goal_id IN (...)`` fetch for the capability-curve analytics
+        layer (``src/eval/curve.py``): it pulls every check row for the given
+        goals within an optional [since, until] window, ordered newest-first so
+        the curve's "latest attempt per date" grouping is cheap. The curve does
+        the aggregation (mean per date / per goal); this is the thin fetcher.
+
+        Args:
+            goal_ids: Goal ids to include (e.g. the 9 ``BATTERY04_GOALS`` spec ids).
+            since: Optional inclusive lower bound on ``created_at``.
+            until: Optional inclusive upper bound on ``created_at``.
+            limit: Row cap (default 2000; the 9-spec battery writes ~tens/night).
+
+        Returns:
+            List of ``_row_to_dict`` rows (``created_at`` as an ISO string), or
+            ``[]`` if the query fails (observability-only, never raises).
+        """
+        from src.db.session import get_session
+
+        if not goal_ids:
+            return []
+        try:
+            async with get_session() as session:
+                stmt = (
+                    select(EvalResult)
+                    .where(EvalResult.goal_id.in_(goal_ids))
+                    .order_by(EvalResult.created_at.desc())
+                    .limit(limit)
+                )
+                if since is not None:
+                    stmt = stmt.where(EvalResult.created_at >= since)
+                if until is not None:
+                    stmt = stmt.where(EvalResult.created_at <= until)
+                rows = (await session.execute(stmt)).scalars().all()
+                return [_row_to_dict(r) for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "EvalStore fetch_rows failed for goals={}: {}", goal_ids, exc
             )
             return []
 

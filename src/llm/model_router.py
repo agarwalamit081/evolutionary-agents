@@ -9,6 +9,28 @@ from src.config.settings import Settings
 from src.graph.enums import TaskComplexity
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TEMPORARY — REVERT BY 2026-07-01 ────────────────────────────────────────────
+# The Anthropic API key is under an account usage cap (blocked until 2026-07-01):
+# every anthropic model call returns a 400/quota error and burns the fallback
+# chain — the circuit breaker does NOT trip on 400/quota (only on transient
+# 429/5xx/timeout), so the dead attempt repeats once per chain member. To
+# eliminate the wasted calls ENTIRELY, anthropic is excluded from ALL routing
+# until the cap resets, via two guards that both read this one set:
+#   • ``_has_provider_key("anthropic")`` → False: drops anthropic from the
+#     router's primary/chain/diverse selection AND from the gateway's chain
+#     pre-filter (gateway.py ``_execute_with_fallback`` filters via this method).
+#   • seeded into ``_exclude_providers``: covers the router's absolute-fallback
+#     loop (route() :136-139) — the one path that consults ``excluded``, not keys.
+# Anthropic ModelSpecs + FALLBACK_CHAINS entries are LEFT INTACT so reverting is
+# trivial (delete this constant + the two guards + restore DEFAULT_COMPLEXITY_TIER)
+# and the cross-provider fallback-invariant (FALLBACK_CHAINS still names anthropic)
+# is preserved for the deferred test (#311). 2026-07-01 is the documented Anthropic
+# cap-reset date, so this aligns 1:1 with when the funded key recovers.
+# ─────────────────────────────────────────────────────────────────────────────
+_TEMPORARY_DISABLED_PROVIDERS: frozenset[str] = frozenset({"anthropic"})
+
+
 # Mapping from TaskComplexity to model tier and fallback chain key — the
 # DEFAULT used when no per-node override applies (see NODE_TIER_MAP) and by
 # callers that pass no node identity.
@@ -66,7 +88,12 @@ NODE_TIER_MAP: dict[tuple[TaskComplexity, str], tuple[ModelTier, str]] = {
 # added without a tier-map entry). Previously this tuple was duplicated as an
 # inline ``.get()`` default at both routing call sites (route / route_diverse),
 # so the two could silently drift. Centralized here as the single source.
-DEFAULT_COMPLEXITY_TIER: tuple[ModelTier, str] = (ModelTier.CHEAP, "claude-haiku-4-5-20251001")
+# TEMPORARY (REVERT BY 2026-07-01): primary swapped off claude-haiku-4-5-20251001
+# (Anthropic key quota-capped until 2026-07-01) to its registered CHEAP-tier peer
+# deepseek-v4-flash — same swap rationale as SIMPLE (see comment above). Restore
+# claude-haiku-4-5-20251001 when the cap resets.
+# DEFAULT_COMPLEXITY_TIER: tuple[ModelTier, str] = (ModelTier.CHEAP, "claude-haiku-4-5-20251001")
+DEFAULT_COMPLEXITY_TIER: tuple[ModelTier, str] = (ModelTier.CHEAP, "deepseek-v4-flash")
 
 
 class ModelRouter:
@@ -74,7 +101,11 @@ class ModelRouter:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._exclude_providers: set[str] = set()
+        # TEMPORARY (REVERT BY 2026-07-01): seed anthropic into the excluded set
+        # so the router's absolute-fallback loop (route() :136-139) — the one
+        # path that consults `excluded`, not _has_provider_key — also skips it.
+        # See _TEMPORARY_DISABLED_PROVIDERS.
+        self._exclude_providers: set[str] = set(_TEMPORARY_DISABLED_PROVIDERS)
 
     def route(
         self,
@@ -315,6 +346,12 @@ class ModelRouter:
 
     def _has_provider_key(self, provider: str) -> bool:
         """Check if an API key is available for a provider."""
+        # TEMPORARY (REVERT BY 2026-07-01): report anthropic as key-less so it
+        # is dropped from router primary/chain/diverse selection AND from the
+        # gateway's fallback-chain pre-filter (gateway.py _execute_with_fallback
+        # filters via this method). See _TEMPORARY_DISABLED_PROVIDERS.
+        if provider in _TEMPORARY_DISABLED_PROVIDERS:
+            return False
         try:
             return self._settings.llm.has_provider_key(provider)
         except Exception:

@@ -64,6 +64,19 @@ class AgentState(TypedDict, total=False):
     # once per run, preventing re-seed loops regardless of reducer semantics.
     structure_analysis_done: bool
 
+    # ─── Convergence early-exit (B3) ────────────────────────────────────
+    # When ``verify`` emits an identical output fingerprint across N
+    # consecutive passes (``convergence_stable_threshold``), the run is
+    # "stably stuck" — repeating the same result with no forward progress.
+    # With the plan exhausted, ``route_after_verify`` terminates via
+    # ``store_memory`` rather than looping verify→plan→execute to the
+    # iteration hard-cap. ``last_verify_fingerprint`` is the sha256 of
+    # final_output + sorted(goal_deliverable_paths) + len(completed_steps);
+    # equal to the prior pass → increment, else reset to 0. Both overwrite
+    # (no reducer): verify computes the full new value each pass.
+    consecutive_stable_verifies: int
+    last_verify_fingerprint: str | None
+
     # ─── Goal & Planning ────────────────────────────────────────────────
     current_goal: Goal
     # Immutable objective anchor (battery-04 #254 structural backstop): the

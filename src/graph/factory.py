@@ -77,6 +77,10 @@ def initial_state(
         budget_remaining=0.0,
         final_output="",
         is_complete=False,
+        # Convergence early-exit (B3): seeded empty so the first verify pass
+        # always resets consecutive_stable_verifies to 0 (no prior fingerprint).
+        consecutive_stable_verifies=0,
+        last_verify_fingerprint=None,
         errors=[],
         fold_history=[],
         last_fold_iteration=0,

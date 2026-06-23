@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import re
@@ -234,9 +235,10 @@ async def verify_node(
             # is registered for this run, and the verdict is already complete —
             # so a normal goal (no spec) and incomplete runs are untouched, and
             # the LLM-judge adds at most ~one call per completion attempt.
-            return await _run_correctness_checks(result, state, deliverable_paths, gateway)
+            result = await _run_correctness_checks(result, state, deliverable_paths, gateway)
+            return _stamp_convergence_fingerprint(result, state, goal_paths, completed_steps)
 
-    return _heuristic_verify(
+    result = _heuristic_verify(
         state,
         goal_text,
         reflection,
@@ -247,6 +249,7 @@ async def verify_node(
         confidence,
         deliverable_problems,
     )
+    return _stamp_convergence_fingerprint(result, state, goal_paths, completed_steps)
 
 
 def _heuristic_verify(
@@ -311,6 +314,47 @@ def _heuristic_verify(
         state_update["errors"] = [
             f"verify: deliverable not present — {p}" for p in deliverable_problems[:5]
         ]
+    return state_update
+
+
+def _stamp_convergence_fingerprint(
+    state_update: dict[str, Any],
+    state: AgentState,
+    goal_paths: list[str],
+    completed_steps: list[Any],
+) -> dict[str, Any]:
+    """Append convergence-early-exit fields to a verify state update (B3).
+
+    Computes a fingerprint of this verify pass's output — ``final_output`` +
+    sorted goal-deliverable paths + completed-step count — and tracks how many
+    consecutive passes have produced the *same* fingerprint. ``final_output``
+    alone is insufficient: a stably-stuck partial can be empty across passes
+    while the goal paths / step count also freeze (the real plateau signal).
+    Equal to the prior pass's fingerprint → increment
+    ``consecutive_stable_verifies``; else reset to 0.
+
+    ``route_after_verify`` reads the counter and, once it reaches
+    ``convergence_stable_threshold`` with the plan exhausted, accepts the
+    partial result via ``store_memory`` instead of looping verify→plan→execute
+    to the iteration hard-cap.
+    """
+    final_output = str(state_update.get("final_output") or "")
+    fingerprint_input = (
+        final_output
+        + "".join(sorted(goal_paths or []))
+        + str(len(completed_steps))
+    )
+    fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
+    prior_fingerprint = state.get("last_verify_fingerprint")
+    prior_count = int(state.get("consecutive_stable_verifies", 0) or 0)
+    stable_count = prior_count + 1 if fingerprint == prior_fingerprint else 0
+    state_update["last_verify_fingerprint"] = fingerprint
+    state_update["consecutive_stable_verifies"] = stable_count
+    if stable_count >= 1:
+        logger.debug(
+            f"verify convergence: output fingerprint unchanged for "
+            f"{stable_count} consecutive pass(es)"
+        )
     return state_update
 
 

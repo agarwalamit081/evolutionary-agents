@@ -356,10 +356,33 @@ def route_after_verify(state: AgentState) -> str:
         )
         return "store_memory"
 
+    has_remaining_steps = bool(plan_steps) and step_index < len(plan_steps)
+
+    # Convergence early-exit (B3): verify has produced an identical output
+    # fingerprint across ``convergence_stable_threshold`` consecutive passes
+    # AND the plan is exhausted — the run is "stably stuck", repeating the
+    # same partial result with no forward progress. Accept it via
+    # ``store_memory`` instead of looping verify→plan→execute to the hard-cap.
+    # Mirrors the iteration cap above: accept partial, do NOT set is_complete
+    # (a stable-but-unchanged partial is stuck, not done — declaring success
+    # on a missing deliverable violates the verify-completion discipline).
+    # Only when the plan is exhausted: with steps remaining the run may still
+    # make progress, so it falls through to retry execute below.
+    stable_count = int(state.get("consecutive_stable_verifies", 0) or 0)
+    if (
+        not has_remaining_steps
+        and stable_count >= get_settings().agent.convergence_stable_threshold
+    ):
+        logger.info(
+            f"Convergence early-exit: verify output unchanged for "
+            f"{stable_count} consecutive pass(es) with plan exhausted; "
+            f"accepting partial result"
+        )
+        return "store_memory"
+
     # Partial verification with no steps left to execute — re-plan so the
     # agent can make progress addressing the identified gaps instead of
     # spinning on an exhausted plan. (verify → plan edge is wired in the graph.)
-    has_remaining_steps = bool(plan_steps) and step_index < len(plan_steps)
     if not has_remaining_steps:
         logger.info("Verification partial with no remaining steps, re-planning")
         return "plan"

@@ -320,6 +320,76 @@ class TestRouteAfterVerify:
         result = route_after_verify(sample_state)
         assert result == "plan"
 
+    def test_route_after_verify_terminates_on_stable_fingerprint(self, sample_state: dict[str, Any]) -> None:
+        """Convergence early-exit (B3): when verify emits an identical output
+        fingerprint across ``convergence_stable_threshold`` consecutive passes AND
+        the plan is exhausted (well under the hard cap), accept the partial
+        result via ``store_memory`` instead of looping verify→plan→execute to the
+        cap. This must fire BEFORE the budget-exhausted branch — iteration_count
+        is kept below the cap to prove the terminator is the stable fingerprint,
+        not the iteration budget."""
+        threshold = get_settings().agent.convergence_stable_threshold
+        sample_state["is_complete"] = False
+        sample_state["confidence"] = Confidence.MEDIUM
+        sample_state["consecutive_stable_verifies"] = threshold
+        sample_state["last_verify_fingerprint"] = "abc123"
+        # Plan exhausted: all steps consumed (step_index == len(plan_steps)).
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="step 1", status="completed", result="ok"),
+            PlanStep(id="s2", description="step 2", status="completed", result="ok"),
+        ]
+        sample_state["current_step_index"] = 2
+        # Well below the cap so the budget branch (also store_memory) cannot mask
+        # the convergence terminator.
+        sample_state["iteration_count"] = 0
+        sample_state["max_iterations"] = 10
+        result = route_after_verify(sample_state)
+        assert result == "store_memory"
+
+    def test_route_after_verify_stable_fingerprint_continues_with_steps_remaining(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """B3 guard: a stable fingerprint must NOT terminate when steps remain —
+        the run may still make forward progress, so it continues (retries
+        execute). The convergence branch only fires with the plan exhausted."""
+        threshold = get_settings().agent.convergence_stable_threshold
+        sample_state["is_complete"] = False
+        sample_state["confidence"] = Confidence.HIGH
+        sample_state["consecutive_stable_verifies"] = threshold
+        sample_state["last_verify_fingerprint"] = "abc123"
+        # Steps remain: step_index < len(plan_steps).
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="step 1", status="completed", result="ok"),
+            PlanStep(id="s2", description="step 2", status="pending"),
+        ]
+        sample_state["current_step_index"] = 1
+        sample_state["iteration_count"] = 0
+        sample_state["max_iterations"] = 10
+        result = route_after_verify(sample_state)
+        assert result != "store_memory"
+        assert result == "execute"
+
+    def test_route_after_verify_below_threshold_falls_through_to_plan(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """B3 threshold guard: below ``convergence_stable_threshold`` consecutive
+        stable passes, no early termination — a single transient repeat is
+        normal. With the plan exhausted, it falls through to the re-plan branch
+        (giving the agent a chance to address gaps) rather than accepting the
+        partial result."""
+        threshold = get_settings().agent.convergence_stable_threshold
+        sample_state["is_complete"] = False
+        sample_state["confidence"] = Confidence.MEDIUM
+        # Strictly below the threshold.
+        sample_state["consecutive_stable_verifies"] = max(threshold - 1, 0)
+        sample_state["last_verify_fingerprint"] = "abc123"
+        sample_state["plan_steps"] = []
+        sample_state["current_step_index"] = 0
+        sample_state["iteration_count"] = 0
+        sample_state["max_iterations"] = 10
+        result = route_after_verify(sample_state)
+        assert result == "plan"
+
 
 class TestRouteAfterError:
     """Tests for route_after_error routing function."""

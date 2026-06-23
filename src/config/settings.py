@@ -798,6 +798,15 @@ class AgentSettings(BaseSettings):
     max_iterations_simple: int = 15
     max_iterations_complex: int = 60
     max_iterations_critical: int = 60
+    # Convergence early-exit (B3). When ``verify`` emits an identical output
+    # fingerprint across this many consecutive passes AND the plan is
+    # exhausted, ``route_after_verify`` accepts the partial result via
+    # ``store_memory`` instead of looping to the iteration hard-cap. The run
+    # is "stably stuck" — repeating the same result with no forward progress.
+    # Default 3: a transient repeat on one verify is common (re-execution of
+    # an unchanged step); 3 consecutive unchanged passes is a real plateau.
+    # Env: CONVERGENCE_STABLE_THRESHOLD.
+    convergence_stable_threshold: int = 3
     # Run caps — single source of truth for tool/sub-agent creation limits.
     # Enforcement sites (tool generator, agent_spawn, structure_analysis) read
     # these fields directly; there are NO module-level MAX_*_PER_RUN constants
@@ -993,6 +1002,7 @@ class AgentSettings(BaseSettings):
         "max_iterations_simple",
         "max_iterations_complex",
         "max_iterations_critical",
+        "convergence_stable_threshold",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:

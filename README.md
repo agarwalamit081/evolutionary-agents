@@ -130,6 +130,7 @@ START -> classify -> plan -> retrieve_memory -> execute <-> reflect
 - **Per-Run Results Subfolders** — writes organize under `results/<run-id>/` (reads fall back to the flat root for backward recall); `--results-dir` / `--clean` CLI flags
 - **Evolution→Live Promotion Gate** — a PROMPT mutation that passes post-deploy verify promotes to a versioned, canary-gated pointer (auto-rollback on regression); opt-in via `EVOLUTION_PROMOTE_TO_LIVE`. Exercised live: a real run deployed a PROMPT mutation, the GoldenCanary passed, and the gate wrote the live pointer (`.turing/evolved/prompts/current.json`) for the prompt builder to splice in tagged `[evolved]`
 - **Centralized Config** — every resilience/circuit-breaker/rate-limiter/tool-limit/concurrency knob is a `pydantic-settings` env var (no hardcoded timeouts/caps in source)
+- **Run-Control Safety** — four guards bound every run so a deployed worker can never churn forever: a capability-cap gap-loop break (`CAP_LOOP_BREAK_THRESHOLD`, **on by default** — stops the spawn↔create churn once caps saturate), an opt-in wall-clock timeout (`WORKER_RUN_TIMEOUT_S` → resumable), an opt-in budget hard-stop (`BUDGET_HARD_STOP` — raises instead of silently downgrading onto a cheaper/free-tier provider and fabricating under degradation), and a graceful cancel endpoint (`POST /runs/{id}/cancel`). Exhausted / cancelled / timed-out runs land in terminal `BUDGET_EXHAUSTED` / `CANCELLED` / `TIMEOUT` statuses (acked, not redelivered) and resume from their last checkpoint via `--resume`
 
 ---
 
@@ -474,7 +475,6 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | `REASONING_LLM_PROVIDER` | `anthropic` | Reasoning model provider |
 | `REASONING_LLM_MODEL` | `claude-sonnet-4-6` | Reasoning model for complex tasks |
 | `DAILY_TOKEN_BUDGET` | `500000` | Daily token budget |
-| `PER_TASK_TOKEN_LIMIT` | `100000` | Per-task token limit |
 | `MAX_ITERATIONS` | `60` | Graph-build recursion-limit basis (`recursion_limit = max(max_iterations*8, 100)`); must be ≥ the largest tier cap below (validated at startup) |
 | `MAX_ITERATIONS_TRIVIAL` | `12` | Complexity-aware runtime cap — a TRIVIAL goal stops loop-hunting early. Only applies when no explicit cap is pinned (no `--max-iterations` / worker job / eval spec); an explicit cap always wins |
 | `MAX_ITERATIONS_SIMPLE` | `15` | Runtime cap for a SIMPLE goal (default when complexity is unset) |
@@ -505,6 +505,13 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | `CAPABILITY_CURVE_LOOKBACK_DAYS` | `30` | Only PROMPT promotions promoted within this many days are rollback suspects |
 | `CAPABILITY_CURVE_MIN_POINTS` | `2` | Fewer nights than this is INCONCLUSIVE (no verdict, no rollback) |
 | `CAPABILITY_CURVE_AUTO_ROLLBACK` | `false` | On regression, revert a recent suspect PROMPT promotion via `PromotionGate.rollback` (opt-in; off = alert only) |
+| `WORKER_RUN_TIMEOUT_S` | `0` (off) | Run-level wall-clock timeout (seconds); on expiry the run is marked `TIMEOUT` + acked (terminal, resumable via `--resume`). Bounds non-terminating cap-saturation loops. A per-run override is `POST /run {run_timeout_s}` |
+| `BUDGET_HARD_STOP` | `false` | On per-run token-cap exhaustion, RAISE `BudgetExhaustedError` (→ `BUDGET_EXHAUSTED`, resumable) instead of silently downgrading onto a cheaper/free-tier provider. Off = current downgrade behavior |
+| `PER_TASK_TOKEN_LIMIT` | `200000` | Per-run cumulative token cap (raised 100K→200K so a large COMPLEX run converges before downgrade) |
+| `CAP_LOOP_BREAK_THRESHOLD` | `3` | After this many CONSECUTIVE spawn/create rounds produce no new capability (caps saturated), the routers stop re-routing into spawn/create and route to plan/verify (forces convergence). On by default — resets to 0 on any real progress |
+| `GOVERNANCE_PRUNE_ENABLED` | `false` | Register a periodic capability-governance prune job on the scheduler — re-runs `consolidate.py` retire/redundancy + the tool cap-enforce so a long-lived worker frees cap headroom between restarts |
+| `GOVERNANCE_PRUNE_CRON` | `0 4 * * *` | 5-field crontab for the prune (default 04:00 UTC, clear of the 05:00 curve-gate + 02:00 battery) |
+| `GOVERNANCE_PRUNE_TIMEZONE` | `UTC` | IANA zone for the prune cron |
 
 ---
 
@@ -515,6 +522,8 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 **Resolved — per-query log sink leak (#313, commit `30b5cf6`, local-only).** The "post-success non-termination + goal drift" once attributed to this run was a **misdiagnosis**: the run actually **succeeded and terminated correctly** on its objective (evolution fired ~03:05; the immutable `submitted_goal` anchor kept `verify` on the vector-db objective throughout). The symptom — unrelated q01 `Goal:` lines appearing in the showcase log — was caused by `add_query_log_sink` adding a process-global loguru sink and discarding the returned handler id with no teardown, so the lingering sink captured the *next* run's logs (a separate `bench-battery04_q01-*` benchmark merged into the showcase log). **Fix:** `add_query_log_sink` now returns the handler id and `remove_query_log_sink` (None-safe) tears it down in `execute_run`'s `finally` block and in `_run_single_query`. Short/converging runs always terminated normally.
 
 **Anthropic temporarily disabled** from routing (account usage cap; revert by 2026-07-01) — see the note under *Provider Support* above.
+
+**Run-control hardening — known caveat (budget hard-stop resume).** When `BUDGET_HARD_STOP=true` and a run exhausts its per-run token cap, the gateway raises `BudgetExhaustedError` and the worker marks the run `BUDGET_EXHAUSTED` (acked, terminal, checkpoint persisted). The run is resumable via `--resume <run-id>`, BUT token usage is cumulative across the run_id, so a resumed run re-trips the cap immediately — a resume-window delta (baseline the spent count at resume) is a deferred follow-up. Until then, prefer re-issuing the goal rather than resuming a budget-exhausted run.
 
 ---
 

@@ -1,0 +1,160 @@
+"""Periodic capability-governance prune runner (battery-04 q09 fix C).
+
+Governance already runs at worker-boot load time — ``ToolPersister.load_active_tools``
+and ``SubAgentPersister.load_active_agents`` run ``retire_redundant`` → cumulative-cap
+enforce → ``retire_underperforming`` when ``settings`` is threaded. But a long-lived
+worker accumulates the active population ACROSS runs and never prunes between
+restarts. q09 saturated its caps (25/25 tools, 60/60 sub-agents) mid-life and could
+then never create a needed capability, looping spawn↔create with no progress until a
+manual ``docker restart``.
+
+This runner is the missing periodic prune: it re-runs the existing retire/redundancy
+passes (``consolidate_all``, ``dry_run=False``) AND the tool cumulative-cap enforcement
+(``_retire_excess_tools``) on a schedule — lowering active counts to free cap headroom
+WITHOUT raising the caps themselves. ``run`` never raises (observability-only, like
+``CostTracker`` / ``CurveRegressionGate``) so a DB hiccup can never abort the scheduler.
+
+Why cap-enforce is needed at all: ``consolidate_all`` retires only REDUNDANT duplicates
+(cosine >= threshold) plus chronic underperformers — but q09's 25 tools were DISTINCT
+and mostly succeeding, so consolidation alone retired nothing; only the cumulative-cap
+enforce (retire oldest over the cap) freed headroom.
+
+Sub-agent cumulative-cap enforcement (``SubAgentRegistry.enforce_caps``) scores the
+in-memory registry, so it is inherently load-time; this periodic prune handles the
+tool cap directly + redundancy/performance for both tools and sub-agents, and a worker
+restart reapplies the full sub-agent registry scoring. Reuses ``AgentSettings`` retire
+knobs — no new retirement thresholds here.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Awaitable, Callable
+
+from loguru import logger
+
+from src.config.settings import AgentSettings, get_settings
+from src.governance.consolidate import consolidate_all
+
+# The cap-enforce method on ToolPersister (retire oldest active tools over the cap).
+# ``Callable[[int], Awaitable[int]]``: takes max_active, returns the count retired.
+ToolCapEnforcer = Callable[[int], Awaitable[int]]
+
+
+class GovernancePruner:
+    """Re-run retire/redundancy + the tool cumulative-cap enforce to free headroom.
+
+    Mirrors the load-time governance sequence but standalone (no registry load), so
+    a long-lived worker can debloat between restarts. Reuses ``AgentSettings`` retire
+    knobs (``capability_redundancy_threshold`` / ``retire_min_runs`` /
+    ``retire_success_floor`` / ``retire_empty_output_floor`` / ``max_active_tools``).
+    """
+
+    def __init__(
+        self,
+        settings: AgentSettings | None = None,
+        *,
+        consolidate: Callable[..., Awaitable[Any]] | None = None,
+        tool_cap_enforcer: ToolCapEnforcer | None = None,
+    ) -> None:
+        s = settings or get_settings().agent
+        self._threshold = s.capability_redundancy_threshold
+        self._min_runs = s.retire_min_runs
+        self._success_floor = s.retire_success_floor
+        self._empty_output_floor = s.retire_empty_output_floor
+        self._max_active_tools = s.max_active_tools
+        # Injectable for tests (mirrors CurveRegressionGate.telemetry). Defaults
+        # resolve the real deps lazily inside run() so importing this module needs
+        # no DB — and so a unit test never opens a session.
+        self._consolidate = consolidate
+        self._tool_cap_enforcer = tool_cap_enforcer
+
+    async def run(self) -> dict[str, Any]:
+        """Prune redundant + underperforming capabilities and enforce the tool cap.
+
+        Never raises — a DB error is logged at WARNING and reported, not propagated,
+        so the scheduler survives a governance hiccup (observability-only).
+        """
+        try:
+            report = await self._consolidate_or_default(
+                threshold=self._threshold,
+                dry_run=False,
+                min_runs=self._min_runs,
+                success_floor=self._success_floor,
+                empty_output_floor=self._empty_output_floor,
+            )
+            tool_excess = await self._enforce_tool_cap()
+
+            redundant_tools = len(report.tools)
+            redundant_agents = len(report.agents)
+            underperformers = len(report.performance_retired)
+            total = redundant_tools + redundant_agents + underperformers + tool_excess
+            logger.info(
+                "Governance prune complete: freed {} capability slot(s) "
+                "(redundant tools={} agents={} underperformers={} tool-cap-excess={})",
+                total,
+                redundant_tools,
+                redundant_agents,
+                underperformers,
+                tool_excess,
+            )
+            return {
+                "pruned": True,
+                "total_freed": total,
+                "redundant_tools": redundant_tools,
+                "redundant_agents": redundant_agents,
+                "underperformers": underperformers,
+                "tool_cap_excess": tool_excess,
+            }
+        except Exception as exc:  # noqa: BLE001 — never abort the scheduler
+            logger.warning("Governance prune failed (observability-only): {}", exc)
+            return {"pruned": False, "error": str(exc)}
+
+    async def _consolidate_or_default(self, **kwargs: Any) -> Any:
+        """Run the consolidate pass — injected fn (tests) or the real consolidate_all."""
+        fn = self._consolidate or consolidate_all
+        return await fn(**kwargs)
+
+    async def _enforce_tool_cap(self) -> int:
+        """Retire oldest active tools over ``max_active_tools``; returns count freed.
+
+        ``ToolPersister._retire_excess_tools`` is the same persisted cap-enforce the
+        load path uses (``load_active_tools``); accessed with the established
+        ``# noqa: SLF001`` convention consolidate.py already uses for persister
+        privates. Injectable for tests so the unit never opens a session.
+        """
+        enforcer = self._tool_cap_enforcer
+        if enforcer is None:
+            from src.tools.dynamic.persister import ToolPersister  # noqa: PLC0415
+
+            p = ToolPersister()
+            enforcer = p._retire_excess_tools  # noqa: SLF001 — mirrors consolidate.py
+        return int(await enforcer(self._max_active_tools) or 0)
+
+
+def add_governance_prune_job(
+    scheduler: Any,
+    pruner: GovernancePruner,
+    settings_s: Any,
+) -> None:
+    """Register the periodic ``turing-governance-prune`` job on ``scheduler``.
+
+    apscheduler is imported LAZILY (inside this function) so importing this module
+    never requires the dep — mirroring ``add_curve_gate_job`` / ``make_battery_scheduler``.
+    The job fires the pruner on ``settings_s.cron`` (default 04:00 UTC). Same
+    discipline as the battery + curve-gate jobs: ``max_instances=1, coalesce=True,
+    misfire_grace_time=3600`` so a missed fire (e.g. a brief scheduler outage) is
+    coalesced into one prune, never piled up.
+    """
+    from apscheduler.triggers.cron import CronTrigger  # noqa: PLC0415
+
+    async def _fire() -> None:
+        await pruner.run()
+
+    scheduler.add_job(
+        _fire,
+        CronTrigger.from_crontab(settings_s.cron, timezone=settings_s.timezone),
+        id="turing-governance-prune",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )

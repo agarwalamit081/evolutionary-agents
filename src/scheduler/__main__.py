@@ -90,6 +90,25 @@ async def _run() -> int:
             f"tz={curve_settings.timezone} auto_rollback={curve_settings.auto_rollback}"
         )
 
+    # battery-04 q09 fix C: periodic capability-governance prune. Re-runs
+    # consolidate.py retire/redundancy + the tool cumulative-cap enforce on
+    # GOVERNANCE_PRUNE_CRON so a long-lived worker frees cap headroom BETWEEN
+    # restarts (q09 saturated 25/25 tools mid-life and could never create more).
+    # Opt-in (GOVERNANCE_PRUNE_ENABLED, default off). Default 04:00 UTC — a daily
+    # debloat, well clear of the 05:00 curve-gate and the 02:00 battery.
+    prune_settings = settings.governance_prune
+    if prune_settings.enabled:
+        from src.governance.prune import (  # noqa: PLC0415
+            GovernancePruner,
+            add_governance_prune_job,
+        )
+
+        add_governance_prune_job(scheduler, GovernancePruner(), prune_settings)
+        logger.info(
+            f"Governance-prune job registered — cron={prune_settings.cron!r} "
+            f"tz={prune_settings.timezone}"
+        )
+
     stop_event = asyncio.Event()
 
     def _request_stop(*_: object) -> None:

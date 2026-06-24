@@ -649,10 +649,29 @@ class BudgetSettings(BaseSettings):
     """Token budget and cost control configuration."""
 
     daily_token_budget: int = 500000
-    per_task_token_limit: int = 100000
+    # Per-run token cap (cumulative across the run_id — ``CostTracker`` sums
+    # ``cost_ledger.total_tokens``). Raised 100K→200K: a legitimately-large
+    # COMPLEX run (battery q07/q09-style multi-deliverable) routinely exceeds
+    # 100K of real work before converging, and the OLD 100K default pushed
+    # healthy runs into budget-downgrade prematurely. The downside-on-exhaust
+    # path (``gateway.py``) still engages at the cap; ``budget_hard_stop``
+    # below is the opt-in HARD-stop alternative. Env: PER_TASK_TOKEN_LIMIT.
+    per_task_token_limit: int = 200000
     max_cost_usd: float = 10.0
     budget_warn_threshold: float = 0.70
     budget_critical_threshold: float = 0.90
+    # Opt-in budget HARD-stop (battery-04 q09 fix D). Default OFF: when the
+    # per-run token cap is reached the gateway downgrades to a cheaper fallback
+    # (current behavior — a cheaper model almost always exists). When ON, the
+    # gateway instead RAISES ``BudgetExhaustedError`` so the run stops cleanly:
+    # the worker marks ``BUDGET_EXHAUSTED`` (resumable — the checkpoint
+    # persists, so ``main.py --resume <run_id>`` picks up later). This prevents
+    # the failure mode where downgrade cascaded onto a free-tier provider
+    # (429s) and the degraded run FABRICATED a deliverable. KNOWN LIMITATION:
+    # ``get_run_token_usage`` is cumulative, so a resumed run re-trips the cap
+    # immediately — a resume-window delta (baseline the spent count at resume)
+    # is a deferred follow-up. Env: BUDGET_HARD_STOP.
+    budget_hard_stop: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -807,6 +826,20 @@ class AgentSettings(BaseSettings):
     # an unchanged step); 3 consecutive unchanged passes is a real plateau.
     # Env: CONVERGENCE_STABLE_THRESHOLD.
     convergence_stable_threshold: int = 3
+    # Capability-cap gap-loop break (battery-04 q09 fix B). When the active
+    # tool/sub-agent population is at its cumulative cap (max_active_tools /
+    # max_active_sub_agents), ``agent_spawn`` converts agent-gaps→tool-gaps and
+    # ``tool_create`` skips registration — so a run whose plan still calls for
+    # missing capabilities ping-pongs spawn↔create with NO forward progress
+    # until the iteration hard-cap (the q09 non-terminating loop). The routers
+    # count CONSECUTIVE cap-blocks (a spawn/create round that produced no new
+    # capability); once this many accumulate, they stop re-routing into
+    # spawn/create and route to plan/verify instead, forcing convergence. Reset
+    # to 0 on any real progress (a capability IS created). Default 3 mirrors
+    # convergence_stable_threshold (a transient single block is common; 3 is a
+    # real stall). ON by default — this is a correctness fix, not opt-in.
+    # Env: CAP_LOOP_BREAK_THRESHOLD.
+    cap_loop_break_threshold: int = 3
     # Run caps — single source of truth for tool/sub-agent creation limits.
     # Enforcement sites (tool generator, agent_spawn, structure_analysis) read
     # these fields directly; there are NO module-level MAX_*_PER_RUN constants
@@ -1003,6 +1036,7 @@ class AgentSettings(BaseSettings):
         "max_iterations_complex",
         "max_iterations_critical",
         "convergence_stable_threshold",
+        "cap_loop_break_threshold",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:
@@ -1309,6 +1343,18 @@ class WorkerSettings(BaseSettings):
     # Env: WORKER_LOCK_TTL_S.
     lock_ttl_s: int = 120  # Env: WORKER_LOCK_TTL_S
 
+    # Run-level wall-clock timeout (battery-04 q09 fix A). Default 0 = OFF
+    # (current behavior — a run loops until its iteration cap or convergence).
+    # When > 0, the worker wraps ``execute_run`` in ``asyncio.timeout(...)``:
+    # on expiry the run is marked ``TIMEOUT`` + XACKed (terminal — NOT
+    # redelivered, since re-running would just hit the same wall) and the
+    # checkpoint persists so it is resumable via ``main.py --resume <run_id>``.
+    # Bounds the non-terminating failure mode where saturated capability caps
+    # (or a stuck tool) looped past the iteration cap's protection. A per-run
+    # override (``RunRequest.run_timeout_s`` → ``RunJob``) wins over this
+    # default; 0/None at both levels = no timeout. Env: WORKER_RUN_TIMEOUT_S.
+    run_timeout_s: float = 0.0  # Env: WORKER_RUN_TIMEOUT_S
+
     model_config = SettingsConfigDict(
         # env_prefix makes the documented WORKER_* vars (see .env.example) map to
         # these fields: WORKER_CONSUMER_NAME → consumer_name, etc. Without it, the
@@ -1447,6 +1493,45 @@ class CapabilityCurveSettings(BaseSettings):
     )
 
 
+class GovernancePruneSettings(BaseSettings):
+    """Opt-in periodic capability-governance prune (battery-04 q09 fix C).
+
+    Governance (``src/governance/consolidate.py``) already runs at LOAD time
+    when a worker boots (semantic dedup, cumulative-cap retirement, redundancy
+    + performance retirement) — but a long-lived worker accumulates the active
+    tool/sub-agent population across runs and never prunes until restart. q09
+    saturated its caps (25/25 tools, 60/60 sub-agents) mid-life and then could
+    never create a needed capability, looping spawn↔create with no progress.
+
+    This registers a periodic job that re-runs the existing retire/redundancy
+    passes on a cron, lowering active counts to free cap headroom WITHOUT
+    raising the caps themselves. It reuses ``AgentSettings`` retire knobs
+    (``retire_min_runs`` / ``retire_success_floor`` / ``retire_recency_days`` /
+    ``capability_redundancy_threshold``) — no new retirement thresholds here.
+    Opt-in (default False) like the scheduler/curve-gate, so a host run with no
+    env does nothing. ``cron`` defaults to 04:00 UTC (before the 02:00 battery
+    shifts if the operator wants a clean slate overnight).
+    """
+
+    # Register the periodic prune job at all. Default False.
+    enabled: bool = False  # Env: GOVERNANCE_PRUNE_ENABLED
+    # 5-field crontab for the prune. Default 04:00 UTC.
+    cron: str = "0 4 * * *"  # Env: GOVERNANCE_PRUNE_CRON
+    # IANA zone for the prune cron. Env: GOVERNANCE_PRUNE_TIMEZONE.
+    timezone: str = "UTC"  # Env: GOVERNANCE_PRUNE_TIMEZONE
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps GOVERNANCE_PRUNE_* vars to these fields, mirroring the
+        # Scheduler/Worker/CapabilityCurve pattern (a missing prefix silently
+        # ignores vars — bug #223 class).
+        env_prefix="governance_prune_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 # ─── Root Settings ──────────────────────────────────────────────────
 
 
@@ -1479,6 +1564,7 @@ class Settings(BaseSettings):
     runner: RunnerSettings = RunnerSettings()  # type: ignore[assignment]
     scheduler: SchedulerSettings = SchedulerSettings()  # type: ignore[assignment]
     capability_curve: CapabilityCurveSettings = CapabilityCurveSettings()  # type: ignore[assignment]
+    governance_prune: GovernancePruneSettings = GovernancePruneSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

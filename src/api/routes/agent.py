@@ -39,6 +39,13 @@ class RunRequest(BaseModel):
         description="Optional run id; auto-generated (uuid4 hex) when omitted.",
     )
     model: str | None = None
+    run_timeout_s: float | None = Field(
+        default=None,
+        description=(
+            "Per-run wall-clock timeout (s); overrides WorkerSettings.run_timeout_s. "
+            "None → worker default (0 = no timeout). 0 disables explicitly."
+        ),
+    )
 
 
 class EnqueueResponse(BaseModel):
@@ -103,6 +110,7 @@ async def enqueue_run(request: RunRequest) -> EnqueueResponse:
         max_iterations=request.max_iterations,
         no_evolution=request.no_evolution,
         model=request.model,
+        run_timeout_s=request.run_timeout_s,
     )
     thread_id = f"api-{run_id}"
 

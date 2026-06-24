@@ -43,6 +43,14 @@ class RunJob(BaseModel):
         default=None,
         description="Optional pinned model (registry key or litellm id).",
     )
+    run_timeout_s: float | None = Field(
+        default=None,
+        description=(
+            "Per-run wall-clock timeout (s). Overrides WorkerSettings.run_timeout_s; "
+            "None → use the worker default (which defaults to 0 = no timeout). "
+            "0 disables even if the worker default is set."
+        ),
+    )
 
 
 class RunStatus(BaseModel):

@@ -178,7 +178,7 @@ class PromptOptimizer:
                 return OptimizeResponse(node=node, promoted=False, reason="budget", usage=usage)
 
             # ── Golden canary (full agent runs) + promotion gate (own canary).
-            canary = await self._build_canary(gateway, opt)
+            canary = await self._build_canary(gateway, opt, node)
             from src.evolution.promote import PromotionGate
 
             promotion_gate = PromotionGate(canary=canary.score, settings=self._settings)
@@ -320,7 +320,7 @@ class PromptOptimizer:
 
     # ── Canary stack ────────────────────────────────────────────────────────
 
-    async def _build_canary(self, gateway: Any, opt: Any) -> Any:
+    async def _build_canary(self, gateway: Any, opt: Any, node: str) -> Any:
         """Build the GoldenCanary, mirroring the runner/evolve node stack."""
         from src.agents.registry import SubAgentRegistry
         from src.evolution.promote import GoldenCanary
@@ -331,13 +331,30 @@ class PromptOptimizer:
             await _load_dynamic_tools(tools, self._settings)
         sub_agent_registry = SubAgentRegistry()
         await _load_sub_agents(sub_agent_registry, self._settings)
-        return GoldenCanary(gateway, tools, sub_agent_registry, goal_ids=self._pick_goal_ids(opt))
+        return GoldenCanary(
+            gateway, tools, sub_agent_registry, goal_ids=self._pick_goal_ids(opt, node)
+        )
 
-    def _pick_goal_ids(self, opt: Any) -> list[str]:
-        """The ``eval_spec_limit`` cheapest golden specs (spec_id order)."""
+    def _pick_goal_ids(self, opt: Any, node: str) -> list[str]:
+        """Golden spec ids for the canary — node-aware.
+
+        Prefers specs whose ``target_node`` matches ``node`` (so the canary score
+        tracks that node's decision — e.g. the classify-sensitive specs for
+        ``target_node=classify``), then fills with universal
+        (``target_node is None``) data-correctness specs, truncated to
+        ``eval_spec_limit``. Without the node-tagged specs a node-prompt candidate
+        can never lift the canary: data-correctness scores are inert to node prose,
+        so a promotion is structurally impossible.
+        """
         from src.eval.golden import GOLDEN_SPECS
 
-        ids = list(GOLDEN_SPECS)[: max(1, int(opt.eval_spec_limit))]
+        limit = max(1, int(opt.eval_spec_limit))
+        wanted = (node or "").strip().lower()
+        tagged = [
+            sid for sid, spec in GOLDEN_SPECS.items() if (spec.target_node or "").lower() == wanted
+        ]
+        universal = [sid for sid, spec in GOLDEN_SPECS.items() if spec.target_node is None]
+        ids = (tagged + universal)[:limit]
         return ids or ["battery04_q01"]
 
     # ── LM resolution ───────────────────────────────────────────────────────

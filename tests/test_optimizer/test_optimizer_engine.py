@@ -211,7 +211,7 @@ class _TestOptimizer(PromptOptimizer):
     async def _curve_verdict(self) -> dict[str, Any]:
         return self._verdict
 
-    async def _build_canary(self, _gateway: Any, _opt: Any) -> Any:
+    async def _build_canary(self, _gateway: Any, _opt: Any, _node: str) -> Any:
         assert self._fake_canary is not None  # configured by the test
         return self._fake_canary
 
@@ -432,3 +432,57 @@ def test_cost_accounting_callback_strips_litellm_prefix_and_skips_errors() -> No
     cb.on_lm_end("err", None, exception=RuntimeError("boom"))  # skipped
 
     assert cb.records == [("deepseek-v4-flash", "deepseek", 5, 9)]
+
+
+# ── Canary spec routing (_pick_goal_ids) ────────────────────────────────────
+
+
+class TestPickGoalIds:
+    """``_pick_goal_ids`` routes node-tagged specs ahead of universal ones.
+
+    The structural fix for "a promotion is impossible": ``target_node=classify``
+    specs are tagged and routed first for a classify canary, so the canary score
+    tracks classify's decision (``current_goal.complexity`` via StateCheck).
+    Without routing, ``_pick_goal_ids`` fed the canary only data-correctness
+    specs (``q01``/``q02``) whose score is inert to classify prose → the
+    candidate could never lift the baseline. Sync (no LLM): the selector reads
+    only ``GOLDEN_SPECS`` + ``opt.eval_spec_limit``.
+    """
+
+    def _opt(self, spec_limit: int = 4) -> Any:
+        return _make_opt(eval_spec_limit=spec_limit)
+
+    def _optimizer(self, opt: Any) -> _TestOptimizer:
+        return _TestOptimizer(_FakeSettings(opt))
+
+    def test_classify_node_picks_classify_specs_first(self) -> None:
+        opt = self._opt()
+        ids = self._optimizer(opt)._pick_goal_ids(opt, "classify")
+        # Both classify-sensitive specs precede any universal (q01…) spec.
+        assert ids[0] == "battery04_classify_simple"
+        assert ids[1] == "battery04_classify_complex"
+        assert "battery04_q01" not in ids[:2]  # no data-correctness leak in the window
+
+    def test_classify_specs_carry_the_target_node_tag(self) -> None:
+        from src.eval.golden import GOLDEN_SPECS
+
+        simple = GOLDEN_SPECS["battery04_classify_simple"]
+        complex_ = GOLDEN_SPECS["battery04_classify_complex"]
+        assert simple.target_node == "classify"
+        assert complex_.target_node == "classify"
+        # A classify spec is NOT universal (target_node is set, not None).
+        assert simple.target_node is not None
+        assert complex_.target_node is not None
+
+    def test_universal_node_picks_data_correctness_specs(self) -> None:
+        opt = self._opt()
+        ids = self._optimizer(opt)._pick_goal_ids(opt, "execute")
+        # No classify tag matches 'execute' → universal specs, q01 first
+        # (unchanged pre-routing behavior for any non-classify node).
+        assert ids[0] == "battery04_q01"
+        assert "battery04_classify_simple" not in ids
+
+    def test_spec_limit_truncates_after_classify_specs(self) -> None:
+        opt = self._opt(spec_limit=1)
+        ids = self._optimizer(opt)._pick_goal_ids(opt, "classify")
+        assert ids == ["battery04_classify_simple"]  # tagged first, truncated to the limit

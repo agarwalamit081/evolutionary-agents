@@ -2062,6 +2062,86 @@ def _battery04_q09() -> GoalSpec:
     )
 
 
+# ─── Classify-sensitive canary specs (optimizer only; NOT in BATTERY04_GOALS) ─
+#
+# These pair a goal whose CORRECT complexity is unambiguous with a ``StateCheck``
+# asserting ``current_goal.complexity``. That is the same signal the optimizer's
+# GEPA proxy optimizes (exact-match complexity in ``profiles._classify_metric``),
+# so a proxy-win becomes a real canary lift — without these, ``_pick_goal_ids``
+# would feed the canary only data-correctness specs (q01…) whose score is inert
+# to classify's prose, making a promotion structurally impossible. Both goals are
+# deterministic compute that converge quickly so verify's ``run_checks`` fires
+# (a non-converging goal is skipped by ``GoldenCanary.score``). They are kept out
+# of ``BATTERY04_GOALS`` so the nightly capability-curve battery is unperturbed.
+
+
+def _battery04_classify_simple() -> GoalSpec:
+    """Classify-sensitive canary: a fast-converging trivial/simple goal."""
+    return GoalSpec(
+        spec_id="battery04_classify_simple",
+        name="battery04_classify_simple",
+        description="Classify-sensitive canary: trivial/simple complexity decision",
+        goal_text="Convert 42 degrees Celsius to Fahrenheit and state the result.",
+        category="simple",
+        max_iterations=15,
+        timeout_seconds=120,
+        target_node="classify",
+        checks=[
+            CheckConfig(
+                check_type="state",
+                name="complexity_is_simple_tier",
+                params={
+                    "assertions": [
+                        {
+                            "field": "current_goal.complexity",
+                            "kind": "in",
+                            "expected": ["trivial", "simple"],
+                        }
+                    ]
+                },
+            ),
+        ],
+    )
+
+
+def _battery04_classify_complex() -> GoalSpec:
+    """Classify-sensitive canary: a converging complex/critical goal.
+
+    Multi-step compute (factorial + prime factorization + write-up) that
+    terminates deterministically yet spans enough reasoning depth to warrant a
+    capable-model tier. Together with the simple canary this gives the optimizer
+    two tier-spanning signals so a baseline→candidate lift is observable.
+    """
+    return GoalSpec(
+        spec_id="battery04_classify_complex",
+        name="battery04_classify_complex",
+        description="Classify-sensitive canary: complex/critical complexity decision",
+        goal_text=(
+            "Compute the factorial of 20, then determine its prime factorization, "
+            "and write both results with the steps shown to math_result.md."
+        ),
+        category="complex",
+        max_iterations=30,
+        timeout_seconds=300,
+        target_node="classify",
+        checks=[
+            CheckConfig(
+                check_type="state",
+                name="complexity_is_complex_tier",
+                params={
+                    "assertions": [
+                        {
+                            "field": "current_goal.complexity",
+                            "kind": "in",
+                            "expected": ["complex", "critical"],
+                        }
+                    ]
+                },
+            ),
+        ],
+    )
+
+
 # Registry keyed by spec_id — the verify node + --eval suite resolve a run's spec
 # via state["eval_goal_spec_id"] → lookup_goal_spec(spec_id).
 GOLDEN_SPECS: dict[str, GoalSpec] = {
@@ -2076,6 +2156,8 @@ GOLDEN_SPECS: dict[str, GoalSpec] = {
         _battery04_q07(),
         _battery04_q08(),
         _battery04_q09(),
+        _battery04_classify_simple(),
+        _battery04_classify_complex(),
     )
 }
 

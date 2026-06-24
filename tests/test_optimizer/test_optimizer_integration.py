@@ -197,7 +197,7 @@ class _IntegrationOptimizer(PromptOptimizer):
         super().__init__(settings)
         self._fake_canary = canary
 
-    async def _build_canary(self, _gateway: Any, _opt: Any) -> Any:
+    async def _build_canary(self, _gateway: Any, _opt: Any, _node: str) -> Any:
         return self._fake_canary
 
     def _resolve_lm(self, _node: str) -> tuple[str, dict[str, Any]]:

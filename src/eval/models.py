@@ -94,6 +94,11 @@ class GoalSpec(BaseModel):
     expected_deliverables: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
     checks: list[CheckConfig] = Field(default_factory=list)
+    # The graph node whose prompt this spec's score is sensitive to, used by the
+    # optimizer's canary selector (``PromptOptimizer._pick_goal_ids``) to route
+    # node-sensitive specs ahead of universal ones. ``None`` = universal /
+    # data-correctness (q01…q09). See ``StateCheck`` for node-state assertions.
+    target_node: str | None = Field(default=None)
 
     def to_benchmark_goal(self) -> BenchmarkGoal:
         """Project this spec onto the legacy process-only benchmark goal."""

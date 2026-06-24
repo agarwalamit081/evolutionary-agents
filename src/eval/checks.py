@@ -23,6 +23,7 @@ import hashlib
 import json
 import re
 from abc import ABC, abstractmethod
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -418,6 +419,124 @@ def _dotted_get(data: Any, path: str) -> Any:
         else:
             return None
     return cur
+
+
+def _state_get(state: Any, path: str) -> Any:
+    """Traverse a dotted ``a.b.c`` path into live graph state.
+
+    Unlike :func:`_dotted_get` (dict/list only), this also walks object
+    attributes so a pydantic model nested in state — e.g. the ``Goal`` at
+    ``current_goal`` — is reachable: ``current_goal.complexity`` resolves to the
+    ``TaskComplexity`` enum. ``state`` is the run's ``AgentState`` dict.
+    """
+    if not path:
+        return None
+    cur: Any = state
+    for part in path.split("."):
+        if part == "":
+            continue
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        elif isinstance(cur, (list, tuple)):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            cur = getattr(cur, part, None)
+    return cur
+
+
+def _normalize_state_value(value: Any) -> str:
+    """Normalize a state value for comparison: enum → ``.value``, then lowercase str.
+
+    ``None`` normalizes to the empty string. Used by :class:`StateCheck` so an
+    enum like ``TaskComplexity.COMPLEX`` compares equal to the string
+    ``"complex"`` (matching the classify proxy's lowercase exact-match).
+    """
+    if isinstance(value, Enum):
+        return str(value.value).strip().lower()
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+class StateCheck(CorrectnessCheck):
+    """Assertions over live graph STATE fields (not deliverables).
+
+    For node-output correctness no file captures — e.g. classify's
+    ``current_goal.complexity`` or ``refined_intent``. The optimizer's real
+    canary (``GoldenCanary``) needs a spec whose score tracks a node's decision
+    so a GEPA proxy-win becomes a real canary lift; data-correctness specs
+    (``q01``…) are inert to classify's prose. Params: ``assertions`` — a list of
+    dicts with ``field`` (dotted state path), ``kind`` in {eq, in, contains},
+    and ``expected`` (str | list[str]). Enums compare by their ``.value``;
+    ``contains`` matches a substring; ``in`` accepts a list. Score is the
+    fraction of assertions that hold.
+    """
+
+    name = "state"
+
+    async def check(
+        self,
+        config: CheckConfig,
+        deliverables: list[str],
+        state: AgentState,
+        *,
+        gateway: LLMGateway | None = None,
+    ) -> CheckResult:
+        assertions = config.params.get("assertions") or []
+        if not assertions:
+            return CheckResult(
+                check_name=config.name,
+                check_type=self.name,
+                passed=True,
+                score=1.0,
+                evidence={"note": "no state assertions declared"},
+            )
+
+        outcomes: list[tuple[str, str, bool, dict[str, Any]]] = []
+        for assertion in assertions:
+            field = str(assertion.get("field", ""))
+            kind = str(assertion.get("kind", "")).lower()
+            got = _state_get(state, field)
+            ok, detail = self._eval_state(kind, got, assertion.get("expected"))
+            outcomes.append((field, kind, ok, detail))
+
+        passed = all(o[2] for o in outcomes)
+        score = sum(1 for o in outcomes if o[2]) / len(outcomes)
+        return CheckResult(
+            check_name=config.name,
+            check_type=self.name,
+            passed=passed,
+            score=score,
+            evidence={
+                "assertions": [
+                    {"field": o[0], "kind": o[1], "passed": o[2], **o[3]} for o in outcomes
+                ]
+            },
+        )
+
+    @staticmethod
+    def _eval_state(kind: str, got: Any, expected: Any) -> tuple[bool, dict[str, Any]]:
+        got_norm = _normalize_state_value(got)
+        if kind == "eq":
+            return got_norm == _normalize_state_value(expected), {
+                "got": got_norm,
+                "expected": expected,
+            }
+        if kind == "in":
+            candidates = expected if isinstance(expected, list) else [expected]
+            expected_norm = [_normalize_state_value(c) for c in candidates]
+            return got_norm in expected_norm, {"got": got_norm, "expected": expected_norm}
+        if kind == "contains":
+            return _normalize_state_value(expected) in got_norm, {
+                "got": got_norm,
+                "expected": expected,
+            }
+        return False, {"reason": f"unknown state assertion kind '{kind}'", "got": got_norm}
 
 
 class ExecutionCheck(CorrectnessCheck):
@@ -816,6 +935,7 @@ CHECK_REGISTRY: dict[str, CorrectnessCheck] = {
     "execution": ExecutionCheck(),
     "idempotency": IdempotencyCheck(),
     "oracle": OracleCheck(),
+    "state": StateCheck(),
 }
 
 

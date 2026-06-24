@@ -686,22 +686,31 @@ class TestCapabilityCapLoopBreak:
     restart). The counter is reset to 0 on real progress by the spawn/create
     nodes themselves; here we assert the router reads it correctly."""
 
-    def test_breaks_to_verify_at_threshold(self, sample_state: dict[str, Any]) -> None:
-        """At threshold (3) with agent gaps present → verify, NOT agent_spawn."""
+    def test_breaks_to_verify_at_threshold(
+        self, sample_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """At threshold (2 = one fully-saturated spawn+create cycle) with agent gaps present → verify, NOT agent_spawn."""
+        monkeypatch.setattr(get_settings().agent, "cap_loop_break_threshold", 2)
         sample_state["pending_agent_gaps"] = ["Need specialist"]
-        sample_state["consecutive_cap_blocks"] = 3
+        sample_state["consecutive_cap_blocks"] = 2
         assert route_after_reflect(sample_state) == "verify"
 
-    def test_breaks_to_verify_above_threshold(self, sample_state: dict[str, Any]) -> None:
+    def test_breaks_to_verify_above_threshold(
+        self, sample_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Above threshold with tool gaps present → verify, NOT tool_create."""
+        monkeypatch.setattr(get_settings().agent, "cap_loop_break_threshold", 2)
         sample_state["pending_tool_gaps"] = ["missing_tool"]
         sample_state["consecutive_cap_blocks"] = 5
         assert route_after_reflect(sample_state) == "verify"
 
-    def test_does_not_break_below_threshold(self, sample_state: dict[str, Any]) -> None:
-        """Below threshold still routes to gap resolution (agent_spawn)."""
+    def test_does_not_break_below_threshold(
+        self, sample_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Below threshold (1 < 2) still routes to gap resolution (agent_spawn)."""
+        monkeypatch.setattr(get_settings().agent, "cap_loop_break_threshold", 2)
         sample_state["pending_agent_gaps"] = ["Need specialist"]
-        sample_state["consecutive_cap_blocks"] = 2
+        sample_state["consecutive_cap_blocks"] = 1
         assert route_after_reflect(sample_state) == "agent_spawn"
 
     def test_default_counter_routes_to_gaps(self, sample_state: dict[str, Any]) -> None:

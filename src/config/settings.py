@@ -835,11 +835,15 @@ class AgentSettings(BaseSettings):
     # count CONSECUTIVE cap-blocks (a spawn/create round that produced no new
     # capability); once this many accumulate, they stop re-routing into
     # spawn/create and route to plan/verify instead, forcing convergence. Reset
-    # to 0 on any real progress (a capability IS created). Default 3 mirrors
-    # convergence_stable_threshold (a transient single block is common; 3 is a
-    # real stall). ON by default — this is a correctness fix, not opt-in.
+    # to 0 on any real progress (a capability IS created). Default 2 = ONE
+    # fully-saturated cycle: the counter climbs +1 per cap-blocked spawn/create
+    # node, so a single spawn-blocked-then-create-blocked round reaches 2 with
+    # zero progress (real progress resets it). 3 needs 1.5 cycles, which a slow
+    # model (deepseek-v4-flash, ~2 min/generation) never reaches inside a
+    # worker wall-clock timeout — live-validated on q09 (counter climbed 0→1→2
+    # and stalled before a 600s timeout fired). ON by default — correctness fix.
     # Env: CAP_LOOP_BREAK_THRESHOLD.
-    cap_loop_break_threshold: int = 3
+    cap_loop_break_threshold: int = 2
     # Run caps — single source of truth for tool/sub-agent creation limits.
     # Enforcement sites (tool generator, agent_spawn, structure_analysis) read
     # these fields directly; there are NO module-level MAX_*_PER_RUN constants

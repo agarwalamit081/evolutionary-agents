@@ -138,8 +138,9 @@ def route_after_reflect(state: AgentState) -> str:
     # with NO new capability produced, forever (the q09 loop, halted only by a
     # container restart). ``consecutive_cap_blocks`` counts cap-blocked
     # spawn/create rounds (reset to 0 on real progress by the nodes themselves);
-    # once it reaches ``cap_loop_break_threshold`` (default 3), stop chasing the
-    # unfillable gaps and route to verify to accept the partial result. Mirrors
+    # once it reaches ``cap_loop_break_threshold`` (default 2 = one
+    # fully-saturated spawn+create cycle), stop chasing the unfillable gaps and
+    # route to verify to accept the partial result. Mirrors
     # the B3 terminator: accept partial, do NOT set is_complete.
     consecutive_cap_blocks = int(state.get("consecutive_cap_blocks", 0) or 0)
     cap_threshold = get_settings().agent.cap_loop_break_threshold

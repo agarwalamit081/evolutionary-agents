@@ -483,7 +483,7 @@ class SandboxExecutor:
                     # APIError / ImageNotFound / ConnectionError / daemon-down =
                     # INFRASTRUCTURE. For the runtime path, re-raise so the outer
                     # handler turns it into SandboxUnavailable (→ host fallback,
-                    # e.g. turing-toolbox not yet built). For the evolution path
+                    # e.g. self-evolving-agent-toolbox not yet built). For the evolution path
                     # swallow into a failed result (code already vetted).
                     if propagate_unavailable:
                         raise

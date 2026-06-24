@@ -280,11 +280,11 @@ class _FakeContainer:
 
 
 def _docker_settings() -> object:
-    """Settings configured for docker mode + the turing-toolbox image."""
+    """Settings configured for docker mode + the self-evolving-agent-toolbox image."""
 
     class _Settings:
         evolution_sandbox_mode = "docker"
-        evolution_sandbox_image = "turing-toolbox:latest"
+        evolution_sandbox_image = "self-evolving-agent-toolbox:latest"
         evolution_sandbox_memory_mb = 512
         evolution_sandbox_timeout = 30
 
@@ -399,7 +399,7 @@ async def test_execute_runtime_code_mounts_results_rw_and_isolates(
 async def test_execute_runtime_code_propagates_image_not_found(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A missing turing-toolbox image is INFRASTRUCTURE, not a script failure:
+    """A missing self-evolving-agent-toolbox image is INFRASTRUCTURE, not a script failure:
     execute_runtime_code raises SandboxUnavailable so code_executor falls back to
     the host subprocess rather than masking the missing image as a failed run.
     """
@@ -470,7 +470,7 @@ def _runner_settings() -> object:
 
     class _Settings:
         evolution_sandbox_mode = "runner"
-        evolution_sandbox_image = "turing-toolbox:latest"
+        evolution_sandbox_image = "self-evolving-agent-toolbox:latest"
         evolution_sandbox_memory_mb = 512
         evolution_sandbox_timeout = 30
 

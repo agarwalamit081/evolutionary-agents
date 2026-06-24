@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# turing-runner — the remote no-DinD code-execution runner (Phase 3b/c, #218/#219).
+# self-evolving-agent-runner — the remote no-DinD code-execution runner (Phase 3b/c, #218/#219).
 #
 # Runs src/sandbox/runner_server.py: a tiny HTTP server that executes submitted
 # Python as a constrained subprocess IN THIS CONTAINER. It is the agent's single
@@ -19,7 +19,7 @@
 #
 # Build:
 #   docker compose build runner
-#   (or: docker build -f Dockerfile.runner -t turing-runner:latest .)
+#   (or: docker build -f Dockerfile.runner -t self-evolving-agent-runner:latest .)
 #
 # NOTE: keep this package list in sync with ALLOWED_MODULES / Dockerfile.toolbox
 # whenever the allowlist changes.

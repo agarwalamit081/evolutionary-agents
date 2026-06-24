@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# turing-toolbox — the runtime code_executor sandbox image (Phase 2c).
+# self-evolving-agent-toolbox — the runtime code_executor sandbox image (Phase 2c).
 #
 # Used by src/sandbox/executor.py (execute_runtime_code) when an operator opts
 # into CODE_EXECUTOR_MODE=docker: untrusted one-off LLM code run via the
@@ -14,7 +14,7 @@
 # these are present so import-only code (no egress) works.
 #
 # Build:
-#   docker build -f Dockerfile.toolbox -t turing-toolbox:latest .
+#   docker build -f Dockerfile.toolbox -t self-evolving-agent-toolbox:latest .
 #   (or: docker compose --profile sandbox build toolbox)
 #
 # NOTE: keep this list in sync with ALLOWED_MODULES whenever the allowlist

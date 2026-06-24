@@ -359,7 +359,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.runner
-    image: turing-runner:latest
+    image: self-evolving-agent-runner:latest
     environment:
       RUNNER_RESULTS_ROOT: /home/turing/.turing/results
       RUNNER_MAX_TIMEOUT_S: "300"
@@ -441,10 +441,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.toolbox
-    image: turing-toolbox:latest
+    image: self-evolving-agent-toolbox:latest
 
   # Local registry (S9) — host-only push target for scripts/push-images.sh so
-  # the built images (self-evolving-agent / turing-runner / turing-toolbox) are named,
+  # the built images (self-evolving-agent / self-evolving-agent-runner / self-evolving-agent-toolbox) are named,
   # cached, and shareable without depending on an external registry. Exposed to
   # the host on :5001; on turing-net. NOT started by default (gated behind the
   # `registry` profile, like `toolbox`/`sandbox`) — bring it up explicitly:

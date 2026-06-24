@@ -27,7 +27,7 @@ from src.tools.builtin import code_executor as ce
 def _sandbox_settings(mode: str) -> SimpleNamespace:
     return SimpleNamespace(
         code_executor_mode=mode,
-        code_executor_sandbox_image="turing-toolbox:latest",
+        code_executor_sandbox_image="self-evolving-agent-toolbox:latest",
         code_executor_sandbox_memory_mb=512,
         code_executor_sandbox_timeout=99,
         code_executor_results_mount="",
@@ -217,4 +217,4 @@ def test_tool_sandbox_returns_settings_group() -> None:
     """The real accessor returns the registered ToolSandboxSettings group."""
     settings = ce._tool_sandbox()
     assert settings.code_executor_mode == "subprocess"  # default off
-    assert settings.code_executor_sandbox_image == "turing-toolbox:latest"
+    assert settings.code_executor_sandbox_image == "self-evolving-agent-toolbox:latest"

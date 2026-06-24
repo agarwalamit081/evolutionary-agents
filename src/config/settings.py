@@ -575,13 +575,13 @@ class ToolSandboxSettings(BaseSettings):
     Distinct from ``EvolutionSettings``: that sandbox vets ALREADY-statically-
     validated handler code and runs host BY DESIGN (``execute_code_subprocess``);
     this gates UNVALIDATED runtime one-off code, so it defaults OFF until an
-    operator opts in. The ``turing-toolbox`` image mirrors
+    operator opts in. The ``self-evolving-agent-toolbox`` image mirrors
     ``src/tools/dynamic/allowlist.py`` so an import of an allowlisted third-party
     dep resolves in the container too.
     """
 
     code_executor_mode: Literal["subprocess", "docker", "runner"] = "subprocess"
-    code_executor_sandbox_image: str = "turing-toolbox:latest"
+    code_executor_sandbox_image: str = "self-evolving-agent-toolbox:latest"
     code_executor_sandbox_memory_mb: int = 512
     # Timeout for the docker code run. Defaults higher than the host
     # ``code_executor_timeout`` because a cold container start adds latency.

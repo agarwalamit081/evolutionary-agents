@@ -402,8 +402,25 @@ async def execute_run(
 
             cost_session_cm = get_session()
             cost_session = await cost_session_cm.__aenter__()
-            gateway.set_cost_tracker(CostTracker(cost_session, settings))
+            tracker = CostTracker(cost_session, settings)
+            gateway.set_cost_tracker(tracker)
             logger.info("Cost tracker wired (budget gate active)")
+            # Baseline the per-run token cap at this attempt's start: the cap
+            # measures THIS attempt's spend (cumulative - baseline), so a
+            # re-enqueued or resumed run_id does NOT inherit its prior token
+            # debt and trip the cap before doing any work (battery-04 q09
+            # re-enqueue inherited 407K tokens -> instant trip). On any failure
+            # the baseline stays 0 -> today's cumulative behavior (safe; never
+            # over-grants budget).
+            try:
+                baseline = await tracker.get_run_token_usage(thread_id)
+                tracker.set_run_baseline(baseline)
+                logger.info(
+                    f"Run token baseline: {baseline} "
+                    f"(attempt budget measured from here)"
+                )
+            except Exception as e:  # noqa: BLE001 — baseline is best-effort
+                logger.debug(f"Could not capture run token baseline: {e}")
         except Exception as e:
             logger.debug(f"Cost tracker not available: {e}")
             cost_session_cm = None

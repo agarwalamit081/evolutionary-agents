@@ -19,6 +19,24 @@ class CostTracker:
     def __init__(self, session: AsyncSession, settings: Settings) -> None:
         self._session = session
         self._budget = settings.budget
+        # Per-attempt baseline: cumulative tokens already attributed to this
+        # run_id BEFORE this attempt started (prior attempts / a resumed run).
+        # The per-run token cap in ``check_budget`` measures THIS attempt's
+        # spend = cumulative - baseline, so a re-enqueued or resumed run does
+        # NOT inherit its prior token debt and trip the cap before doing any
+        # work (battery-04 q09: a re-enqueued run inherited 407K tokens and was
+        # instantly over the 200K cap). Default 0 (fresh run_id / pre-
+        # attribution / baseline-capture failure) preserves today's behavior.
+        self._run_baseline_tokens: int = 0
+
+    def set_run_baseline(self, tokens: int) -> None:
+        """Record the cumulative tokens spent for this run before this attempt.
+
+        Captured once at attempt start (``runner.execute_run``) so the per-run
+        token cap measures only THIS attempt's spend. Clamped to ``>= 0`` so a
+        negative/coerce-failure can never grant a larger budget than intended.
+        """
+        self._run_baseline_tokens = max(0, int(tokens or 0))
 
     async def record_usage(
         self,
@@ -122,12 +140,20 @@ class CostTracker:
 
         per_run_limit = self._budget.per_task_token_limit
         if run_id is not None and per_run_limit > 0:
-            run_tokens = await self.get_run_token_usage(run_id)
-            if run_tokens >= per_run_limit:
+            # Measure THIS attempt's spend: cumulative-all-time for the run_id
+            # minus the tokens already attributed to it when this attempt
+            # started (the baseline, captured in runner.execute_run). Without the
+            # baseline a re-enqueued or resumed run inherits its prior token debt
+            # and trips the cap before doing any work (battery-04 q09 re-enqueue
+            # inherited 407K tokens -> instantly over the 200K cap).
+            cumulative = await self.get_run_token_usage(run_id)
+            spent = max(0, cumulative - self._run_baseline_tokens)
+            if spent >= per_run_limit:
                 return (
                     False,
-                    f"Per-run token cap reached: {run_tokens} / {per_run_limit} "
-                    f"tokens (run {run_id})",
+                    f"Per-run token cap reached: {spent} / {per_run_limit} "
+                    f"tokens this attempt (run {run_id}; "
+                    f"baseline {self._run_baseline_tokens})",
                 )
 
         if daily_total >= daily_limit * self._budget.budget_critical_threshold:

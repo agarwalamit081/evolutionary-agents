@@ -453,6 +453,87 @@ class TestCheckBudgetPerRunTokenCap:
         tracker.get_run_token_usage.assert_not_called()
 
 
+# ─── check_budget — per-attempt baseline (token-inheritance fix) ───────────
+
+
+class TestCheckBudgetBaselineDelta:
+    """The per-run token cap measures THIS attempt's spend, not cumulative.
+
+    A re-enqueued or resumed run_id inherits the cost_ledger rows of its prior
+    attempts, so ``get_run_token_usage`` (cumulative-all-time) would trip the
+    cap before the new attempt does any work (battery-04 q09 re-enqueue
+    inherited 407K tokens -> instantly over the 200K cap). ``set_run_baseline``
+    (captured at attempt start in ``runner.execute_run``) subtracts that prior
+    debt so the cap sees only this attempt's tokens. Default 0 (fresh run_id /
+    capture failure) preserves today's behavior.
+    """
+
+    @staticmethod
+    def _make_tracker(per_task_token_limit: int) -> CostTracker:
+        settings = MagicMock()
+        settings.budget.max_cost_usd = 10.0
+        settings.budget.budget_warn_threshold = 0.7
+        settings.budget.budget_critical_threshold = 0.9
+        settings.budget.per_task_token_limit = per_task_token_limit
+        tracker = CostTracker(session=MagicMock(), settings=settings)
+        tracker.get_daily_spend = AsyncMock(return_value=0.5)
+        return tracker
+
+    @pytest.mark.asyncio
+    async def test_baseline_zeros_out_prior_attempt_debt(self) -> None:
+        """A re-enqueued run (400K prior tokens) with baseline=400K is NOT over a
+        200K cap — the new attempt starts at 0 spent (the regression scenario)."""
+        tracker = self._make_tracker(per_task_token_limit=200_000)
+        tracker.set_run_baseline(400_000)
+        tracker.get_run_token_usage = AsyncMock(return_value=400_000)  # no new spend yet
+
+        is_ok, _ = await tracker.check_budget(run_id="api-battery04_q09")
+
+        assert is_ok is True  # spent = 0, not 400K
+
+    @pytest.mark.asyncio
+    async def test_cap_trips_on_attempt_delta_not_cumulative(self) -> None:
+        """spent = cumulative - baseline. A 30K-this-attempt spend is under the
+        cap (would be 430K cumulative without the baseline); a 250K-this-attempt
+        spend trips it, and the message reports the attempt spend, not cumulative."""
+        tracker = self._make_tracker(per_task_token_limit=200_000)
+        tracker.set_run_baseline(400_000)
+
+        tracker.get_run_token_usage = AsyncMock(return_value=430_000)  # 30K new
+        is_ok, _ = await tracker.check_budget(run_id="api-battery04_q09")
+        assert is_ok is True
+
+        tracker.get_run_token_usage = AsyncMock(return_value=650_000)  # 250K new
+        is_ok, msg = await tracker.check_budget(run_id="api-battery04_q09")
+        assert is_ok is False
+        assert "Per-run token cap" in msg
+        assert "250000" in msg  # THIS attempt's spend is reported
+        assert "650000" not in msg  # cumulative prior debt is never shown as spent
+
+    @pytest.mark.asyncio
+    async def test_no_baseline_keeps_cumulative_behavior(self) -> None:
+        """Without set_run_baseline (fresh run_id / capture failed -> default 0)
+        the cap behaves exactly as before: cumulative spend is measured directly."""
+        tracker = self._make_tracker(per_task_token_limit=200_000)
+        tracker.get_run_token_usage = AsyncMock(return_value=250_000)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-fresh")
+
+        assert is_ok is False
+        assert "Per-run token cap" in msg
+
+    @pytest.mark.asyncio
+    async def test_negative_baseline_clamped_to_zero(self) -> None:
+        """A bogus negative baseline never grants a larger budget than earned."""
+        tracker = self._make_tracker(per_task_token_limit=200_000)
+        tracker.set_run_baseline(-50_000)
+        tracker.get_run_token_usage = AsyncMock(return_value=250_000)
+
+        is_ok, _ = await tracker.check_budget(run_id="api-x")
+
+        assert is_ok is False  # clamped to 0 -> spent 250K >= 200K
+
+
 # ─── get_daily_spend ──────────────────────────────────────────────────────
 
 

@@ -30,7 +30,14 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from src.eval.models import CheckConfig, CheckResult, CorrectnessResult, GoalSpec
-from src.tools._paths import resolve_existing, strip_results_prefix
+from src.tools._paths import (
+    _subdir_active,
+    get_active_run_id,
+    resolve_existing,
+    results_root,
+    run_subdir_path,
+    strip_results_prefix,
+)
 
 if TYPE_CHECKING:
     from src.graph.state import AgentState
@@ -71,6 +78,32 @@ def _resolve_deliverable(raw: str) -> Path | None:
         except OSError:
             continue
     return None
+
+
+def _effective_results_root() -> Path:
+    """Results root the Execution/Golden probes should search.
+
+    The probes ``os.walk(_RESULTS_ROOT)`` to locate deliverables the agent did
+    NOT declare by name (e.g. q01's ``raw_events.jsonl``). That walk MUST be
+    scoped to the *current run's* results cell — otherwise a canary/worker run
+    that isolates its WRITES under ``results/<run_id>/`` (``set_active_run_id``)
+    still has its READS scan the shared flat root, where a stale deliverable
+    from another run lingers; the probe then cross-references that stale file
+    against this run's own deliverables (q01 timestamp probe: fresh
+    ``raw_events.jsonl`` vs a prior run's ``normalized.csv`` -> ``checked == 0``).
+    Returns the run subdir when per-run isolation is active (a run_id is bound
+    AND ``results_per_run_subdir`` is on), else the flat shared root. An unsafe
+    run_id falls back to the flat root — never raises (the probe treats
+    ``_RESULTS_ROOT`` as advisory).
+    """
+    run_id = get_active_run_id()
+    if run_id:
+        try:
+            if _subdir_active():
+                return run_subdir_path(run_id)
+        except ValueError:
+            pass  # unsafe run_id -> flat fallback (probes stay advisory)
+    return results_root()
 
 
 def _select_target(target: str | None, deliverables: list[str]) -> Path | None:
@@ -421,9 +454,7 @@ class ExecutionCheck(CorrectnessCheck):
         resolved_paths = [str(p) for p in map(_resolve_deliverable, deliverables) if p]
         results_root = ""
         try:
-            from src.tools._paths import results_root as _results_root
-
-            results_root = str(_results_root().resolve())
+            results_root = str(_effective_results_root())
         except Exception:  # noqa: BLE001 — results_root is advisory for the probe
             results_root = ""
 
@@ -520,9 +551,7 @@ class IdempotencyCheck(CorrectnessCheck):
         resolved_paths = [str(p) for p in map(_resolve_deliverable, deliverables) if p]
         results_root = ""
         try:
-            from src.tools._paths import results_root as _results_root
-
-            results_root = str(_results_root().resolve())
+            results_root = str(_effective_results_root())
         except Exception:  # noqa: BLE001 — results_root is advisory for the probe
             results_root = ""
 

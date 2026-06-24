@@ -21,9 +21,11 @@ from src.eval.checks import (
     GoldenCheck,
     OracleCheck,
     StructuralCheck,
+    _effective_results_root,
     run_checks,
 )
 from src.eval.models import CheckConfig, GoalSpec
+from src.tools._paths import results_root, run_subdir_path, set_active_run_id
 
 
 async def _none_judge(text: str, reference: str) -> tuple[float, dict[str, Any]] | None:
@@ -929,3 +931,143 @@ class TestRunChecks:
         corr = await run_checks(spec, [], {})
         assert corr.passed is False
         assert "unknown check type" in corr.checks[0].error
+
+
+def _patch_roots_subdir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
+    """Like ``_patch_roots`` but with ``results_per_run_subdir=True`` so a bound
+    run_id routes deliverables under ``results/<run_id>/`` (the canary/worker
+    path) and ``_effective_results_root`` resolves to that subdir."""
+    results = tmp_path / "results"
+    workspace = tmp_path / "workspace"
+    results.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "src.config.settings.get_settings",
+        lambda: SimpleNamespace(
+            agent=SimpleNamespace(
+                results_root=str(results),
+                workspace_root=str(workspace),
+                results_per_run_subdir=True,
+            ),
+            eval=SimpleNamespace(
+                eval_enabled=False,
+                eval_enforce=False,
+                eval_llm_judge_enabled=False,
+                eval_canary_min_score=0.8,
+                eval_store_enabled=False,
+            ),
+        ),
+    )
+    return str(results)
+
+
+class TestEffectiveResultsRoot:
+    """The probe's ``_RESULTS_ROOT`` must be scoped to the active run's subdir.
+
+    Regression for the q01 canary contamination bug: a run that isolates its
+    WRITES under ``results/<run_id>/`` (``set_active_run_id``) but whose probes
+    READ the shared flat root cross-references a stale deliverable from another
+    run (fresh ``raw_events.jsonl`` vs a prior run's ``normalized.csv`` ->
+    ``checked == 0``). ``_effective_results_root`` returns the run subdir when
+    per-run isolation is active, flat otherwise.
+    """
+
+    def test_flat_when_no_run_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_roots_subdir(monkeypatch, tmp_path)
+        set_active_run_id(None)
+        assert _effective_results_root() == results_root()
+
+    def test_subdir_when_run_id_active(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_roots_subdir(monkeypatch, tmp_path)
+        try:
+            set_active_run_id("canary-q01-123")
+            assert _effective_results_root() == run_subdir_path("canary-q01-123")
+            assert _effective_results_root() != results_root()
+        finally:
+            set_active_run_id(None)
+
+    def test_flat_when_subdir_disabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # run_id bound but results_per_run_subdir off (the legacy/CLI path) ->
+        # flat root, so older flat deliverables still recall.
+        _patch_roots(monkeypatch, tmp_path)  # results_per_run_subdir absent -> False
+        try:
+            set_active_run_id("r1")
+            assert _effective_results_root() == results_root()
+        finally:
+            set_active_run_id(None)
+
+    def test_unsafe_run_id_falls_back_to_flat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_roots_subdir(monkeypatch, tmp_path)
+        try:
+            # A traversal-shaped run_id is refused by run_subdir_path -> flat
+            # fallback (never raises; _RESULTS_ROOT is advisory for the probe).
+            set_active_run_id("../escape")
+            assert _effective_results_root() == results_root()
+        finally:
+            set_active_run_id(None)
+
+
+class TestQ01TimestampProbeRunIsolation:
+    """End-to-end regression for the canary results-contamination bug.
+
+    With a run_id bound (canary/worker), the GOOD deliverables live under
+    ``results/<run_id>/`` and a STALE ``raw_events.jsonl`` from a prior run
+    lingers at the shared flat root (different event_ids). Before the fix the
+    probe's ``_RESULTS_ROOT`` was the flat root, so it picked the STALE raw ->
+    zero event_id overlap with this run's ``normalized.csv`` -> ``checked == 0``
+    false failure. Now ``_RESULTS_ROOT`` is scoped to the run subdir, so the
+    probe cross-references only this run's own files -> PASS.
+    """
+
+    def _probe_config(self) -> CheckConfig:
+        from src.eval.golden import lookup_goal_spec
+
+        spec = lookup_goal_spec("battery04_q01")
+        assert spec is not None
+        cfg = next(
+            (c for c in spec.checks if c.name == "q01_timestamp_instant_preservation"),
+            None,
+        )
+        assert cfg is not None, "q01_timestamp_instant_preservation must exist"
+        return cfg
+
+    @pytest.mark.asyncio
+    async def test_probe_isolated_from_stale_flat_raw(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = _patch_roots_subdir(monkeypatch, tmp_path)
+        run_id = "canary-q01-1750000000"
+        sub = Path(root, run_id)
+        sub.mkdir(parents=True, exist_ok=True)
+        # This run's GOOD raw + normalized (matching instant; tz-naive -> UTC).
+        Path(sub, "raw_events.jsonl").write_text(
+            '{"event_id": "evt-GOOD", "timestamp": "2026-06-25T10:00:00"}\n',
+            encoding="utf-8",
+        )
+        Path(sub, "normalized.csv").write_text(
+            "event_id,timestamp\nevt-GOOD,2026-06-25T10:00:00Z\n",
+            encoding="utf-8",
+        )
+        # A PRIOR run's stale raw lingers at the shared flat root — a different
+        # event_id, so a flat-root read would share NO event_id with this run's
+        # normalized.csv (checked==0 false failure).
+        Path(root, "raw_events.jsonl").write_text(
+            '{"event_id": "evt-STALE", "timestamp": "2025-01-01T00:00:00"}\n',
+            encoding="utf-8",
+        )
+        try:
+            set_active_run_id(run_id)
+            res = await ExecutionCheck().check(
+                self._probe_config(), ["results/normalized.csv"], {}
+            )
+        finally:
+            set_active_run_id(None)
+        assert res.passed is True, res.evidence

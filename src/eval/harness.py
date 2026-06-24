@@ -62,38 +62,56 @@ class BenchmarkHarness:
         start_time = time.monotonic()
 
         try:
+            from src.tools._paths import clean_run_subdir, set_active_run_id
+
             thread_id = f"bench-{goal.name}-{int(start_time)}"
-            state = initial_state(
-                goal_text=goal.goal_text,
-                thread_id=thread_id,
-                max_iterations=goal.max_iterations,
-                # A benchmark / canary run is SCORE-ONLY. Letting it reach the
-                # evolve node has two harms: (1) the run's own mutations confound
-                # the measurement of the candidate prompt under test, and (2) when
-                # evolution_promote_to_live is on, promote() -> GoldenCanary ->
-                # run_benchmark -> evolve -> run_cycle -> promote() recurses
-                # (battery-04 q09 spawned 3 mutation chains from one canary).
-                # Skipping evolve via this flag terminates that cascade at the root.
-                no_evolution=True,
-            )
-            if spec is not None:
-                # Thread the spec id so verify runs its correctness checks when
-                # EVAL_ENABLED. A plain key set on the TypedDict (total=False).
-                state["eval_goal_spec_id"] = spec.spec_id
+            # Isolate this canary run's deliverables under results/<thread_id>/
+            # (mirrors the worker's set_active_run_id + clean-on-fresh-attempt in
+            # src/runner.execute_run). Without it the canary writes to the shared
+            # FLAT results root, so a re-run / baseline-vs-candidate cycle leaves a
+            # fresh raw_events.jsonl beside a STALE normalized.csv from another
+            # run -> the q01 timestamp probe cross-references files from different
+            # runs and fails (checked == 0). Binding the run_id routes writes under
+            # results/<thread_id>/ AND scopes the probes' _RESULTS_ROOT read to
+            # that same cell (checks._effective_results_root) so read + write are
+            # coherent within one run. Reset in finally so sibling canaries (the
+            # optimizer runs several specs) don't inherit a stale run_id.
+            set_active_run_id(thread_id)
+            clean_run_subdir(thread_id)
+            try:
+                state = initial_state(
+                    goal_text=goal.goal_text,
+                    thread_id=thread_id,
+                    max_iterations=goal.max_iterations,
+                    # A benchmark / canary run is SCORE-ONLY. Letting it reach the
+                    # evolve node has two harms: (1) the run's own mutations confound
+                    # the measurement of the candidate prompt under test, and (2) when
+                    # evolution_promote_to_live is on, promote() -> GoldenCanary ->
+                    # run_benchmark -> evolve -> run_cycle -> promote() recurses
+                    # (battery-04 q09 spawned 3 mutation chains from one canary).
+                    # Skipping evolve via this flag terminates that cascade at the root.
+                    no_evolution=True,
+                )
+                if spec is not None:
+                    # Thread the spec id so verify runs its correctness checks when
+                    # EVAL_ENABLED. A plain key set on the TypedDict (total=False).
+                    state["eval_goal_spec_id"] = spec.spec_id
 
-            compiled = compile_task_graph(
-                gateway=self._gateway,
-                memory=None,
-                tools=self._tools,
-                checkpointer=None,
-                sub_agent_registry=self._registry,
-            )
+                compiled = compile_task_graph(
+                    gateway=self._gateway,
+                    memory=None,
+                    tools=self._tools,
+                    checkpointer=None,
+                    sub_agent_registry=self._registry,
+                )
 
-            result_state = await compiled.ainvoke(dict(state))
-            result_state = dict(result_state) if not isinstance(result_state, dict) else result_state
-            latency_ms = int((time.monotonic() - start_time) * 1000)
+                result_state = await compiled.ainvoke(dict(state))
+                result_state = dict(result_state) if not isinstance(result_state, dict) else result_state
+                latency_ms = int((time.monotonic() - start_time) * 1000)
 
-            return self._extract_result(goal, result_state, latency_ms)
+                return self._extract_result(goal, result_state, latency_ms)
+            finally:
+                set_active_run_id(None)
 
         except Exception as exc:
             latency_ms = int((time.monotonic() - start_time) * 1000)

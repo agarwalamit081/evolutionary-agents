@@ -446,6 +446,17 @@ async def execute_run(
                         last_reported = ic
                         try:
                             await on_progress(ic)
+                        except RunCancelled:
+                            # E (cancel): the worker's progress callback raised
+                            # ``RunCancelled`` after observing the Redis cancel
+                            # flag. Propagate it (do NOT swallow it as
+                            # "observability-only") so it exits the astream loop,
+                            # runs the run-scoped ``finally`` cleanup, and reaches
+                            # the worker ``_process`` RunCancelled handler →
+                            # terminal CANCELLED + acked. MUST precede the generic
+                            # ``except Exception`` below, which would otherwise
+                            # log-and-drop it (cancel silently failing).
+                            raise
                         except Exception as e:  # noqa: BLE001 — progress is observability-only
                             logger.debug(f"run progress callback error (ignored): {e}")
 

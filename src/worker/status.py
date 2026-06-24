@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 class RunStatusStore:
     """Read/write ``RunStatus`` records in Redis hashes."""
 
-    _KEY_PREFIX = "turing:run:"  # hash key = prefix + run_id
+    _KEY_PREFIX = "turing:run:"  # status hash key = prefix + run_id
+    _CANCEL_PREFIX = "turing:runs:cancel:"  # cancel flag key = prefix + run_id
 
     def __init__(
         self,
@@ -35,6 +36,43 @@ class RunStatusStore:
 
     def _key(self, run_id: str) -> str:
         return f"{self._KEY_PREFIX}{run_id}"
+
+    def _cancel_key(self, run_id: str) -> str:
+        return f"{self._CANCEL_PREFIX}{run_id}"
+
+    async def request_cancel(self, run_id: str, ttl: int | None = None) -> None:
+        """Set the graceful-cancel flag (``POST /runs/{run_id}/cancel``).
+
+        The worker's per-iteration progress callback polls ``is_cancelled`` and
+        raises ``RunCancelled`` (~1-iteration latency). The flag is a bare key —
+        its PRESENCE is the signal — so a repeat POST is a no-op (idempotent).
+        TTL reuses ``status_ttl_s`` (a ``0`` disables it, as in tests) so the
+        flag outlives any run yet still self-cleans; an explicit ``ttl`` wins.
+        Best-effort — never raises: a Redis hiccup must not break the cancel
+        path (the run-level timeout is the ultimate bound).
+        """
+        seconds = self._ttl if ttl is None else ttl
+        try:
+            if seconds > 0:
+                await self._redis.set(self._cancel_key(run_id), "1", ex=seconds)  # type: ignore[arg-type]
+            else:
+                await self._redis.set(self._cancel_key(run_id), "1")  # type: ignore[arg-type]
+        except Exception:
+            pass
+
+    async def is_cancelled(self, run_id: str) -> bool:
+        """``True`` iff the cancel flag is set. Fails OPEN on Redis error.
+
+        On a Redis error we return ``False`` (run continues): cancel is
+        cooperative/best-effort, and a transient blip must not spuriously kill
+        an in-flight run. If Redis is fully down the flag could not have been
+        SET either (``request_cancel`` is best-effort), so fail-open keeps the
+        two sides consistent; the run-level timeout remains the hard bound.
+        """
+        try:
+            return bool(await self._redis.exists(self._cancel_key(run_id)))
+        except Exception:
+            return False
 
     async def put(self, status: RunStatus) -> None:
         """Overwrite the status hash (resets TTL). Never raises — best-effort."""

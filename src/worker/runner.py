@@ -126,6 +126,16 @@ class RunConsumer:
                 await self._status.mark(
                     run_id, thread_id, JobStatus.RUNNING, iteration_count=iteration
                 )
+                # E (cancel checkpoint): poll the Redis cancel flag each
+                # iteration and raise ``RunCancelled`` when set → propagates
+                # through execute_run's progress-callback path (src/runner.py
+                # re-raises it rather than swallowing as observability-only) to
+                # this run's ``except RunCancelled`` handler → terminal CANCELLED
+                # + acked. ~1-iteration latency (fast on q09-style cap-loop
+                # churn). ``is_cancelled`` fails open on Redis error, so a blip
+                # never spuriously kills a healthy run.
+                if await self._status.is_cancelled(run_id):
+                    raise RunCancelled(f"cancelled via POST /runs/{run_id}/cancel")
 
             try:
                 # ── Run-level wall-clock timeout (A, opt-in) ──────────────────

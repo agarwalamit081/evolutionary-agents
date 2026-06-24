@@ -134,3 +134,73 @@ class TestRunStatusStore:
         assert rec.final_output == "answer"
         assert rec.is_complete is True
         assert rec.iteration_count == 4
+
+
+class _ExplodingRedis:
+    """Stub whose set/exists raise — proves request_cancel/is_cancelled are
+    best-effort (never raise / fail-open) on a Redis error."""
+
+    async def set(self, *_a: object, **_kw: object) -> None:
+        raise RuntimeError("redis down")
+
+    async def exists(self, *_a: object, **_kw: object) -> int:
+        raise RuntimeError("redis down")
+
+
+class TestRunStatusStoreCancelFlag:
+    async def test_request_cancel_then_is_cancelled(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """Setting the flag flips is_cancelled from False to True."""
+        store = RunStatusStore(fake_redis, worker_settings)
+        assert await store.is_cancelled("r1") is False
+        await store.request_cancel("r1")
+        assert await store.is_cancelled("r1") is True
+
+    async def test_request_cancel_idempotent(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """A repeat POST is a no-op — the flag's presence IS the signal."""
+        store = RunStatusStore(fake_redis, worker_settings)
+        await store.request_cancel("r1")
+        await store.request_cancel("r1")
+        assert await store.is_cancelled("r1") is True
+
+    async def test_is_cancelled_false_for_unrelated_run(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """The flag is per-run_id — cancelling r1 does not cancel r2."""
+        store = RunStatusStore(fake_redis, worker_settings)
+        await store.request_cancel("r1")
+        assert await store.is_cancelled("r2") is False
+
+    async def test_cancel_flag_uses_separate_key_from_status(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """The cancel flag must not collide with the status hash namespace."""
+        store = RunStatusStore(fake_redis, worker_settings)
+        await store.put(
+            RunStatus(run_id="r1", thread_id="api-r1", status=JobStatus.RUNNING)
+        )
+        await store.request_cancel("r1")
+        # A status record WITHOUT a cancel flag still reads as not-cancelled.
+        assert await store.is_cancelled("r1") is True
+        # And a cancelled run with no status record still reads cancelled.
+        await store.request_cancel("solo")
+        assert await store.is_cancelled("solo") is True
+        assert await store.get("solo") is None
+
+    async def test_is_cancelled_fails_open_on_redis_error(
+        self, worker_settings
+    ) -> None:
+        """On a Redis error is_cancelled returns False (run continues) — cancel
+        is cooperative/best-effort; the run-timeout is the hard bound."""
+        store = RunStatusStore(_ExplodingRedis(), worker_settings)
+        assert await store.is_cancelled("r1") is False
+
+    async def test_request_cancel_never_raises_on_redis_error(
+        self, worker_settings
+    ) -> None:
+        """request_cancel is best-effort — a Redis error must not propagate."""
+        store = RunStatusStore(_ExplodingRedis(), worker_settings)
+        await store.request_cancel("r1")  # no raise

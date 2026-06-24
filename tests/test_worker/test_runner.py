@@ -552,6 +552,72 @@ class TestRunConsumerRunControl:
         assert rec.status is JobStatus.CANCELLED
         assert "cancelled" in (rec.error or "")
 
+    async def test_progress_callback_raises_cancel_when_flag_set(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """E (cancel checkpoint): the per-iteration progress callback the worker
+        passes to execute_run polls the cancel flag and raises ``RunCancelled``
+        → CANCELLED + acked. Unlike the direct-raise test above, this exercises
+        the REAL flag-check chain — ``request_cancel`` → ``_report_progress``
+        → ``is_cancelled`` → ``raise RunCancelled`` — by invoking the callback
+        the way execute_run does (``await on_progress(ic)``)."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        job = RunJob(run_id="can2", goal="g")
+
+        # Pre-set the cancel flag before the run polls it.
+        await store.request_cancel("can2")
+
+        async def poller(_j: RunJob, progress: Any = None) -> dict[str, Any]:
+            # Mimic execute_run's worker path: report iteration via the
+            # callback (the worker's _report_progress closure) — which sees the
+            # flag and raises RunCancelled before we reach the return.
+            assert progress is not None
+            await progress(1)
+            return _ok_result()  # unreachable: progress raises first
+
+        consumer = RunConsumer(queue, store, poller, worker_settings)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()
+
+        assert await consumer._process(entry_id, job) is True  # terminal — acked
+        assert await queue.pending_count() == 0
+        rec = await store.get("can2")
+        assert rec is not None
+        assert rec.status is JobStatus.CANCELLED
+        assert "cancel" in (rec.error or "").lower()
+
+    async def test_progress_callback_continues_when_flag_unset(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """E (no-op when not cancelled): with no flag set, the progress callback
+        reports iteration and returns normally — the run is NOT killed. Locks
+        that adding the cancel checkpoint did not regress the happy path."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        job = RunJob(run_id="ok", goal="g")
+
+        seen: list[int] = []
+
+        async def healthy(_j: RunJob, progress: Any = None) -> dict[str, Any]:
+            assert progress is not None
+            await progress(1)
+            await progress(2)
+            seen.extend([1, 2])
+            return _ok_result()
+
+        consumer = RunConsumer(queue, store, healthy, worker_settings)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()
+
+        assert await consumer._process(entry_id, job) is True  # completed — acked
+        rec = await store.get("ok")
+        assert rec is not None
+        assert rec.status is JobStatus.COMPLETED
+        assert seen == [1, 2]
+
     async def test_budget_exhausted_marks_terminal_budget_exhausted(
         self, fake_redis, worker_settings
     ) -> None:

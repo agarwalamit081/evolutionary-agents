@@ -71,6 +71,19 @@ class StatusResponse(BaseModel):
     finished_at: str
 
 
+class CancelResponse(BaseModel):
+    """Acknowledgement of a graceful cancel request (202 Accepted).
+
+    The cancel is cooperative: this confirms the flag was set, not that the run
+    has stopped. The worker polls the flag at its per-iteration progress callback
+    (~1-iteration latency) and transitions the run to ``CANCELLED`` (the run-level
+    timeout is the hard bound if the worker is mid-iteration).
+    """
+
+    run_id: str
+    status: str
+
+
 def _client_and_queue() -> tuple[RunsQueue, RunStatusStore]:
     """Build a per-request queue + status store over a fresh Redis client.
 
@@ -145,6 +158,33 @@ async def get_run_status(run_id: str) -> StatusResponse:
             detail=f"Unknown or expired run_id: {run_id}",
         )
     return _to_response(record)
+
+
+@router.post(
+    "/runs/{run_id}/cancel",
+    response_model=CancelResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def cancel_run(run_id: str) -> CancelResponse:
+    """Request a graceful cancel of an in-flight run.
+
+    Sets a Redis flag the worker polls at its per-iteration progress callback →
+    ``RunCancelled`` → terminal ``CANCELLED`` + acked (NOT redelivered). Cancel
+    is cooperative (~1-iteration latency); the run-level wall-clock timeout is
+    the hard bound. ``404`` when no status record exists for ``run_id``
+    (unknown/expired). Idempotent: a repeat POST is a no-op (the flag's mere
+    presence is the signal), so cancelling an already-terminal run is harmless.
+    """
+    _, status_store = _client_and_queue()
+    record: RunStatus | None = await status_store.get(run_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown or expired run_id: {run_id}",
+        )
+    await status_store.request_cancel(run_id)
+    logger.info(f"API: cancel requested for run {run_id}")
+    return CancelResponse(run_id=run_id, status="cancel_requested")
 
 
 def _to_response(record: RunStatus) -> StatusResponse:

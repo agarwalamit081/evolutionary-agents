@@ -72,3 +72,60 @@ class TestAgentRoutes:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.post(f"{API_PREFIX}/run", json={"goal": ""})
         assert resp.status_code == 422
+
+
+class TestCancelRoute:
+    async def test_cancel_returns_202_when_run_exists(self, fakeredis_app) -> None:
+        transport = ASGITransport(app=fakeredis_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            post = await ac.post(
+                f"{API_PREFIX}/run", json={"goal": "g", "run_id": "r9"}
+            )
+            cancel = await ac.post(f"{API_PREFIX}/runs/r9/cancel")
+        assert post.status_code == 202
+        assert cancel.status_code == 202
+        body = cancel.json()
+        assert body["run_id"] == "r9"
+        assert body["status"] == "cancel_requested"
+
+    async def test_cancel_404_when_unknown(self, fakeredis_app) -> None:
+        transport = ASGITransport(app=fakeredis_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(f"{API_PREFIX}/runs/never-existed/cancel")
+        assert resp.status_code == 404
+
+    async def test_cancel_idempotent(self, fakeredis_app) -> None:
+        """A repeat POST is a no-op (the flag's presence is the signal)."""
+        transport = ASGITransport(app=fakeredis_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post(f"{API_PREFIX}/run", json={"goal": "g", "run_id": "r7"})
+            first = await ac.post(f"{API_PREFIX}/runs/r7/cancel")
+            second = await ac.post(f"{API_PREFIX}/runs/r7/cancel")
+        assert first.status_code == 202
+        assert second.status_code == 202  # still accepted — no-op
+
+    async def test_cancel_sets_flag_in_shared_redis(self, monkeypatch) -> None:
+        """Integration: the route sets the cancel flag on the SAME Redis the
+        status store reads, so the worker's progress poll observes it. Pins the
+        wiring end-to-end (``aioredis.from_url`` → ``request_cancel`` → Redis)."""
+        server = fakeredis.FakeServer()
+        shared: dict[str, object] = {}
+
+        def fake_from_url(_url: str, **_kw: object):
+            if "client" not in shared:
+                shared["client"] = fakeredis.FakeAsyncRedis(server=server)
+            return shared["client"]
+
+        monkeypatch.setattr(agent_mod.aioredis, "from_url", fake_from_url)
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post(f"{API_PREFIX}/run", json={"goal": "g", "run_id": "rF"})
+            resp = await ac.post(f"{API_PREFIX}/runs/rF/cancel")
+        assert resp.status_code == 202
+        # Read the flag back over the SAME shared client the route wrote to.
+        from src.config import get_settings
+        from src.worker.status import RunStatusStore
+
+        store = RunStatusStore(shared["client"], get_settings().worker)  # type: ignore[arg-type]
+        assert await store.is_cancelled("rF") is True

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from src.config import get_settings
 from src.graph.enums import Phase
 from src.graph.state import AgentState
 
@@ -164,11 +165,32 @@ async def tool_create_node(
             f"Clearing {len(failed_gaps)} failed tool gap(s) to prevent retry loops"
         )
 
+    # q09 run-control B: a tool cap block is precise — NO tool was created this
+    # round AND the generated-tool population is already at max_active_tools
+    # (so registration was skipped, not failed for a generative reason). This
+    # distinguishes a saturated cap (the q09 loop) from a transient LLM/safety
+    # failure. Mirrors agent_spawn's streak bookkeeping: progress resets,
+    # cap-block increments, non-cap failure preserves.
+    cap_blocked = (
+        not created_tools
+        and bool(pending_gaps)
+        and tools.generated_count >= get_settings().agent.max_active_tools
+    )
+    prev_cap_blocks = int(state.get("consecutive_cap_blocks", 0) or 0)
+    if created_tools:
+        cap_count = 0
+    elif cap_blocked:
+        cap_count = prev_cap_blocks + 1
+    else:
+        cap_count = prev_cap_blocks
+
     return {
         "phase": Phase.PLAN if created_tools else Phase.EXECUTE,
         "pending_tool_gaps": [],
         "attempted_tool_gaps": list(pending_gaps),  # record all attempted to prevent re-detection
         "tools_created": created_tools,
+        "cap_blocked": cap_blocked,
+        "consecutive_cap_blocks": cap_count,
     }
 
 

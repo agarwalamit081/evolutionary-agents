@@ -132,6 +132,25 @@ def route_after_reflect(state: AgentState) -> str:
         )
         return "verify"
 
+    # Capability-cap gap-loop break (q09 run-control B): when capability caps
+    # are saturated, agent_spawn converts agent gaps → tool gaps and tool_create
+    # skips registration at cap, so this chokepoint re-routes into spawn→create
+    # with NO new capability produced, forever (the q09 loop, halted only by a
+    # container restart). ``consecutive_cap_blocks`` counts cap-blocked
+    # spawn/create rounds (reset to 0 on real progress by the nodes themselves);
+    # once it reaches ``cap_loop_break_threshold`` (default 3), stop chasing the
+    # unfillable gaps and route to verify to accept the partial result. Mirrors
+    # the B3 terminator: accept partial, do NOT set is_complete.
+    consecutive_cap_blocks = int(state.get("consecutive_cap_blocks", 0) or 0)
+    cap_threshold = get_settings().agent.cap_loop_break_threshold
+    if cap_threshold > 0 and consecutive_cap_blocks >= cap_threshold:
+        logger.info(
+            f"Capability caps saturated for {consecutive_cap_blocks} consecutive "
+            f"spawn/create round(s) (threshold={cap_threshold}); routing to "
+            f"verify to accept partial result instead of looping"
+        )
+        return "verify"
+
     # Check for sub-agent gaps first — highest priority
     pending_agent_gaps = state.get("pending_agent_gaps", [])
     if pending_agent_gaps:

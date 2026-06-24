@@ -71,6 +71,11 @@ async def agent_spawn_node(
     converted_tool_gaps: list[str] = []
     attempted: list[str] = []
     created_count = len(state.get("sub_agents_spawned", []))
+    # q09 run-control B: True iff a capability cap blocked this round (no agent
+    # could be spawned because max-per-run OR max-active-population was reached).
+    # Stamped at the two cap-break sites; drives consecutive_cap_blocks in the
+    # return so route_after_reflect can break the spawn<->create ping-pong.
+    cap_blocked = False
 
     max_sub_agents = get_settings().agent.max_sub_agents_per_run
     max_active_sub_agents = get_settings().agent.max_active_sub_agents
@@ -87,6 +92,7 @@ async def agent_spawn_node(
                 f"tool to handle subtask: {g}"
                 for g in pending_gaps[remaining_idx:]
             ]
+            cap_blocked = True
             break
 
         # Active-population cap (findings.md A3): the total stored/active
@@ -107,6 +113,7 @@ async def agent_spawn_node(
                 f"tool to handle subtask: {g}"
                 for g in pending_gaps[remaining_idx:]
             ]
+            cap_blocked = True
             break
 
         spawn_result = await _spawn_single_agent(
@@ -127,11 +134,26 @@ async def agent_spawn_node(
             # Failed spawn — convert to tool gap as fallback
             converted_tool_gaps.append(f"tool to handle subtask: {gap_description}")
 
+    # q09 run-control B: streak of consecutive cap-blocked spawn/create rounds.
+    # Real progress (an agent was spawned) resets it; a cap block increments it;
+    # a non-cap failure with no progress preserves the prior value so a
+    # tool_create-side saturation isn't masked. route_after_reflect breaks the
+    # loop when this reaches cap_loop_break_threshold.
+    prev_cap_blocks = int(state.get("consecutive_cap_blocks", 0) or 0)
+    if spawned:
+        cap_count = 0
+    elif cap_blocked:
+        cap_count = prev_cap_blocks + 1
+    else:
+        cap_count = prev_cap_blocks
+
     result: dict[str, Any] = {
         "phase": Phase.DELEGATE if spawned else Phase.EXECUTE,
         "pending_agent_gaps": [],
         "attempted_agent_gaps": attempted,
         "sub_agents_spawned": spawned,
+        "cap_blocked": cap_blocked,
+        "consecutive_cap_blocks": cap_count,
     }
 
     # If remaining gaps were converted to tool gaps, include them

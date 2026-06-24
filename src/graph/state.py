@@ -77,6 +77,21 @@ class AgentState(TypedDict, total=False):
     consecutive_stable_verifies: int
     last_verify_fingerprint: str | None
 
+    # ─── Capability-cap gap-loop break (q09 run-control B) ───────────────
+    # When both capability caps saturate (sub-agents at max_active_sub_agents,
+    # generated tools at max_active_tools), agent_spawn converts agent gaps to
+    # tool gaps and tool_create skips registration at cap — so reflect re-routes
+    # into spawn→create with NO new capability produced, forever (the q09 loop,
+    # which had to be halted via a container restart). ``consecutive_cap_blocks``
+    # counts spawn/create rounds that hit a cap and made no progress; a node that
+    # DOES make progress resets it to 0. Both overwrite (no reducer): each node
+    # computes the full new value (prev+1 if this round was cap-blocked, else 0).
+    # ``route_after_reflect`` reads the counter and routes to ``verify`` (accept
+    # partial) once it reaches ``cap_loop_break_threshold``. ``cap_blocked`` is
+    # the per-round boolean the nodes stamp (observability).
+    cap_blocked: bool
+    consecutive_cap_blocks: int
+
     # ─── Goal & Planning ────────────────────────────────────────────────
     current_goal: Goal
     # Immutable objective anchor (battery-04 #254 structural backstop): the

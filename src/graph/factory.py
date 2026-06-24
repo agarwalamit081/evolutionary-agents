@@ -81,6 +81,11 @@ def initial_state(
         # always resets consecutive_stable_verifies to 0 (no prior fingerprint).
         consecutive_stable_verifies=0,
         last_verify_fingerprint=None,
+        # Capability-cap gap-loop break (q09 run-control B): seeded at 0/False so
+        # the first spawn/create round starts unblocked. Either node that makes
+        # progress resets consecutive_cap_blocks to 0.
+        cap_blocked=False,
+        consecutive_cap_blocks=0,
         errors=[],
         fold_history=[],
         last_fold_iteration=0,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 
 from src.config.settings import get_settings
 from src.graph.enums import Confidence, TaskComplexity
@@ -674,6 +676,48 @@ class TestRouteAfterReflectAgentGaps:
         sample_state["pending_tool_gaps"] = ["missing_tool"]
         result = route_after_reflect(sample_state)
         assert result == "tool_create"
+
+
+class TestCapabilityCapLoopBreak:
+    """q09 run-control B: route_after_reflect must break the capability-cap
+    spawn<->create ping-pong once consecutive cap-blocks reach the threshold,
+    routing to ``verify`` (accept partial) instead of re-routing into the
+    unfillable gaps forever (the q09 loop that had to be halted via a container
+    restart). The counter is reset to 0 on real progress by the spawn/create
+    nodes themselves; here we assert the router reads it correctly."""
+
+    def test_breaks_to_verify_at_threshold(self, sample_state: dict[str, Any]) -> None:
+        """At threshold (3) with agent gaps present → verify, NOT agent_spawn."""
+        sample_state["pending_agent_gaps"] = ["Need specialist"]
+        sample_state["consecutive_cap_blocks"] = 3
+        assert route_after_reflect(sample_state) == "verify"
+
+    def test_breaks_to_verify_above_threshold(self, sample_state: dict[str, Any]) -> None:
+        """Above threshold with tool gaps present → verify, NOT tool_create."""
+        sample_state["pending_tool_gaps"] = ["missing_tool"]
+        sample_state["consecutive_cap_blocks"] = 5
+        assert route_after_reflect(sample_state) == "verify"
+
+    def test_does_not_break_below_threshold(self, sample_state: dict[str, Any]) -> None:
+        """Below threshold still routes to gap resolution (agent_spawn)."""
+        sample_state["pending_agent_gaps"] = ["Need specialist"]
+        sample_state["consecutive_cap_blocks"] = 2
+        assert route_after_reflect(sample_state) == "agent_spawn"
+
+    def test_default_counter_routes_to_gaps(self, sample_state: dict[str, Any]) -> None:
+        """No counter key (default 0) → backward compatible: routes to tool_create."""
+        sample_state["pending_tool_gaps"] = ["missing_tool"]
+        # consecutive_cap_blocks intentionally absent (default 0 via state.get).
+        assert route_after_reflect(sample_state) == "tool_create"
+
+    def test_disabled_when_threshold_zero(
+        self, sample_state: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """threshold=0 disables the break (opt-out) even at a high counter."""
+        monkeypatch.setattr(get_settings().agent, "cap_loop_break_threshold", 0)
+        sample_state["pending_agent_gaps"] = ["Need specialist"]
+        sample_state["consecutive_cap_blocks"] = 99
+        assert route_after_reflect(sample_state) == "agent_spawn"
 
 
 class TestRouteAfterStructureAnalysis:

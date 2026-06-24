@@ -64,6 +64,11 @@ class TestToolCreateNode:
         gateway = MagicMock()
         tools = MagicMock()
         tools.list_tools = MagicMock(return_value=[])
+        # generated_count is a real int property on ToolRegistry (active generated
+        # tools); the q09 cap-block detection in tool_create_node reads it. 0 =
+        # below cap, so cap_blocked stays False (these tests exercise generative
+        # success/failure, not cap saturation).
+        tools.generated_count = 0
         state = _make_state(gaps=["HTTP fetcher"])
 
         result = await tool_create_node(state, gateway=gateway, tools=tools)
@@ -82,6 +87,11 @@ class TestToolCreateNode:
         gateway = MagicMock()
         tools = MagicMock()
         tools.list_tools = MagicMock(return_value=[])
+        # generated_count is a real int property on ToolRegistry (active generated
+        # tools); the q09 cap-block detection in tool_create_node reads it. 0 =
+        # below cap, so cap_blocked stays False (these tests exercise generative
+        # success/failure, not cap saturation).
+        tools.generated_count = 0
         state = _make_state(gaps=["HTTP fetcher"])
 
         result = await tool_create_node(state, gateway=gateway, tools=tools)

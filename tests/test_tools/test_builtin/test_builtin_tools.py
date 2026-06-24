@@ -298,6 +298,169 @@ class TestCodeExecutorCWD:
         assert not (tmp_path / "report.md").exists()
 
 
+class TestCodeExecutorRunSubdir:
+    """Per-run subfoldering: code_executor deliverables isolate under
+    ``results/<run_id>/`` (no flat leakage) and reads round-trip / fall back."""
+
+    @pytest.mark.asyncio
+    async def test_write_isolates_under_run_subdir(self, tmp_path: Path) -> None:
+        """``results/<file>`` lands under ``results/<run_id>/<file>``, not flat."""
+        from src.config.settings import AgentSettings
+        from src.tools._paths import set_active_run_id
+
+        mock_settings = AgentSettings(results_root=str(tmp_path / "results"))
+        set_active_run_id("q09")
+        try:
+            with patch(
+                "src.config.settings.get_settings",
+                return_value=type("S", (), {"agent": mock_settings}),
+            ):
+                await code_executor(
+                    "with open('results/transactions.csv', 'w') as f:\n"
+                    "    f.write('DATA')\n"
+                )
+        finally:
+            set_active_run_id(None)
+
+        assert (tmp_path / "results" / "q09" / "transactions.csv").exists()
+        assert (tmp_path / "results" / "q09" / "transactions.csv").read_text() == "DATA"
+        # No flat leakage into the shared results root.
+        assert not (tmp_path / "results" / "transactions.csv").exists()
+
+    @pytest.mark.asyncio
+    async def test_bare_write_lands_under_run_subdir(self, tmp_path: Path) -> None:
+        """A BARE relative write (no ``results/`` prefix) lands under
+        ``results/<run_id>/`` — not in the project root (the cwd)."""
+        from src.config.settings import AgentSettings
+        from src.tools._paths import set_active_run_id
+
+        mock_settings = AgentSettings(results_root=str(tmp_path / "results"))
+        set_active_run_id("q09")
+        try:
+            with patch(
+                "src.config.settings.get_settings",
+                return_value=type("S", (), {"agent": mock_settings}),
+            ):
+                await code_executor(
+                    "with open('compute.py', 'w') as f:\n"
+                    "    f.write('CODE')\n"
+                )
+        finally:
+            set_active_run_id(None)
+
+        assert (tmp_path / "results" / "q09" / "compute.py").exists()
+        assert (tmp_path / "results" / "q09" / "compute.py").read_text() == "CODE"
+        # cwd = parent of results_root = tmp_path; the bare write must not land there.
+        assert not (tmp_path / "compute.py").exists()
+        assert not (tmp_path / "results" / "compute.py").exists()
+
+    @pytest.mark.asyncio
+    async def test_write_not_double_nested_in_run_subdir(self, tmp_path: Path) -> None:
+        """A goal already naming ``results/<run_id>/<file>`` is NOT double-nested
+        to ``results/<run_id>/<run_id>/<file>`` (the strip-set includes run_id)."""
+        from src.config.settings import AgentSettings
+        from src.tools._paths import set_active_run_id
+
+        mock_settings = AgentSettings(results_root=str(tmp_path / "results"))
+        set_active_run_id("q09")
+        try:
+            with patch(
+                "src.config.settings.get_settings",
+                return_value=type("S", (), {"agent": mock_settings}),
+            ):
+                await code_executor(
+                    "with open('results/q09/report.md', 'w') as f:\n"
+                    "    f.write('body')\n"
+                )
+        finally:
+            set_active_run_id(None)
+
+        assert (tmp_path / "results" / "q09" / "report.md").exists()
+        assert (tmp_path / "results" / "q09" / "report.md").read_text() == "body"
+        assert not (tmp_path / "results" / "q09" / "q09" / "report.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_read_round_trips_after_subdir_write(self, tmp_path: Path) -> None:
+        """A write then a relative read of the same path finds the subdir file."""
+        from src.config.settings import AgentSettings
+        from src.tools._paths import set_active_run_id
+
+        mock_settings = AgentSettings(results_root=str(tmp_path / "results"))
+        set_active_run_id("q09")
+        try:
+            with patch(
+                "src.config.settings.get_settings",
+                return_value=type("S", (), {"agent": mock_settings}),
+            ):
+                result = await code_executor(
+                    "with open('results/foo.csv', 'w') as f:\n"
+                    "    f.write('ROUNDTRIP')\n"
+                    "print(open('results/foo.csv').read())\n"
+                )
+        finally:
+            set_active_run_id(None)
+
+        assert "ROUNDTRIP" in result
+        assert (tmp_path / "results" / "q09" / "foo.csv").exists()
+
+    @pytest.mark.asyncio
+    async def test_read_falls_back_to_flat_for_legacy(self, tmp_path: Path) -> None:
+        """A flat-only deliverable (prior run, no subdir copy) still recalls via
+        the read flat-fallback — mirroring ``resolve_existing``."""
+        from src.config.settings import AgentSettings
+        from src.tools._paths import set_active_run_id
+
+        results = tmp_path / "results"
+        results.mkdir(parents=True, exist_ok=True)
+        # Legacy FLAT deliverable from a prior run (NOT under q09/).
+        (results / "legacy.csv").write_text("LEGACY")
+        mock_settings = AgentSettings(results_root=str(results))
+        set_active_run_id("q09")
+        try:
+            with patch(
+                "src.config.settings.get_settings",
+                return_value=type("S", (), {"agent": mock_settings}),
+            ):
+                result = await code_executor("print(open('legacy.csv').read())\n")
+        finally:
+            set_active_run_id(None)
+
+        assert "LEGACY" in result
+        # The read did not relocate/create a subdir copy.
+        assert not (results / "q09" / "legacy.csv").exists()
+
+    @pytest.mark.asyncio
+    async def test_traversal_write_not_relocated_outside_run_subdir(
+        self, tmp_path: Path
+    ) -> None:
+        """A traversal write (``../../escape``) is NOT relocated into the run cell
+        — the traversal guard holds and the shim falls back to the original
+        CWD-relative path rather than ever writing outside the cell via relocation."""
+        from src.config.settings import AgentSettings
+        from src.tools._paths import set_active_run_id
+
+        # results_root two levels deep so the guard-failed CWD-relative fall-back
+        # ("../../escape.txt" from cwd=project_root) stays inside tmp_path.
+        results = tmp_path / "deep" / "results"
+        mock_settings = AgentSettings(results_root=str(results))
+        set_active_run_id("q09")
+        try:
+            with patch(
+                "src.config.settings.get_settings",
+                return_value=type("S", (), {"agent": mock_settings}),
+            ):
+                await code_executor(
+                    "with open('../../escape.txt', 'w') as f:\n"
+                    "    f.write('PWN')\n"
+                )
+        finally:
+            set_active_run_id(None)
+
+        # The traversal was NOT relocated into the run cell (or the results root).
+        assert not (results / "q09" / "escape.txt").exists()
+        assert not (results / "escape.txt").exists()
+
+
 class TestFileWriterResultsDir:
     """Tests for file_writer defaulting to results_root."""
 

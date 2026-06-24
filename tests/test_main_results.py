@@ -14,6 +14,7 @@ override (which mutates ``settings.agent.results_root``) is restored via
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import click.testing
 import pytest
@@ -34,34 +35,58 @@ def _pin_results_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(agent, "results_root", agent.results_root)
 
 
+def _pin_fake_settings_root(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Redirect the resolver's ``get_settings`` to a fake whose results_root is ``root``.
+
+    ``_clean_run_results`` resolves the subdir via ``_paths.run_subdir_path``, which
+    reads ``src.config.settings.get_settings().agent.results_root`` (NOT a passed
+    root) — so unit tests pin the singleton to a tmp dir. Both the ``__init__``
+    re-export and the settings-module attribute are patched so every reader
+    (the CLI path, the resolver, and the cleaner) sees the fake.
+    """
+    fake = SimpleNamespace(agent=SimpleNamespace(results_root=str(root)))
+    monkeypatch.setattr("src.config.get_settings", lambda: fake)
+    monkeypatch.setattr("src.config.settings.get_settings", lambda: fake)
+
+
 class TestCleanRunResults:
     """``_clean_run_results`` targets exactly one run's subfolder, safely."""
 
-    def test_removes_only_the_run_subfolder(self, tmp_path: Path) -> None:
+    def test_removes_only_the_run_subfolder(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         root = tmp_path / "res"
         (root / "q01").mkdir(parents=True)
         (root / "q01" / "x.md").write_text("d")
         (root / "other.md").write_text("keep")  # sibling must survive
 
-        main_mod._clean_run_results(str(root), "q01")
+        _pin_fake_settings_root(monkeypatch, root)
+        main_mod._clean_run_results("q01")
 
         assert not (root / "q01").exists()
         assert (root / "other.md").exists()
         assert root.exists()  # results_root itself never removed
 
-    def test_refuses_missing_run_id(self) -> None:
+    def test_refuses_missing_run_id(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _pin_fake_settings_root(monkeypatch, tmp_path / "res")
         with pytest.raises(SystemExit):
-            main_mod._clean_run_results("results", None)
+            main_mod._clean_run_results(None)
 
     @pytest.mark.parametrize("bad", ["..", ".", "../etc", "a/b", "a\\b", ""])
-    def test_refuses_unsafe_run_id(self, tmp_path: Path, bad: str) -> None:
+    def test_refuses_unsafe_run_id(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad: str
+    ) -> None:
+        _pin_fake_settings_root(monkeypatch, tmp_path)
         with pytest.raises(SystemExit):
-            main_mod._clean_run_results(str(tmp_path), bad)
+            main_mod._clean_run_results(bad)
 
     def test_noop_when_subfolder_absent(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        main_mod._clean_run_results(str(tmp_path / "res"), "q01")
+        _pin_fake_settings_root(monkeypatch, tmp_path / "res")
+        main_mod._clean_run_results("q01")
         assert "no prior subfolder" in capsys.readouterr().out
 
 

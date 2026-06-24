@@ -17,7 +17,11 @@ identically whether written, executed, or cat'd.
 from __future__ import annotations
 
 import contextvars
+import re
+import shutil
 from pathlib import Path
+
+from loguru import logger
 
 # Reference the *module object* (not the symbol) so tests can monkeypatch
 # ``src.config.settings.get_settings`` (the single source) and have it take
@@ -127,6 +131,65 @@ def workspace_root() -> Path:
 def project_root() -> Path:
     """Resolved project root — the single cwd for all file-touching tools."""
     return _project_root()
+
+
+# A run_id is a single safe path component (the CLI/worker pass ``q09`` /
+# ``battery04_q09-20260624``). No separators, no ``.``/``..`` — so it can never
+# name a traversal target when joined under results_root.
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9_.\-]+")
+
+
+def run_subdir_path(run_id: str) -> Path:
+    """Resolve a run's results subfolder ``<results_root>/<run_id>`` safely.
+
+    Validates ``run_id`` is a single safe path component and that the resolved
+    folder stays inside ``results_root``, so a caller cannot name a traversal
+    target. Mirrors the safety the CLI ``--clean`` applies
+    (``main._clean_run_results``) but returns the Path so the worker path can
+    reuse it without CLI coupling.
+
+    Raises:
+        ValueError: ``run_id`` is empty, contains separators/``..``, or the
+            resolved folder escapes ``results_root``.
+    """
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or run_id in {".", ".."}
+        or _RUN_ID_RE.fullmatch(run_id) is None
+    ):
+        raise ValueError(f"unsafe run_id: {run_id!r}")
+    base = _results_root()
+    sub = (base / run_id).resolve()
+    if sub == base or not sub.is_relative_to(base):
+        raise ValueError(f"run subdir escapes results_root: {sub}")
+    return sub
+
+
+def clean_run_subdir(run_id: str) -> bool:
+    """Delete a run's results subfolder if present (best-effort, never raises).
+
+    Removes ONLY ``<results_root>/<run_id>`` — never the whole ``results_root``
+    and never anything that resolves outside it. Returns ``True`` if a subfolder
+    was removed, ``False`` if none existed or the run_id was refused. Any failure
+    is logged at DEBUG and swallowed so a run never aborts on cleanup —
+    contamination prevention is best-effort (the same resilience posture as the
+    cost-ledger / curve-gate writes).
+    """
+    try:
+        sub = run_subdir_path(run_id)
+    except ValueError as exc:
+        logger.debug(f"clean_run_subdir refused unsafe run_id: {exc}")
+        return False
+    if not sub.exists():
+        return False
+    try:
+        shutil.rmtree(sub)
+    except OSError as exc:
+        logger.debug(f"clean_run_subdir could not remove {sub}: {exc}")
+        return False
+    logger.info(f"Cleared prior results subfolder: {sub}")
+    return True
 
 
 def _strip_names(*extra: str) -> set[str]:

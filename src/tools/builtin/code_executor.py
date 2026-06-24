@@ -11,7 +11,7 @@ from loguru import logger
 
 from src.config.settings import ToolSandboxSettings, get_settings
 from src.sandbox.executor import SandboxUnavailable
-from src.tools._paths import project_root, results_root
+from src.tools._paths import _subdir_active, get_active_run_id, project_root, results_root
 
 if TYPE_CHECKING:
     from src.sandbox.executor import SandboxResult
@@ -32,7 +32,18 @@ def _tool_sandbox() -> ToolSandboxSettings:
     return get_settings().tool_sandbox
 
 
-def _write_bootstrap(results_root_abs: str) -> str:
+def _active_run_subdir() -> str | None:
+    """The run_id to isolate code_executor deliverables under, or ``None``.
+
+    Returns the bound run_id only when per-run subfoldering is on
+    (``RESULTS_PER_RUN_SUBDIR`` + a bound run_id); otherwise ``None`` so
+    ``_write_bootstrap`` emits the legacy (non-isolating) shim and behavior is
+    byte-identical to today for non-run-id paths.
+    """
+    return get_active_run_id() if _subdir_active() else None
+
+
+def _write_bootstrap(results_root_abs: str, run_subdir: str | None = None) -> str:
     """Build the shim prepended to every executed script.
 
     For write/append/exclusive opens (``w``/``a``/``x``) the shim has two
@@ -54,9 +65,19 @@ def _write_bootstrap(results_root_abs: str) -> str:
        to the original path, so the shim is never worse than today.
 
     ``results_root_abs=""`` yields the legacy parent-mkdir-only shim (no
-    relocation): the mode for the remote runner, whose results dir lives inside
-    a disposable container the worker cannot name — bare writes there land in
-    that isolated container, never the repo root.
+    relocation) — reached only when no results root is known (degenerate; both
+    real modes pass a root today).
+
+    ``run_subdir`` (a validated single-component run_id), when set, additionally
+    isolates THIS run's deliverables under ``<results_root_abs>/<run_subdir>/``:
+    relative writes are stripped of a leading ``results/``/root-name/
+    ``run_subdir`` component, namespaced under the subdir, and traversal-guarded
+    to stay inside it; relative reads resolve subdir-first with a flat-root
+    fallback (a write→read round-trip finds the file; legacy flat data still
+    recalls). ``run_subdir=None`` is byte-identical to the legacy relocating
+    shim. This closes the flat-write contamination vector: code_executor
+    deliverables used to land FLAT under ``results/`` (file_writer subfolders),
+    so a prior run's flat file was recalled by a later run via the flat fallback.
     """
     # Absolute-path + read-mode opens are never touched; only relative writes
     # are mkdir'd and (when a results root is given) relocated.
@@ -72,27 +93,82 @@ def _write_bootstrap(results_root_abs: str) -> str:
             "    return _turing_open_orig(p, m, *a, **k)\n"
             "_turing_b.open = _turing_open\n"
         )
-    # Escape the injected path so an odd config (backslash/quote) cannot break
-    # out of the literal. POSIX results paths have neither, but stay safe.
+    # Escape injected literals so an odd config (backslash/quote) cannot break
+    # out of the generated string. POSIX paths/run_ids have neither, but stay safe.
     root_literal = results_root_abs.replace("\\", "\\\\").replace('"', '\\"')
+    if run_subdir is None:
+        # Legacy relocating shim: a bare relative write (NOT already under
+        # results/) is relocated into results_root_abs. Reads/abs-paths untouched.
+        return (
+            "import builtins as _turing_b, os as _turing_os\n"
+            "_turing_open_orig = _turing_b.open\n"
+            f'_TURING_RESULTS = "{root_literal}"\n'
+            "def _turing_open(p, m='r', *a, **k):\n"
+            "    if any(c in str(m) for c in 'wax'):\n"
+            "        _s = str(p)\n"
+            "        if not _turing_os.path.isabs(_s):\n"
+            "            _here = _turing_os.path.abspath(_s)\n"
+            "            if not (_here == _TURING_RESULTS or _here.startswith(_TURING_RESULTS + _turing_os.sep)):\n"
+            "                _re = _turing_os.path.abspath(_turing_os.path.join(_TURING_RESULTS, _s))\n"
+            "                if _re == _TURING_RESULTS or _re.startswith(_TURING_RESULTS + _turing_os.sep):\n"
+            "                    _s = _re\n"
+            "            _d = _turing_os.path.dirname(_s)\n"
+            "            if _d:\n"
+            "                _turing_os.makedirs(_d, exist_ok=True)\n"
+            "            p = _s\n"
+            "    return _turing_open_orig(p, m, *a, **k)\n"
+            "_turing_b.open = _turing_open\n"
+        )
+    # Run-subdir-aware shim: writes AND reads relocate under
+    # <results_root_abs>/<run_subdir>/ (traversal-guarded to that cell). Mirrors
+    # _paths.normalize (writes) + resolve_existing (reads: subdir-first, flat
+    # fallback) so code_executor deliverables isolate per-run and round-trip with
+    # file_writer's subfoldered writes. chr(92) keeps the shim backslash-free, so
+    # the generated source needs no escaping beyond the root/sub literals above.
+    sub_literal = run_subdir.replace("\\", "\\\\").replace('"', '\\"')
+    root_name = results_root_abs.rstrip("/").rsplit("/", 1)[-1].lower() or "results"
+    strip_literal = repr(tuple(sorted({"results", root_name, run_subdir.lower()})))
     return (
         "import builtins as _turing_b, os as _turing_os\n"
         "_turing_open_orig = _turing_b.open\n"
-        f'_TURING_RESULTS = "{root_literal}"\n'
-        "def _turing_open(p, m='r', *a, **k):\n"
-        "    if any(c in str(m) for c in 'wax'):\n"
-        "        _s = str(p)\n"
-        "        if not _turing_os.path.isabs(_s):\n"
-        "            _here = _turing_os.path.abspath(_s)\n"
-        "            if not (_here == _TURING_RESULTS or _here.startswith(_TURING_RESULTS + _turing_os.sep)):\n"
-        "                _re = _turing_os.path.abspath(_turing_os.path.join(_TURING_RESULTS, _s))\n"
-        "                if _re == _TURING_RESULTS or _re.startswith(_TURING_RESULTS + _turing_os.sep):\n"
-        "                    _s = _re\n"
+        f'_TURING_ROOT = "{root_literal}"\n'
+        f'_TURING_SUB = "{sub_literal}"\n'
+        f"_TURING_STRIP = {strip_literal}\n"
+        "def _turing_parts(_p):\n"
+        "    _n = str(_p).replace(chr(92), '/').strip('/')\n"
+        "    return [_x for _x in _n.split('/') if _x not in ('', '.')]\n"
+        "def _turing_open(_p, _m='r', *_a, **_k):\n"
+        "    _s = str(_p)\n"
+        "    if _turing_os.path.isabs(_s):\n"
+        "        if any(_c in str(_m) for _c in 'wax'):\n"
         "            _d = _turing_os.path.dirname(_s)\n"
         "            if _d:\n"
         "                _turing_os.makedirs(_d, exist_ok=True)\n"
-        "            p = _s\n"
-        "    return _turing_open_orig(p, m, *a, **k)\n"
+        "        return _turing_open_orig(_p, _m, *_a, **_k)\n"
+        "    _pp = _turing_parts(_s)\n"
+        "    if not _pp:\n"
+        "        return _turing_open_orig(_p, _m, *_a, **_k)\n"
+        "    while len(_pp) > 1 and _pp[0].lower() in _TURING_STRIP:\n"
+        "        _pp = _pp[1:]\n"
+        "    if any(_c in str(_m) for _c in 'wax'):\n"
+        "        if _pp[0] != _TURING_SUB:\n"
+        "            _pp = [_TURING_SUB] + _pp\n"
+        "        _tgt = _turing_os.path.abspath(_turing_os.path.join(_TURING_ROOT, *_pp))\n"
+        "        _cell = _turing_os.path.join(_TURING_ROOT, _TURING_SUB)\n"
+        "        if _tgt == _cell or _tgt.startswith(_cell + _turing_os.sep):\n"
+        "            _d = _turing_os.path.dirname(_tgt)\n"
+        "            if _d:\n"
+        "                _turing_os.makedirs(_d, exist_ok=True)\n"
+        "            _p = _tgt\n"
+        "    else:\n"
+        "        _sub = _turing_os.path.abspath(_turing_os.path.join(_TURING_ROOT, _TURING_SUB, *_pp))\n"
+        "        if _turing_os.path.exists(_sub):\n"
+        "            _p = _sub\n"
+        "        else:\n"
+        "            _flat = _turing_os.path.abspath(_turing_os.path.join(_TURING_ROOT, *_pp))\n"
+        "            if _flat.startswith(_TURING_ROOT + _turing_os.sep) and _turing_os.path.exists(_flat):\n"
+        "                _p = _flat\n"
+        "    return _turing_open_orig(_p, _m, *_a, **_k)\n"
         "_turing_b.open = _turing_open\n"
     )
 
@@ -179,7 +255,7 @@ async def _run_host_subprocess(code: str, timeout: int) -> str:
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", prefix="turing_exec_", delete=False
     ) as tmp:
-        tmp.write(_write_bootstrap(str(results_root())) + code)
+        tmp.write(_write_bootstrap(str(results_root()), _active_run_subdir()) + code)
         tmp_path = tmp.name
 
     try:
@@ -262,13 +338,15 @@ async def _run_in_sandbox(code: str, timeout: int, mode: str) -> str:
     # the bind source docker mode uses — harmless to ensure-exist for runner.)
     Path(mount_src).mkdir(parents=True, exist_ok=True)
 
-    # The relocating bootstrap needs the results dir as the SCRIPT sees it.
+    # The relocating bootstrap needs the results dir AS THE SCRIPT SEES IT.
     # Docker mounts results_root at the container path ``workdir_dest`` (CWD is
-    # its parent), so relocate bare writes there. The runner executes in its
-    # OWN container whose results dir the worker can't name — pass "" for the
-    # legacy mkdir-only shim (bare writes there land in the isolated container,
-    # never the repo root).
-    bootstrap_root = ts.code_executor_sandbox_workdir_dest if mode == "docker" else ""
+    # its parent), so relocate bare writes there. The runner executes in its OWN
+    # container, but worker and runner share the turing-workspace volume at the
+    # SAME path (RESULTS_ROOT), so the worker's resolved results_root() is valid
+    # inside the runner — pass it (not "") so a per-run write isolates under
+    # results/<run_id>/ and a bare write no longer lands in the volume root.
+    bootstrap_root = ts.code_executor_sandbox_workdir_dest if mode == "docker" else str(results_root())
+    run_subdir = _active_run_subdir()
 
     sandbox = SandboxExecutor(
         SimpleNamespace(
@@ -279,7 +357,7 @@ async def _run_in_sandbox(code: str, timeout: int, mode: str) -> str:
         )
     )
     result = await sandbox.execute_runtime_code(
-        _write_bootstrap(bootstrap_root) + code,
+        _write_bootstrap(bootstrap_root, run_subdir) + code,
         timeout=timeout,
         workdir=mount_src,
         workdir_dest=ts.code_executor_sandbox_workdir_dest,

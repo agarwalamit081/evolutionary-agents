@@ -150,7 +150,7 @@ def main(
     # Phase 7: --clean clears this run's results subfolder before starting so a
     # re-run starts from a clean per-run dir (requires --run-id to stay scoped).
     if clean:
-        _clean_run_results(settings.agent.results_root, run_id)
+        _clean_run_results(run_id)
 
     # Run the agent graph to completion.
     try:
@@ -180,34 +180,33 @@ def main(
     click.echo(f"   Completed: {result.get('is_complete', False)}")
 
 
-def _clean_run_results(results_root: str, run_id: str | None) -> None:
+def _clean_run_results(run_id: str | None) -> None:
     """Delete a run's results subfolder (Phase 7 ``--clean``).
 
-    Removes ONLY ``<results_root>/<run_id>`` — never the whole ``results_root``
-    and never anything that resolves outside it. Refuses an unsafe ``run_id``
-    (path separators, ``.``/``..``) and exits cleanly when the subfolder is
-    already absent.
+    Validation + resolution delegate to ``_paths.run_subdir_path`` — the single
+    source of truth shared with the worker's fresh-attempt clean — so the CLI
+    and the worker agree on what a safe run_id is and where its subdir resolves.
+    Removes ONLY ``<results_root>/<run_id>`` and never anything escaping it.
+    Exits cleanly when the subfolder is already absent (no behavior change).
     """
-    import re as _re
-    import shutil as _shutil
-    from pathlib import Path as _Path
+    from src.tools._paths import clean_run_subdir, run_subdir_path
 
     if not run_id:
         click.echo("Error: --clean requires --run-id to target a run's subfolder")
         sys.exit(1)
-    if not _re.fullmatch(r"[A-Za-z0-9_.\-]+", run_id) or run_id in {".", ".."}:
-        click.echo(f"Error: --clean refused unsafe run_id: {run_id!r}")
+    try:
+        sub = run_subdir_path(run_id)
+    except ValueError as exc:
+        click.echo(f"Error: --clean refused unsafe run_id: {exc}")
         sys.exit(1)
-    base = _Path(results_root).resolve()
-    sub = (base / run_id).resolve()
-    if sub == base or not sub.is_relative_to(base):
-        click.echo(f"Error: --clean target escapes results_root: {sub}")
-        sys.exit(1)
-    if sub.exists():
-        _shutil.rmtree(sub)
+    if not sub.exists():
+        click.echo(f"   --clean: no prior subfolder to clear ({sub})")
+        return
+    if clean_run_subdir(run_id):
         click.echo(f"🧹 Cleared prior results subfolder: {sub}")
     else:
-        click.echo(f"   --clean: no prior subfolder to clear ({sub})")
+        click.echo(f"Error: --clean could not remove {sub}")
+        sys.exit(1)
 
 
 def _run_cost(result_dict: dict) -> float:

@@ -413,3 +413,54 @@ class TestConcurrentRunIdIsolation:
 
         # The child task copies the parent's context at creation → inherits.
         assert await asyncio.create_task(child()) == "parent-run"
+
+
+class TestCleanRunSubdir:
+    """run_subdir_path / clean_run_subdir: validate + clear a run's subdir."""
+
+    def test_run_subdir_path_resolves_under_results_root(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        sub = _paths.run_subdir_path("q09")
+        assert sub == (tmp_path / "results" / "q09").resolve()
+
+    def test_clean_clears_only_target_leaving_siblings(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """clean_run_subdir removes ONLY results/<run_id>, never siblings/parent."""
+        _install_roots(monkeypatch, tmp_path)
+        results = tmp_path / "results"
+        (results / "q09").mkdir(parents=True, exist_ok=True)
+        (results / "q09" / "out.csv").write_text("x")
+        (results / "q08").mkdir(parents=True, exist_ok=True)
+        (results / "q08" / "other.csv").write_text("y")
+
+        cleared = _paths.clean_run_subdir("q09")
+
+        assert cleared is True
+        assert not (results / "q09").exists()
+        # Sibling run + the shared results root are untouched.
+        assert (results / "q08" / "other.csv").exists()
+        assert results.exists()
+
+    def test_clean_returns_false_when_absent(self, monkeypatch, tmp_path) -> None:
+        _install_roots(monkeypatch, tmp_path)
+        assert _paths.clean_run_subdir("never-ran") is False
+
+    def test_run_subdir_path_rejects_unsafe_run_id(self, monkeypatch, tmp_path) -> None:
+        """Separators / ``..`` / traversal targets are refused (no escape)."""
+        _install_roots(monkeypatch, tmp_path)
+        for bad in ("..", "../x", "a/b", "/abs", "", "."):
+            with pytest.raises(ValueError):
+                _paths.run_subdir_path(bad)
+
+    def test_clean_run_subdir_refuses_unsafe_run_id(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """An unsafe run_id does NOT delete anything (best-effort, returns False)."""
+        _install_roots(monkeypatch, tmp_path)
+        results = tmp_path / "results"
+        (results / "real").mkdir(parents=True, exist_ok=True)
+        assert _paths.clean_run_subdir("../real") is False
+        assert (results / "real").exists()

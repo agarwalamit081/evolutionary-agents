@@ -127,7 +127,7 @@ START -> classify -> plan -> retrieve_memory -> execute <-> reflect
 - **Per-Tool Metrics + Performance Retirement** — each tool invocation records success/empty/latency; governance retires tools below a success-rate floor once they have enough runs, alongside semantic-dedup and cap retirement
 - **Semantic/Fact Memory Tier** — durable entity-ish facts (`memory_type="fact"`) extracted during folding and recalled alongside skills/episodes
 - **Cross-Process `--resume`** — a killed/interrupted run resumes from its last Postgres checkpoint via `--resume <run-id>`
-- **Per-Run Results Subfolders** — writes organize under `results/<run-id>/` (reads fall back to the flat root for backward recall); `--results-dir` / `--clean` CLI flags
+- **Per-Run Results Subfolders** — writes organize under `results/<run-id>/` (reads fall back to the flat root for backward recall); `--results-dir` / `--clean` CLI flags. This includes **`code_executor` compute deliverables** (`.csv`/`.json` written by LLM-generated Python): the subprocess-bootstrap shim relocates their `open()` writes/reads under `results/<run-id>/`, and a fresh (non-resume) attempt auto-cleans that subdir so a re-enqueued run never inherits a prior attempt's files
 - **Evolution→Live Promotion Gate** — a PROMPT mutation that passes post-deploy verify promotes to a versioned, canary-gated pointer (auto-rollback on regression); opt-in via `EVOLUTION_PROMOTE_TO_LIVE`. Exercised live: a real run deployed a PROMPT mutation, the GoldenCanary passed, and the gate wrote the live pointer (`.turing/evolved/prompts/current.json`) for the prompt builder to splice in tagged `[evolved]`
 - **Centralized Config** — every resilience/circuit-breaker/rate-limiter/tool-limit/concurrency knob is a `pydantic-settings` env var (no hardcoded timeouts/caps in source)
 - **Run-Control Safety** — four guards bound every run so a deployed worker can never churn forever: a capability-cap gap-loop break (`CAP_LOOP_BREAK_THRESHOLD`, **on by default** — stops the spawn↔create churn once caps saturate), an opt-in wall-clock timeout (`WORKER_RUN_TIMEOUT_S` → resumable), an opt-in budget hard-stop (`BUDGET_HARD_STOP` — raises instead of silently downgrading onto a cheaper/free-tier provider and fabricating under degradation), and a graceful cancel endpoint (`POST /runs/{id}/cancel`). Exhausted / cancelled / timed-out runs land in terminal `BUDGET_EXHAUSTED` / `CANCELLED` / `TIMEOUT` statuses (acked, not redelivered) and resume from their last checkpoint via `--resume`
@@ -334,6 +334,7 @@ python main.py --capability-curve --export /tmp/curve.json
 
 # Per-run output organization — writes land under results/<run-id>/; --clean clears it first
 python main.py --goal "..." --run-id my-task --clean
+# (includes code_executor compute deliverables; a re-enqueued run-id also auto-cleans on a fresh attempt)
 python main.py --goal "..." --results-dir results/custom      # override the run's results root
 
 # Cross-process resume — continue a killed/interrupted run from its last checkpoint
@@ -361,7 +362,7 @@ All tools use the **LangChain `@tool` decorator** with type-annotated parameters
 
 | Tool | Description |
 |---|---|
-| `code_executor` | Run Python in a subprocess (async, timeout-safe) |
+| `code_executor` | Run Python in a subprocess (async, timeout-safe). Deliverables from `open()` are isolated under `results/<run-id>/` when `RESULTS_PER_RUN_SUBDIR` is on (no flat cross-run leakage); `glob`/`os.scandir` listings scan flat and are not relocated |
 | `code_validator` | AST + security check on Python code |
 | `terminal_command` | Allowlisted, shell-free terminal command tool |
 | `file_reader` | Read any text file |

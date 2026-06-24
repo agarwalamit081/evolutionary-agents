@@ -369,15 +369,29 @@ async def execute_run(
                 logger.info(f"Resuming run {run_id} (recovered goal: {goal_text[:60]})")
         except Exception as e:
             logger.debug(f"Could not recover goal from checkpoint: {e}")
-    elif checkpointer is not None:
-        # Fresh run reusing a run_id-derived thread_id: clear any prior
-        # checkpoint for this thread so the run starts clean instead of
-        # contaminating (or immediately terminating on) a prior run's state.
-        # No-op for a first run with no checkpoint. Best-effort.
-        try:
-            await checkpointer.adelete_thread(thread_id)
-        except Exception as e:
-            logger.debug(f"Could not clear prior checkpoint for {thread_id}: {e}")
+    else:
+        # Fresh run: clear any prior checkpoint for this thread so it starts
+        # clean instead of contaminating (or terminating on) a prior run's
+        # state — no-op for a first run. Best-effort.
+        if checkpointer is not None:
+            try:
+                await checkpointer.adelete_thread(thread_id)
+            except Exception as e:
+                logger.debug(f"Could not clear prior checkpoint for {thread_id}: {e}")
+        # Also clear THIS run's results subdir when per-run subfoldering is on,
+        # so a re-enqueued run_id does not inherit a prior attempt's deliverables
+        # (disk-contamination fix). Resume MUST NOT reach here — the subdir
+        # deliverables are part of the resumable run state. Best-effort; a clean
+        # failure never aborts the run (same posture as the checkpoint clear).
+        if run_id:
+            try:
+                from src.tools._paths import _subdir_active, clean_run_subdir
+
+                if _subdir_active():
+                    if clean_run_subdir(run_id):
+                        logger.info(f"Cleared prior results subdir for run {run_id}")
+            except Exception as e:
+                logger.debug(f"Could not clear results subdir for {run_id}: {e}")
 
     # Compile graph with injected dependencies
     compiled = compile_task_graph(

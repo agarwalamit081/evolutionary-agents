@@ -203,12 +203,17 @@ class ResilienceSettings(BaseSettings):
 class CircuitBreakerSettings(BaseSettings):
     """Per-provider circuit breaker thresholds.
 
-    Previously the ``CircuitBreaker`` constructor defaults (failure_threshold=5,
-    recovery_timeout=60, half_open_max_calls=1). Exposed so provider reliability
-    tuning doesn't require editing ``src/llm/circuit_breaker.py``.
+    Exposed (hoisted from the ``CircuitBreaker`` constructor) so provider
+    reliability tuning doesn't require editing ``src/llm/circuit_breaker.py``.
+
+    ``cb_failure_threshold`` defaults to 3 (tuned down from the original 5): a
+    multi-provider rate-limit storm spreads transient failures across providers
+    and rarely accumulates 5 *consecutive* failures on any single one, so the
+    breaker's OPEN path never engaged and the fallback chain kept hammering a
+    rate-limited provider. 3 opens a clearly-down provider one failure sooner.
     """
 
-    cb_failure_threshold: int = 5  # Env: CB_FAILURE_THRESHOLD
+    cb_failure_threshold: int = 3  # Env: CB_FAILURE_THRESHOLD
     cb_recovery_timeout: float = 60.0  # Env: CB_RECOVERY_TIMEOUT
     cb_half_open_max_calls: int = 1  # Env: CB_HALF_OPEN_MAX_CALLS
 

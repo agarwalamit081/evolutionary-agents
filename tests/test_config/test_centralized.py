@@ -84,7 +84,7 @@ class TestCircuitBreakerSettings:
         for var in ("CB_FAILURE_THRESHOLD", "CB_RECOVERY_TIMEOUT", "CB_HALF_OPEN_MAX_CALLS"):
             monkeypatch.delenv(var, raising=False)
         cb = CircuitBreakerSettings(_env_file=None)
-        assert cb.cb_failure_threshold == 5
+        assert cb.cb_failure_threshold == 3
         assert cb.cb_recovery_timeout == 60.0
         assert cb.cb_half_open_max_calls == 1
 

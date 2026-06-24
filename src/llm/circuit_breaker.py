@@ -65,7 +65,7 @@ class CircuitBreaker:
 
     Args:
         failure_threshold: Consecutive transient failures (CLOSED) required
-            to trip a provider's breaker to OPEN. Default 5.
+            to trip a provider's breaker to OPEN. Default 3.
         recovery_timeout: Seconds the breaker stays OPEN before allowing a
             single HALF_OPEN probe. Default 60.
         half_open_max_calls: Max concurrent probes permitted while HALF_OPEN.
@@ -74,7 +74,7 @@ class CircuitBreaker:
 
     def __init__(
         self,
-        failure_threshold: int = 5,
+        failure_threshold: int = 3,
         recovery_timeout: float = 60.0,
         half_open_max_calls: int = 1,
     ) -> None:

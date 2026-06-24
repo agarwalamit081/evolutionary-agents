@@ -61,6 +61,42 @@ class TestCircuitBreakerCore:
         assert breaker.get_state(provider) == CircuitState.OPEN
 
     @pytest.mark.asyncio
+    async def test_default_threshold_opens_after_three_transient_failures(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The production default threshold (3, via CircuitBreakerSettings) opens a
+        provider after exactly 3 consecutive transient failures and no sooner.
+
+        This is the OPEN path that never engaged during the q09 rate-limit storm:
+        transient failures spread across providers (1/3/3) and never accumulated 5
+        on any single one, so the fallback chain kept hammering rate-limited
+        providers. A focused test locks the tuned threshold in.
+        """
+        from src.config.settings import CircuitBreakerSettings
+
+        # _env_file=None disables FILE loading, but env vars still override —
+        # delete CB_FAILURE_THRESHOLD so we measure the CODE default (3), not a
+        # local .env override (mirrors test_config.test_centralized.test_defaults).
+        monkeypatch.delenv("CB_FAILURE_THRESHOLD", raising=False)
+        default_threshold = CircuitBreakerSettings(_env_file=None).cb_failure_threshold
+        assert default_threshold == 3  # tuned down from the original 5
+
+        breaker = CircuitBreaker(
+            failure_threshold=default_threshold, recovery_timeout=60.0
+        )
+        provider = "zai"
+        # 2 failures (< threshold): still CLOSED, before_call allowed.
+        for _ in range(2):
+            await breaker.record_failure(provider, transient=True)
+        assert breaker.get_state(provider) == CircuitState.CLOSED
+        await breaker.before_call(provider)
+        # 3rd consecutive transient failure → OPEN (engages the fallback skip).
+        await breaker.record_failure(provider, transient=True)
+        assert breaker.get_state(provider) == CircuitState.OPEN
+        with pytest.raises(CircuitBreakerOpenError):
+            await breaker.before_call(provider)
+
+    @pytest.mark.asyncio
     async def test_auth_failure_does_not_trip(
         self, breaker: CircuitBreaker
     ) -> None:

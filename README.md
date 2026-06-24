@@ -123,6 +123,7 @@ START -> classify -> plan -> retrieve_memory -> execute <-> reflect
 - **Sub-Agent Delegation** — Agent spawns specialized sub-agents as isolated LangGraph subgraphs, delegates subtasks, tracks performance with rolling metrics, and optimizes them via the evolution engine
 - **Typed Correctness Eval Harness** — beyond process metrics, a correctness layer (Structural / Execution-sandbox / Golden-spec / LLM-judge-oracle checks) scores deliverables and persists results to an `eval_results` table; wired into the verify node behind `EVAL_ENABLED`, runnable standalone via `--eval`
 - **Capability Curve + Regression Gate** — nightly `eval_results` scores roll into a per-night battery trend + a grounded regression verdict (floor + delta + min-points conjunction); inspect read-only via `--capability-curve`, and an opt-in scheduler gate (`CAPABILITY_CURVE_GATE_ENABLED`) alerts — or, with `CAPABILITY_CURVE_AUTO_ROLLBACK`, reverts a recent PROMPT promotion — on regression. The measured-self-improvement evidence the thesis needs
+- **Metric-Driven Prompt Optimizer (DSPy+GEPA sidecar)** — the *improvement* loop C1's measurement left out: a nightly, cost-bounded, **default-off** job runs DSPy/GEPA to search a better prompt for a node against a cheap proxy metric, then VALIDATES the winner against the real golden canary (full agent runs) before promoting it through the existing canary-gated gate. Refuses to run while the capability curve is regressed/inconclusive. DSPy only (**no torch**); `textgrad` is a deferred backend
 - **Verify Completion Discipline** — the agent refuses to force-complete unless the goal's expected deliverable is present, non-empty, and well-formed (placeholder-leak scan for `.md`/`.txt`, parse-check for `.csv`/`.json`); a missing deliverable triggers a re-plan, never a false success
 - **Per-Tool Metrics + Performance Retirement** — each tool invocation records success/empty/latency; governance retires tools below a success-rate floor once they have enough runs, alongside semantic-dedup and cap retirement
 - **Semantic/Fact Memory Tier** — durable entity-ish facts (`memory_type="fact"`) extracted during folding and recalled alongside skills/episodes
@@ -220,6 +221,12 @@ turing-agent/
     │   ├── report.py              # Evolution reporting
     │   └── templates.py           # Mutation templates
     │
+    ├── optimizer/                 # Metric-driven prompt optimizer (DSPy+GEPA sidecar)
+    │   ├── engine.py             # PromptOptimizer: GEPA search → canary validate → promote
+    │   ├── profiles.py           # Per-node DSPy student/trainset/proxy-metric (classify ships)
+    │   ├── server.py             # aiohttp /optimize + /healthz (internal-only)
+    │   └── models.py             # OptimizeRequest/OptimizeResponse wire models
+    │
     ├── safety/                    # 7-layer safety pipeline
     │   └── pipeline.py            # All 7 safety layers (consolidated)
     │
@@ -248,6 +255,7 @@ tests/                             # Mirror src structure
 ├── test_agents/
 ├── test_e2e/                     # End-to-end tests (requires OPENAI_API_KEY)
 ├── test_evolution/
+├── test_optimizer/               # DSPy/GEPA optimizer engine + server + integration
 ├── test_safety/
 └── test_api/
 
@@ -437,6 +445,8 @@ Background **consolidation** ("dreaming") moves data between tiers: episodic mem
 
 **Capability-curve + regression gate** — the measured-self-improvement evidence: a pure analytics layer (`CapabilityCurve`) turns nightly `eval_results` scores into a per-night battery trend + a grounded regression verdict (`current < score_floor` AND `(best_prior - current) >= regression_delta` AND `>= min_points` nights — floor+delta both required so a noisy-but-acceptable curve never trips). Inspect it read-only with `python main.py --capability-curve` (per-night table, latest per-goal score, the verdict; `--since`/`--until` window, `--export` JSON/CSV, `--plot` PNG). The nightly scheduler can run a `CurveRegressionGate` (`CAPABILITY_CURVE_GATE_ENABLED`) that, on regression, alerts via telemetry + Prometheus and — when `CAPABILITY_CURVE_AUTO_ROLLBACK` is opted in — reverts a recent PROMPT promotion via the existing `PromotionGate.rollback`. A regression with no active promotion is model/provider drift and is alert-only. Both knobs default off; detection is always-on/read-only when the gate is enabled.
 
+**Metric-driven prompt optimizer (DSPy + GEPA sidecar, Phase 2 C2)** — the *improvement* loop the capability curve (measurement) left out. The engine's own PROMPT mutations are one-shot LLM rewrites; the optimizer instead turns the golden canary into an objective and *searches* for a better prompt for a node. It runs in its own container (`src/optimizer`, `Dockerfile.optimizer`, image `self-evolving-agent-optimizer`) so the ML deps (DSPy + GEPA, **no torch**) stay out of the slim api/worker images. Forced by GEPA's real API: GEPA searches candidate instructions against a CHEAP proxy metric over a DSPy student module (bounds cost — each metric call is one cheap LLM call), then the optimized instruction is VALIDATED against the REAL golden canary (full agent runs); if it beats the baseline by the configured margin it promotes through the existing `PromotionGate` (canary final-gate + versioned write + auto-rollback — the eval metric stays the promotion gate). **Safety:** it refuses to run while C1's capability curve is regressed or inconclusive (`OPTIMIZER_REQUIRE_CURVE_CLEAR`), spend is hard-capped at `OPTIMIZER_MAX_COST_USD` (queried before compile AND before promote), and it runs only as a nightly scheduler job (NOT per-run). The scheduler POSTs an empty body; the sidecar resolves node/backend/eval from its own `OptimizerSettings`. Everything defaults off; only `classify` ships a profile in v1 (execute/verify are a `ConfigurationError`, not a stub); `textgrad` (torch) is a deferred backend. **It reuses `eval_results` + `cost_ledger` + `.turing/evolved/prompts/` — no DB migration.** Bring-up: `docker compose --profile optimizer --profile scheduler up -d` (both profiles — the scheduler triggers the sidecar); build with `docker compose --profile optimizer build optimizer`.
+
 ---
 
 ## Safety
@@ -513,6 +523,20 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | `GOVERNANCE_PRUNE_ENABLED` | `false` | Register a periodic capability-governance prune job on the scheduler — re-runs `consolidate.py` retire/redundancy + the tool cap-enforce so a long-lived worker frees cap headroom between restarts |
 | `GOVERNANCE_PRUNE_CRON` | `0 4 * * *` | 5-field crontab for the prune (default 04:00 UTC, clear of the 05:00 curve-gate + 02:00 battery) |
 | `GOVERNANCE_PRUNE_TIMEZONE` | `UTC` | IANA zone for the prune cron |
+| `OPTIMIZER_ENABLED` | `false` | Register the nightly metric-driven prompt-optimizer trigger on the scheduler (POSTs `/optimize` to the optimizer sidecar) |
+| `OPTIMIZER_BACKEND` | `dspy-gepa` | DSPy teleprompter: `dspy-gepa` (reflective) / `dspy-mipro` / `dspy-copro`; `textgrad` (torch) is deferred |
+| `OPTIMIZER_TARGET_NODE` | `classify` | Graph node whose system prompt is optimized (only `classify` ships a profile in v1) |
+| `OPTIMIZER_EVAL_SPEC_LIMIT` | `2` | How many golden specs the FINAL canary validates against (cheapest = 1; GEPA's proxy loop is bounded separately) |
+| `OPTIMIZER_MAX_CANDIDATES` | `8` | MIPROv2/COPRO candidate-search breadth (unused by GEPA) |
+| `OPTIMIZER_MAX_TRIALS` | `1` | GEPA full-eval rounds (`max_full_evals`; 0 lets GEPA pick via `auto="light"`) |
+| `OPTIMIZER_MAX_TOKENS` | `1024` | DSPy student + reflection LM call max output tokens |
+| `OPTIMIZER_TEMPERATURE` | `0.7` | LM sampling temperature (0–2, validated) |
+| `OPTIMIZER_CRON` | `30 3 * * *` | Nightly trigger (default 03:30 UTC — between the 02:00 battery and the 05:00 curve-gate) |
+| `OPTIMIZER_TIMEZONE` | `UTC` | IANA zone for the cron |
+| `OPTIMIZER_URL` | `http://optimizer:8095` | Scheduler → sidecar connect URL (compose DNS; the bind is `OPTIMIZER_HOST`/`OPTIMIZER_PORT`, internal-only) |
+| `OPTIMIZER_REQUIRE_CURVE_CLEAR` | `true` | Refuse to optimize while the capability curve is regressed OR inconclusive (false overrides on a cold curve, accepting the proxy→canary transfer risk) |
+| `OPTIMIZER_CANARY_MIN_SCORE` | `None` | Min canary MARGIN (candidate−baseline) to promote; `None` reuses `EVAL_CANARY_MIN_SCORE` as the absolute floor |
+| `OPTIMIZER_MAX_COST_USD` | `0.50` | Hard spend cap for one optimization run (queried before compile + before promote); spend lands in `cost_ledger` under `run_id=optimizer-<node>-<ts>` |
 
 ---
 

@@ -1541,6 +1541,167 @@ class GovernancePruneSettings(BaseSettings):
     )
 
 
+class OptimizerSettings(BaseSettings):
+    """Metric-driven prompt-optimization sidecar (Phase 2 C2: DSPy + GEPA).
+
+    Turns the golden-eval correctness harness (``GoldenCanary``) into an
+    AUTOMATIC prompt-improvement loop beyond the engine's one-shot LLM PROMPT
+    mutation (``engine.py`` ``_llm_generate``). Runs in its OWN container
+    (``src/optimizer``) so the heavy ML deps stay out of the slim api/worker
+    images: DSPy + GEPA only, **no torch** (DSPy declares no torch dependency;
+    ``import dspy`` is torch-free — verified against dspy==3.2.1). The sidecar
+    imports ``src/``, runs its own ``LLMGateway`` against the SHARED
+    ``cost_ledger`` DB (so cost/budget/circuit-breaker work natively), and is
+    driven by a nightly scheduler job (NOT per-run) to bound spend.
+
+    Architecture (forced by GEPA's real API, verified against dspy==3.2.1):
+    GEPA's ``metric`` is called as ``metric(example, pred, trace, pred_name,
+    pred_trace) -> float | {score, feedback}``; GEPA applies each candidate
+    instruction to the DSPy *student module's predictor* and runs the student
+    itself (one LLM call) — it never hands the candidate instruction back to
+    caller code. So the eval canary (which scores the FULL agent graph) cannot
+    be GEPA's in-loop metric. Instead GEPA searches candidate instructions
+    against a CHEAP PROXY metric over a DSPy module (bounds cost; supplies
+    GEPA's reflective-feedback loop); the optimized instruction is then
+    VALIDATED against the real ``GoldenCanary`` correctness score (full agent
+    runs) before promotion through the EXISTING ``PromotionGate`` (canary-gated,
+    auto-rollback). The eval metric stays the promotion gate — so the DoD
+    ("prompts improve against the eval metric, automatically") is satisfied;
+    GEPA supplies the search. The proxy→canary transfer risk is backstopped by
+    C1 (``capability_curve``): a promoted prompt that later regresses the
+    battery trend is detected + (optionally) rolled back.
+
+    Precondition: only safe once C1's regression gate is proven
+    (``require_curve_clear``). Every knob defaults off; the optimizer is
+    observability/evolution-only — it never raises into a user run.
+    """
+
+    # Register the optimizer at all. Default False — a host run with no env
+    # does nothing; the compose ``optimizer`` service (profile-gated) forces it.
+    enabled: bool = False  # Env: OPTIMIZER_ENABLED
+    # Search backend. ``dspy-gepa`` (default, reflective) / ``dspy-mipro``
+    # (few-shot bootstrap) / ``dspy-copro`` (coordinate). All three are real
+    # DSPy teleprompters sharing the same student+trainset+metric; ``textgrad``
+    # (torch) is deferred — requested via the /optimize body, not here. Env:
+    # OPTIMIZER_BACKEND.
+    backend: Literal["dspy-gepa", "dspy-mipro", "dspy-copro"] = "dspy-gepa"  # noqa: E501
+    # The graph node whose system prompt is optimized. v1 ships a ``classify``
+    # profile (cleanest DSPy signature — goal→complexity, exact-match metric);
+    # ``execute``/``verify`` profiles are pluggable but un-shipped in v1 (a
+    # clear ConfigurationError, NOT a stub). Env: OPTIMIZER_TARGET_NODE.
+    target_node: str = "classify"  # Env: OPTIMIZER_TARGET_NODE
+    # How many golden specs the FINAL canary validates against (cheapest = 1).
+    # GEPA's proxy loop is bounded separately by max_candidates/max_trials.
+    # Env: OPTIMIZER_EVAL_SPEC_LIMIT.
+    eval_spec_limit: int = 2  # Env: OPTIMIZER_EVAL_SPEC_LIMIT
+    # MIPROv2/COPRO candidate-search breadth (num_candidates); unused by GEPA,
+    # whose budget is max_trials. Env: OPTIMIZER_MAX_CANDIDATES.
+    max_candidates: int = 8  # Env: OPTIMIZER_MAX_CANDIDATES
+    # GEPA full-eval rounds → ``max_full_evals`` (×(trainset+valset) metric
+    # calls). 0 lets GEPA pick via ``auto="light"``. Env: OPTIMIZER_MAX_TRIALS.
+    max_trials: int = 1  # Env: OPTIMIZER_MAX_TRIALS
+    # LM call params for the DSPy student module AND the reflection/proposal LM.
+    max_tokens: int = 1024  # Env: OPTIMIZER_MAX_TOKENS
+    temperature: float = 0.7  # Env: OPTIMIZER_TEMPERATURE
+    # Nightly trigger. Default 03:30 UTC — between the 02:00 battery and the
+    # 05:00 curve-gate, so the optimizer runs on a fresh night then the gate
+    # re-reads the trend next morning. Env: OPTIMIZER_CRON.
+    cron: str = "30 3 * * *"  # Env: OPTIMIZER_CRON
+    # IANA zone for the cron. Env: OPTIMIZER_TIMEZONE.
+    timezone: str = "UTC"  # Env: OPTIMIZER_TIMEZONE
+    # The SIDECAR's own aiohttp bind (server side). Internal-only on turing-net
+    # (no host port is published). The optimizer service reads these; the
+    # scheduler does NOT — it connects via ``optimizer_url`` below.
+    # Env: OPTIMIZER_HOST/PORT.
+    host: str = "0.0.0.0"  # Env: OPTIMIZER_HOST
+    port: int = 8095  # Env: OPTIMIZER_PORT
+    # Client-side connect URL the SCHEDULER POSTs /optimize to (mirrors
+    # ``RunnerSettings.runner_url``): the compose service DNS name ``optimizer``
+    # + the bind port. The scheduler service runs on a minimal env (NOT
+    # *agent-common), so it sets OPTIMIZER_URL explicitly; host/CLI runs that
+    # drive the sidecar another way override it. The node/backend/eval knobs are
+    # the SIDECAR's concern — the scheduler POSTs an empty body and those
+    # defaults apply. Env: OPTIMIZER_URL.
+    optimizer_url: str = "http://optimizer:8095"  # Env: OPTIMIZER_URL
+    # C1 precondition: refuse to optimize while the capability curve shows a
+    # regression OR is inconclusive (too few nights to judge). False lets an
+    # operator override on a cold curve (accepting the proxy-transfer risk).
+    # Env: OPTIMIZER_REQUIRE_CURVE_CLEAR.
+    require_curve_clear: bool = True  # Env: OPTIMIZER_REQUIRE_CURVE_CLEAR
+    # Min canary-score MARGIN (candidate − baseline) required to promote. None
+    # → reuse ``EvalSettings.eval_canary_min_score`` as an absolute floor.
+    # Env: OPTIMIZER_CANARY_MIN_SCORE.
+    canary_min_score: Optional[float] = None  # Env: OPTIMIZER_CANARY_MIN_SCORE
+    # Hard spend cap (US$) for one optimization run. Queried BEFORE compile();
+    # over-cap → skip with no spend. Spend lands in cost_ledger under run_id
+    # ``optimizer-<node>-<ts>`` (its own cap, not a user run's). Env:
+    # OPTIMIZER_MAX_COST_USD.
+    max_cost_usd: float = 0.50  # Env: OPTIMIZER_MAX_COST_USD
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps OPTIMIZER_* vars to these fields, mirroring the
+        # CapabilityCurve/GovernancePrune pattern (a missing prefix silently
+        # ignores vars — bug #223 class).
+        env_prefix="optimizer_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    @field_validator("eval_spec_limit", "max_candidates", "max_tokens")
+    @classmethod
+    def validate_positive_int(cls, v: int) -> int:
+        """Ensure positive integers (a 0-budget optimizer is a no-op misconfig)."""
+        if v < 1:
+            raise ValueError(f"Must be a positive integer. Got: {v}")
+        return v
+
+    @field_validator("max_cost_usd")
+    @classmethod
+    def validate_positive_float(cls, v: float) -> float:
+        """Ensure a non-zero spend cap (uncapped optimization is forbidden)."""
+        if v <= 0:
+            raise ValueError(f"Must be positive. Got: {v}")
+        return v
+
+    @field_validator("temperature")
+    @classmethod
+    def validate_temperature(cls, v: float) -> float:
+        """Ensure LM sampling temperature is a sane range (0–2)."""
+        if not 0.0 <= v <= 2.0:
+            raise ValueError(f"Temperature must be between 0 and 2. Got: {v}")
+        return v
+
+    @field_validator("canary_min_score", mode="before")
+    @classmethod
+    def _coerce_optional_margin(cls, v: object) -> float | None:
+        """Tolerate a blank or comment-placeholder value as ``None``.
+
+        ``.env`` templates leave an optional knob as
+        ``OPTIMIZER_CANARY_MIN_SCORE=   # comment``; pydantic-settings reads the
+        trailing ``# comment`` as the value for an otherwise-empty field, which
+        then fails ``float`` coercion at ``Settings`` construction (crashing
+        every importer of ``get_settings()``). ``mode="before"`` lets us map any
+        unparseable value to ``None`` — the documented default meaning "no
+        explicit margin -> reuse ``EVAL_CANARY_MIN_SCORE`` as the floor". A
+        genuinely numeric value still validates normally.
+        """
+        if v is None:
+            return None
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        if isinstance(v, str):
+            s = v.strip().lstrip("#").strip()
+            if not s:
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+        return None
+
+
 # ─── Root Settings ──────────────────────────────────────────────────
 
 
@@ -1574,6 +1735,7 @@ class Settings(BaseSettings):
     scheduler: SchedulerSettings = SchedulerSettings()  # type: ignore[assignment]
     capability_curve: CapabilityCurveSettings = CapabilityCurveSettings()  # type: ignore[assignment]
     governance_prune: GovernancePruneSettings = GovernancePruneSettings()  # type: ignore[assignment]
+    optimizer: OptimizerSettings = OptimizerSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

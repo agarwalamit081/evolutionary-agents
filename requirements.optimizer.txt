@@ -1,0 +1,14 @@
+# Sidecar-only requirements for the metric-driven prompt optimizer (Phase 2 C2).
+# Consumed ONLY by Dockerfile.optimizer — NOT installed into the main api/worker
+# images (that is what keeps them slim + torch-free). The optimizer image LAYERS
+# these onto the base self-evolving-agent image.
+#
+# dspy==3.2.1 brings GEPA (dspy.GEPA) and pulls gepa==0.0.27 + litellm>=1.64.0
+# transitively (uv pip show dspy → Requires includes gepa, litellm, numpy, pydantic,
+# … — NO torch). Neither dspy nor gepa depends on torch: the aiml01 torch 2.12 is
+# the vllm artifact (torch's Required-by is accelerate/bitsandbytes/peft/timm/
+# unsloth/whisperx…, NOT dspy/gepa), and `import dspy` does not load torch. So a
+# clean install here carries no torch — Dockerfile.optimizer enforces that at
+# build time. litellm>=1.64.0 is satisfied by the base image's pinned 1.83.14
+# (no conflict, no two-venv isolation needed).
+dspy==3.2.1

@@ -21,6 +21,13 @@ x-agent-common: &agent-common
     MEILISEARCH_KEY: ${MEILISEARCH_KEY:-}
     WORKSPACE_ROOT: /home/turing/.turing/workspace
     RESULTS_ROOT: /home/turing/.turing/results
+    # Promoted-prompt artifacts (PromotionGate current.json + versioned prompts)
+    # on the SHARED turing-workspace volume so the optimizer sidecar's promotions
+    # reach api/worker (builder.splice_evolved). The .env default ".turing/evolved"
+    # is RELATIVE → resolves container-local (/app/.turing/evolved), invisible
+    # across containers; forcing it absolute here mirrors WORKSPACE/RESULTS_ROOT
+    # and is required for the optimizer's promotions to take effect.
+    EVOLVED_HANDLERS_DIR: /home/turing/.turing/evolved
     # Phase 3b/c no-DinD: every code-exec role routes generated code through the
     # remote runner (the worker has NO Docker socket). Forced here — it OVERRIDES
     # .env — precisely because the container topology has no socket: letting .env
@@ -325,6 +332,15 @@ services:
       SCHEDULER_NO_EVOLUTION: ${SCHEDULER_NO_EVOLUTION:-false}
       # 0 = full battery (production nightly curve); 1 = cheap one-spec smoke.
       SCHEDULER_SPEC_LIMIT: ${SCHEDULER_SPEC_LIMIT:-0}
+      # Phase 2 C2: the optimizer TRIGGER reads ONLY these four (the sidecar
+      # owns the node/backend/eval knobs). OPTIMIZER_ENABLED is the opt-in —
+      # bring BOTH profiles up (`--profile scheduler --profile optimizer`) so
+      # the scheduler can reach the sidecar to POST /optimize. The node/backend/
+      # cost knobs live on the optimizer service (via *agent-common + .env).
+      OPTIMIZER_ENABLED: ${OPTIMIZER_ENABLED:-false}
+      OPTIMIZER_CRON: ${OPTIMIZER_CRON:-30 3 * * *}
+      OPTIMIZER_TIMEZONE: ${OPTIMIZER_TIMEZONE:-UTC}
+      OPTIMIZER_URL: ${OPTIMIZER_URL:-http://optimizer:8095}
       # RO rootfs image hygiene (matches the runner): no .pyc writes.
       PYTHONDONTWRITEBYTECODE: "1"
     depends_on:
@@ -343,6 +359,55 @@ services:
     networks:
       - turing-net
     restart: unless-stopped
+
+  # ─── Phase 2 C2 — metric-driven prompt-optimizer sidecar (DSPy + GEPA) ──
+  # The IMPROVEMENT loop C1 left out. The scheduler POSTs /optimize (OPTIMIZER_CRON,
+  # gated by OPTIMIZER_ENABLED); the optimizer runs DSPy/GEPA against a cheap proxy
+  # metric, VALIDATES the candidate against the REAL GoldenCanary (full agent runs,
+  # cost-bounded by OPTIMIZER_MAX_COST_USD + C1's capability-curve precondition),
+  # and on beating the baseline pushes the prompt through the EXISTING PromotionGate.
+  #
+  # Profile-gated (opt-in like scheduler): `docker compose --profile optimizer up -d`.
+  # Uses *agent-common (NOT least-privilege like the runner/scheduler): it runs the
+  # full canary, so it inherits .env (provider keys) + DATABASE_URL/REDIS_URL/search
+  # + CODE_EXECUTOR_MODE=runner (the canary's graph may invoke code_executor → it
+  # needs turing-runner-net, like the worker) + the shared turing-workspace volume
+  # (EVOLVED_HANDLERS_DIR is forced absolute on it above). :8095 is internal-only
+  # (no host port) — the scheduler calls http://optimizer:8095/optimize by name.
+  # Build needs the base image first: build api/worker (→ self-evolving-agent:latest),
+  # then `docker compose --profile optimizer build optimizer`.
+  optimizer:
+    <<: *agent-common
+    profiles: ["optimizer"]
+    build:
+      context: .
+      dockerfile: Dockerfile.optimizer
+    image: self-evolving-agent-optimizer:latest
+    command: ["python", "-m", "src.optimizer"]
+    expose:
+      - "8095"   # internal only — NOT mapped to a host port (scheduler reaches it by name)
+    healthcheck:
+      # Liveness/readiness against GET /healthz (src/optimizer/server.py).
+      test:
+        [
+          "CMD-SHELL",
+          "python -c 'import urllib.request;urllib.request.urlopen(\"http://127.0.0.1:8095/healthz\",timeout=2).read()'",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+          pids: 512
+    networks:
+      # turing-net for postgres/redis/search/api; turing-runner-net so the canary's
+      # graph (CODE_EXECUTOR_MODE=runner) reaches the code-exec runner (mirrors worker).
+      - turing-net
+      - turing-runner-net
 
   # ─── Phase 3b/c — remote no-DinD code-execution runner (#218/#219) ──────
   # The worker's single sink for generated code: both code_executor (untrusted

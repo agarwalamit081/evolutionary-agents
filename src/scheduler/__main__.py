@@ -109,6 +109,22 @@ async def _run() -> int:
             f"tz={prune_settings.timezone}"
         )
 
+    # Phase 2 C2: the nightly metric-driven prompt-optimizer TRIGGER. The
+    # optimizer (DSPy + GEPA) runs in a separate sidecar container; the scheduler
+    # just POSTs /optimize (empty body — the sidecar owns the node/backend/eval
+    # knobs) on OPTIMIZER_CRON and logs the outcome. Opt-in (OPTIMIZER_ENABLED,
+    # default off). Default 03:30 UTC — a fresh night after the 02:00 battery,
+    # before the 04:00 prune / 05:00 curve-gate.
+    optimizer_settings = settings.optimizer
+    if optimizer_settings.enabled:
+        from src.optimizer.job import add_optimizer_job  # noqa: PLC0415
+
+        add_optimizer_job(scheduler, optimizer_settings)
+        logger.info(
+            f"Optimizer trigger registered — cron={optimizer_settings.cron!r} "
+            f"tz={optimizer_settings.timezone} url={optimizer_settings.optimizer_url}"
+        )
+
     stop_event = asyncio.Event()
 
     def _request_stop(*_: object) -> None:

@@ -24,6 +24,7 @@ from src.graph.nodes.execute import (
     execute_node,
 )
 from src.llm.models import ToolCallResponse
+from src.tools._paths import set_active_run_id
 
 
 class TestExecuteNode:
@@ -1073,6 +1074,34 @@ class TestGoalDeliverableFallback:
         monkeypatch.chdir(tmp_path)  # Path(path) resolves here, as for a subprocess
         (tmp_path / "primes_demo.csv").write_text("prime\n2\n3\n5\n7\n")
         assert _deliverable_on_disk("primes_demo.csv") is True
+
+    def test_deliverable_on_disk_finds_flat_root_when_subdir_active(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: with RESULTS_PER_RUN_SUBDIR active, a code_executor/terminal
+        subprocess writes the deliverable to the FLAT results root — the run-id
+        contextvar does not cross the runner process boundary, so the runner's
+        write lands flat while in-process ``normalize`` would resolve the read to
+        the per-run subdir (absent). verify already falls back to the flat root via
+        ``resolve_existing``; execute's disk check must use the SAME read resolver,
+        or it spuriously reports the deliverable missing and diverges from verify
+        (execute=missing → nudge file_writer / mark complete; verify=present →
+        complete) — the q09 non-convergence. OLD ``normalize``-only code returned
+        False here; ``resolve_existing`` returns True."""
+        fake = MagicMock()
+        fake.agent.results_root = str(tmp_path)
+        fake.agent.workspace_root = str(tmp_path / "no_workspace")
+        fake.agent.results_per_run_subdir = True
+        monkeypatch.setattr("src.config.settings.get_settings", lambda: fake)
+        # File exists ONLY at the flat results root, not the per-run subdir.
+        flat = tmp_path / "q09" / "transactions.csv"
+        flat.parent.mkdir(parents=True)
+        flat.write_text("tx_id,amount\n1,99.5\n")
+        try:
+            set_active_run_id("battery04_q09")
+            assert _deliverable_on_disk("results/q09/transactions.csv") is True
+        finally:
+            set_active_run_id(None)  # contextvar is process-global — never leak
 
     def _merge_step_state(self) -> dict[str, Any]:
         """Single merge step (last step) with a path-free description but a goal

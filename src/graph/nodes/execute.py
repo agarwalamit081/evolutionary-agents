@@ -305,12 +305,12 @@ def _deliverable_on_disk(path: str) -> bool:
     (fixtures), and a literal CWD-relative ``Path(path)`` (where subprocess
     writes land when the run-id contextvar does not cross the process boundary).
     """
-    from src.tools._paths import normalize
+    from src.tools._paths import resolve_existing
 
     candidates: list[Path] = []
     for base in ("results", "workspace"):
         try:
-            candidates.append(normalize(path, base=base))
+            candidates.append(resolve_existing(path, base=base))
         except Exception:  # noqa: BLE001 — traversal/settings failure must not abort a step
             continue
     candidates.append(Path(path))  # CWD-relative: subprocess writes land here
@@ -727,7 +727,7 @@ async def _llm_execute(
             # needed (battery-04 q1+q3: the agent wrote results/<run>/*.csv via
             # code_executor, the nudge looped 3x → "marking complete (verify
             # will flag the gap)", verify flagged missing, run looped to
-            # MAX_ITERATIONS). Resolves via the same normalize() the goal-
+            # MAX_ITERATIONS). Resolves via the same resolve_existing() the goal-
             # deliverable fall-back uses, so it sees exactly where the file lands.
             if (
                 expected_path

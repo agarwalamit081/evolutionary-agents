@@ -6,6 +6,13 @@ Regression for the bare-prefix bug: zai models were registered with a bare
 This asserts every registry ``model_id`` resolves via ``litellm.get_llm_provider``
 (no API call) so the same class of bug is caught deterministically for every
 provider — not just the ones exercised by the live e2e matrix.
+
+NVIDIA NIM models (``nvidia/<org>/<model>``) are OpenAI-compatible, so the
+gateway rewrites them to ``openai/<org>/<model>`` against the pinned NIM
+``api_base`` at call time (see ``src/llm/nvidia_shim.py``). This test applies
+that shim before the routability assertion, so the 16 registered nvidia models
+are covered deterministically (they were previously skipped because the bare
+``nvidia/`` prefix is rejected by litellm in this build).
 """
 
 from __future__ import annotations
@@ -15,16 +22,7 @@ import pytest
 import litellm
 
 from src.config.model_registry import MODEL_REGISTRY
-
-# Providers whose litellm prefix routing is known-broken in the installed
-# litellm version (every model_id format unmapped via get_llm_provider). These
-# are fallback-only; tracked for a litellm-upgrade / endpoint fix separately.
-# NOTE: ``nvidia`` is *callable* despite being natively unroutable — the gateway
-# (``LLMGateway._build_kwargs``) rewrites the ``nvidia/<id>`` model_id to the
-# OpenAI-compatible ``openai/<id>`` shim against the NIM api_base at call time.
-# That shim is covered by tests/test_llm/test_gateway.py::TestBuildKwargs; this
-# test only asserts native litellm routability, which the bare prefix still lacks.
-_KNOWN_UNROUTABLE_PROVIDERS: set[str] = {"nvidia"}
+from src.llm.nvidia_shim import NVIDIA_API_BASE, nvidia_shim_model_id
 
 # Providers reached via an OpenAI-compatible gateway with a custom api_base
 # (set in gateway._build_litellm_kwargs), so their model_id legitimately uses
@@ -44,8 +42,31 @@ _LITELLM_PROVIDER_ALIASES: dict[str, set[str]] = {"google": {"gemini"}}
 @pytest.mark.parametrize("key", list(MODEL_REGISTRY.keys()))
 def test_model_id_is_litellm_routable(key: str) -> None:
     spec = MODEL_REGISTRY[key]
-    if spec.provider in _KNOWN_UNROUTABLE_PROVIDERS:
-        pytest.skip(f"{key}: {spec.provider} routing broken in installed litellm")
+    # NVIDIA NIM is OpenAI-compatible but litellm in this build rejects the bare
+    # ``nvidia/`` prefix, so the gateway rewrites it to ``openai/<id>`` against
+    # the pinned NIM base (src/llm/nvidia_shim.py). Assert the POST-shim id is
+    # routable rather than skipping — the contract the gateway actually relies on.
+    if spec.provider == "nvidia":
+        effective_model, shim_kwargs = nvidia_shim_model_id(
+            spec.provider, spec.model_id
+        )
+        assert shim_kwargs.get("api_base") == NVIDIA_API_BASE, (
+            f"{key}: nvidia shim must pin the NIM api_base"
+        )
+        assert effective_model.startswith("openai/"), (
+            f"{key}: nvidia shim must rewrite to openai/<id>, got {effective_model!r}"
+        )
+        try:
+            _, provider, _, _ = litellm.get_llm_provider(effective_model)
+        except Exception as exc:  # noqa: BLE001 — litellm raises various types
+            pytest.fail(
+                f"{key}: shimmed model_id {effective_model!r} not routable ({exc})"
+            )
+        assert provider == "openai", (
+            f"{key}: shimmed model_id {effective_model!r} routes to "
+            f"provider={provider!r}, expected 'openai'"
+        )
+        return
     try:
         _, provider, _, _ = litellm.get_llm_provider(spec.model_id)
     except Exception as exc:  # noqa: BLE001 — litellm raises various types

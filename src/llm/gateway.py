@@ -34,6 +34,7 @@ from src.llm.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from src.llm.cache import PromptCache
 from src.llm.cost_tracker import CostTracker
 from src.llm.exceptions import BudgetExhaustedError
+from src.llm.nvidia_shim import nvidia_shim_model_id
 from src.llm.prompt_cache_control import inject_cache_breakpoints
 from src.llm.thinking_control import thinking_params_for
 from src.llm.model_router import ModelRouter
@@ -864,16 +865,12 @@ class LLMGateway:
         if api_key:
             kwargs["api_key"] = api_key
 
-        # NVIDIA API requires explicit base URL
-        if provider == "nvidia":
-            # litellm in this build rejects the bare ``nvidia/`` provider prefix
-            # ("LLM Provider NOT provided"). The NVIDIA NIM endpoint is
-            # OpenAI-compatible, so pin the base and route via the ``openai/``
-            # shim — verified live for all 16 registered NVIDIA models.
-            kwargs["api_base"] = "https://integrate.api.nvidia.com/v1"
-            if litellm_model.startswith("nvidia/"):
-                litellm_model = "openai/" + litellm_model[len("nvidia/") :]
-                kwargs["model"] = litellm_model
+        # NVIDIA NIM OpenAI-compatible shim: litellm in this build rejects the
+        # bare ``nvidia/`` prefix, so a registered nvidia model_id is rewritten
+        # to ``openai/<id>`` against the pinned NIM api_base. Pure + unit-tested
+        # (src/llm/nvidia_shim.py); verified live for all 16 registered models.
+        litellm_model, nvidia_kwargs = nvidia_shim_model_id(provider, litellm_model)
+        kwargs.update(nvidia_kwargs)
 
         # Pin the Anthropic endpoint so an ambient ANTHROPIC_BASE_URL inherited
         # from the environment (e.g. a Claude-Code→Z.AI gateway) cannot misroute

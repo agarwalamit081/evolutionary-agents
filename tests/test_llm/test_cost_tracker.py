@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.config.model_registry import MODEL_REGISTRY, ModelSpec
 from src.llm.cost_tracker import CostTracker
 
 
@@ -47,10 +48,15 @@ def tracker(mock_session: MagicMock, mock_settings: MagicMock) -> CostTracker:
 class TestCalculateCost:
     """Tests for the static calculate_cost method."""
 
-    def test_known_model_returns_fallback_cost(self) -> None:
-        """Known model without cost fields uses fallback pricing."""
+    def test_known_paid_model_returns_real_pricing(self) -> None:
+        """A registered PAID model is priced from its real per-1K fields, never
+        the generic fallback rate. gpt-4o-mini carries 0.00015/0.0006, so 100 in
+        + 50 out = $0.000045; the generic fallback would bill $0.00125."""
         cost = CostTracker.calculate_cost("gpt-4o-mini-2024-07-18", 100, 50)
-        assert cost > 0
+        expected = (100 * 0.00015 + 50 * 0.0006) / 1000
+        assert abs(cost - expected) < 1e-12
+        fallback = (100 * 0.005 + 50 * 0.015) / 1000
+        assert abs(cost - fallback) > 1e-12
 
     def test_unknown_model_uses_fallback(self) -> None:
         """Unknown model uses fallback pricing ($0.005/1K in, $0.015/1K out)."""
@@ -74,6 +80,44 @@ class TestCalculateCost:
         cost = CostTracker.calculate_cost("nonexistent", 2000, 3000)
         expected = (2000 * 0.005 + 3000 * 0.015) / 1000
         assert abs(cost - expected) < 1e-10
+
+    def test_free_tier_model_costs_zero(self) -> None:
+        """Regression: a registered FREE-tier model (NVIDIA API) must cost $0.0,
+        never the generic fallback rate. Previously the ``> 0`` guard treated
+        free models as 'missing cost data' and billed them at $0.005/$0.015 per
+        1K, which inflated daily spend and falsely tripped the budget gate into
+        a degradation cascade. Non-zero tokens → $0 proves it is not fallback."""
+        cost = CostTracker.calculate_cost("nvidia-llama-3.3-70b", 10_000, 5_000)
+        assert cost == 0.0
+
+    def test_free_tier_ollama_and_openrouter_free_cost_zero(self) -> None:
+        """Ollama (local) and OpenRouter :free models are also $0.0."""
+        assert CostTracker.calculate_cost("ollama/qwen3.5:latest", 1000, 500) == 0.0
+        assert (
+            CostTracker.calculate_cost(
+                "openrouter/qwen/qwen3-next-80b-a3b-instruct:free", 1000, 500
+            )
+            == 0.0
+        )
+
+    def test_newly_priced_paid_models_use_real_rate(self) -> None:
+        """The paid models previously left on the default $0.0 now carry their
+        real provider rate — so the free-tier guard change does not silently
+        zero them. Per-1M rates verified against litellm model_cost."""
+        # gemini-2.5-flash-lite: $0.10/$0.40 per 1M
+        assert abs(
+            CostTracker.calculate_cost("gemini-2.5-flash-lite", 1_000_000, 0) - 0.10
+        ) < 1e-9
+        # llama-3.1-8b-instant (Groq): $0.05/$0.08 per 1M
+        assert abs(
+            CostTracker.calculate_cost("llama-3.1-8b-instant", 1_000_000, 1_000_000)
+            - (0.05 + 0.08)
+        ) < 1e-9
+        # llama-3.3-70b-versatile (Groq): $0.59/$0.79 per 1M
+        assert abs(
+            CostTracker.calculate_cost("llama-3.3-70b-versatile", 1_000_000, 1_000_000)
+            - (0.59 + 0.79)
+        ) < 1e-9
 
 
 # ─── record_usage ─────────────────────────────────────────────────────────
@@ -716,3 +760,43 @@ class TestDBErrorHandling:
 
         with pytest.raises(RuntimeError, match="DB query failed"):
             await tracker.get_daily_token_usage()
+
+
+# ─── registry pricing integrity ───────────────────────────────────────────
+
+
+class TestRegistryPricingIntegrity:
+    """Lock in the invariant calculate_cost relies on after the free-tier fix.
+
+    calculate_cost now prices a registered model from its explicit cost fields
+    (so free-tier models cost $0.0). That is only safe if every registered PAID
+    model carries real per-1K fields — otherwise a paid model left at the
+    default $0.0 would be silently billed as free. These guards fail loudly
+    instead of letting such a regression ship.
+    """
+
+    _FREE_PROVIDERS = frozenset({"nvidia", "ollama"})
+
+    def _is_free(self, key: str, spec: ModelSpec) -> bool:
+        return spec.provider in self._FREE_PROVIDERS or key.endswith(":free")
+
+    def test_every_paid_model_has_real_pricing(self) -> None:
+        """No registered paid model may be left at the default $0.0 cost."""
+        unpaid: list[str] = []
+        for key, spec in MODEL_REGISTRY.items():
+            if self._is_free(key, spec):
+                continue
+            if not (spec.input_cost_per_1k > 0 and spec.output_cost_per_1k > 0):
+                unpaid.append(key)
+        assert unpaid == [], f"Paid models missing real cost fields: {unpaid}"
+
+    def test_free_models_are_explicitly_zero(self) -> None:
+        """Every free-tier model carries $0.0 (documented, not implicit)."""
+        free_models = [
+            key for key, spec in MODEL_REGISTRY.items() if self._is_free(key, spec)
+        ]
+        assert free_models, "expected at least one free-tier model in the registry"
+        for key in free_models:
+            spec = MODEL_REGISTRY[key]
+            assert spec.input_cost_per_1k == 0.0, f"{key} free but input cost != 0"
+            assert spec.output_cost_per_1k == 0.0, f"{key} free but output cost != 0"

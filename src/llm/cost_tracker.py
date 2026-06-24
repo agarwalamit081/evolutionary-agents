@@ -252,16 +252,25 @@ class CostTracker:
     def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
         """Calculate cost for a model call based on per-token pricing.
 
-        Falls back to $0.005/1K input + $0.015/1K output if model not in
-        registry or registry entry lacks cost fields.
+        A model that is in MODEL_REGISTRY is priced from its explicit
+        input_cost_per_1k / output_cost_per_1k fields — including free-tier
+        models (NVIDIA API, Ollama local, OpenRouter :free), which carry 0.0 by
+        design and therefore cost $0.0. Only a model absent from the registry
+        entirely falls back to the conservative generic rate.
+
+        Why this matters: the previous ``> 0`` guard treated every free-tier
+        model as "lacking cost data" and billed it at the $0.005/$0.015 fallback
+        rate, which inflated daily spend with phantom free-tier charges and
+        falsely tripped the budget gate into a degradation cascade.
         """
         spec = MODEL_REGISTRY.get(model)
-        if spec and spec.input_cost_per_1k > 0 and spec.output_cost_per_1k > 0:
-            cost = (input_tokens * spec.input_cost_per_1k / 1000) + (
+        if spec is not None:
+            return (input_tokens * spec.input_cost_per_1k / 1000) + (
                 output_tokens * spec.output_cost_per_1k / 1000
             )
-            return cost
 
-        # Fallback pricing for unknown models or models without cost data
-        logger.warning(f"Using fallback pricing for model '{model}'")
+        # Fallback pricing ONLY for models absent from the registry. This
+        # over-estimates (≈ sonnet rate), which is the safe direction for an
+        # unknown paid model — the budget gate trips early rather than late.
+        logger.warning(f"Using fallback pricing for model '{model}' (not in registry)")
         return (input_tokens * 0.005 / 1000) + (output_tokens * 0.015 / 1000)

@@ -398,6 +398,9 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        # Real Google pricing (verified via litellm model_cost): $0.10/$0.40 per 1M.
+        input_cost_per_1k=0.0001,
+        output_cost_per_1k=0.0004,
     ),
     "gemini-2.5-flash": ModelSpec(
         model_id="gemini/gemini-2.5-flash",
@@ -436,6 +439,9 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=False,
+        # Real Groq pricing (verified via litellm model_cost): $0.05/$0.08 per 1M.
+        input_cost_per_1k=0.00005,
+        output_cost_per_1k=0.00008,
     ),
     "llama-3.3-70b-versatile": ModelSpec(
         model_id="groq/llama-3.3-70b-versatile",
@@ -447,6 +453,9 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=True,
+        # Real Groq pricing (verified via litellm model_cost): $0.59/$0.79 per 1M.
+        input_cost_per_1k=0.00059,
+        output_cost_per_1k=0.00079,
     ),
     # ── OpenRouter (Free Tier) ────────────────────────────────────
     "openrouter/qwen/qwen3-next-80b-a3b-instruct:free": ModelSpec(
@@ -459,6 +468,10 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=False,
+        # OpenRouter free tier — $0.0 (explicit so it is never mispriced as
+        # fallback by calculate_cost).
+        input_cost_per_1k=0.0,
+        output_cost_per_1k=0.0,
     ),
     # ── Ollama (Local) ────────────────────────────────────────────
     "ollama/qwen3.5:latest": ModelSpec(
@@ -471,9 +484,16 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_json_mode=True,
         supports_streaming=True,
         supports_images=False,
+        # Locally hosted — $0.0 (explicit so it is never mispriced as fallback).
+        input_cost_per_1k=0.0,
+        output_cost_per_1k=0.0,
     ),
     # ── NVIDIA (Free Tier via build.nvidia.com) ──────────────────
-    # All models free on NVIDIA API, accessed via NVIDIA_API_KEY.
+    # All models are free on the NVIDIA API (accessed via NVIDIA_API_KEY), so
+    # every entry below carries the default input_cost_per_1k=0.0 /
+    # output_cost_per_1k=0.0. CostTracker.calculate_cost prices registered
+    # models from their explicit fields, so these cost $0.0 — never the generic
+    # fallback rate that previously inflated spend on free-tier calls.
     # litellm model_id format: nvidia/<nvidia-api-model-id>
     "nvidia-nemotron-super-120b": ModelSpec(
         model_id="nvidia/nvidia/nemotron-3-super-120b-a12b",

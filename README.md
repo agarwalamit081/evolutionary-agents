@@ -122,6 +122,7 @@ START -> classify -> plan -> retrieve_memory -> execute <-> reflect
 - **Runtime Tool Creation** — Agent detects missing capabilities, generates tools via LLM with double-barrier security, and registers them for immediate use
 - **Sub-Agent Delegation** — Agent spawns specialized sub-agents as isolated LangGraph subgraphs, delegates subtasks, tracks performance with rolling metrics, and optimizes them via the evolution engine
 - **Typed Correctness Eval Harness** — beyond process metrics, a correctness layer (Structural / Execution-sandbox / Golden-spec / LLM-judge-oracle checks) scores deliverables and persists results to an `eval_results` table; wired into the verify node behind `EVAL_ENABLED`, runnable standalone via `--eval`
+- **Capability Curve + Regression Gate** — nightly `eval_results` scores roll into a per-night battery trend + a grounded regression verdict (floor + delta + min-points conjunction); inspect read-only via `--capability-curve`, and an opt-in scheduler gate (`CAPABILITY_CURVE_GATE_ENABLED`) alerts — or, with `CAPABILITY_CURVE_AUTO_ROLLBACK`, reverts a recent PROMPT promotion — on regression. The measured-self-improvement evidence the thesis needs
 - **Verify Completion Discipline** — the agent refuses to force-complete unless the goal's expected deliverable is present, non-empty, and well-formed (placeholder-leak scan for `.md`/`.txt`, parse-check for `.csv`/`.json`); a missing deliverable triggers a re-plan, never a false success
 - **Per-Tool Metrics + Performance Retirement** — each tool invocation records success/empty/latency; governance retires tools below a success-rate floor once they have enough runs, alongside semantic-dedup and cap retirement
 - **Semantic/Fact Memory Tier** — durable entity-ish facts (`memory_type="fact"`) extracted during folding and recalled alongside skills/episodes
@@ -327,6 +328,9 @@ python main.py --stream --goal "..."
 # Run the golden eval suite (correctness checks + LLM-judge) and persist results
 python main.py --eval
 
+# Inspect the nightly battery capability curve + regression verdict (read-only; no LLM/DB writes)
+python main.py --capability-curve --export /tmp/curve.json
+
 # Per-run output organization — writes land under results/<run-id>/; --clean clears it first
 python main.py --goal "..." --run-id my-task --clean
 python main.py --goal "..." --results-dir results/custom      # override the run's results root
@@ -429,6 +433,8 @@ Background **consolidation** ("dreaming") moves data between tiers: episodic mem
 
 **Objective-success evolution** — evolution fires on any run that reached its objective deliverable, including ones that logged and recovered from transient errors along the way (the richest learning signal), not only pristine clean runs. Genuine failures (no deliverable + low confidence) are still suppressed, so failure is never crystallized.
 
+**Capability-curve + regression gate** — the measured-self-improvement evidence: a pure analytics layer (`CapabilityCurve`) turns nightly `eval_results` scores into a per-night battery trend + a grounded regression verdict (`current < score_floor` AND `(best_prior - current) >= regression_delta` AND `>= min_points` nights — floor+delta both required so a noisy-but-acceptable curve never trips). Inspect it read-only with `python main.py --capability-curve` (per-night table, latest per-goal score, the verdict; `--since`/`--until` window, `--export` JSON/CSV, `--plot` PNG). The nightly scheduler can run a `CurveRegressionGate` (`CAPABILITY_CURVE_GATE_ENABLED`) that, on regression, alerts via telemetry + Prometheus and — when `CAPABILITY_CURVE_AUTO_ROLLBACK` is opted in — reverts a recent PROMPT promotion via the existing `PromotionGate.rollback`. A regression with no active promotion is model/provider drift and is alert-only. Both knobs default off; detection is always-on/read-only when the gate is enabled.
+
 ---
 
 ## Safety
@@ -491,6 +497,14 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | `LLM_BATCH_ENABLED` | `false` | Enable concurrent request batching via `LLMGateway.abatch`; `LLM_BATCH_MAX_CONCURRENCY` (default `5`) caps in-flight calls |
 | `REASONING_CONTROL_ENABLED` | `false` | Enable per-tier extended thinking (complex/critical on, trivial/simple off, provider-native); `REASONING_CONTROL_*` tunes the effort + Anthropic budgets |
 | `NATIVE_STRUCTURED_OUTPUT_ENABLED` | `false` | Enable provider-native JSON-schema `response_format` for structured outputs (OpenAI/DeepSeek strict, Anthropic `output_format`, Gemini `response_schema`) |
+| `CAPABILITY_CURVE_GATE_ENABLED` | `false` | Register the nightly curve regression→rollback gate on the scheduler (detection + telemetry + Prometheus always on; rollback is a separate knob) |
+| `CAPABILITY_CURVE_CURVE_CRON` | `0 5 * * *` | 5-field crontab for the gate (default 05:00 UTC, after the 02:00 battery so it reads the just-written night) |
+| `CAPABILITY_CURVE_TIMEZONE` | `UTC` | IANA zone for the gate cron |
+| `CAPABILITY_CURVE_REGRESSION_DELTA` | `0.1` | Minimum drop (`best_prior - current`) to flag a regression |
+| `CAPABILITY_CURVE_SCORE_FLOOR` | `0.5` | A regression requires `current` below this floor too (floor + delta both required — a delta-only dip below a held floor is NOT a regression) |
+| `CAPABILITY_CURVE_LOOKBACK_DAYS` | `30` | Only PROMPT promotions promoted within this many days are rollback suspects |
+| `CAPABILITY_CURVE_MIN_POINTS` | `2` | Fewer nights than this is INCONCLUSIVE (no verdict, no rollback) |
+| `CAPABILITY_CURVE_AUTO_ROLLBACK` | `false` | On regression, revert a recent suspect PROMPT promotion via `PromotionGate.rollback` (opt-in; off = alert only) |
 
 ---
 

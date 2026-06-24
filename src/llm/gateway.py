@@ -921,15 +921,25 @@ class LLMGateway:
         if current_order == 0:
             return None  # Already cheapest tier
 
-        # Walk fallback chain first — prefer provider diversity
+        # Walk fallback chain first — prefer provider diversity. Skip any
+        # candidate whose provider is temporarily disabled (e.g. anthropic under
+        # a quota cap) — selecting it would burn the fallback chain on a 400.
         for fb in FALLBACK_CHAINS.get(model, []):
             fb_spec = MODEL_REGISTRY.get(fb)
-            if fb_spec and _TIER_ORDER.get(fb_spec.tier, 0) < current_order:
+            if (
+                fb_spec
+                and _TIER_ORDER.get(fb_spec.tier, 0) < current_order
+                and not ModelRouter.is_provider_disabled(fb_spec.provider)
+            ):
                 return fb
 
-        # Scan registry for any cheaper model
+        # Scan registry for any cheaper model (also skipping disabled providers)
         for mid, mspec in MODEL_REGISTRY.items():
-            if mid != model and _TIER_ORDER.get(mspec.tier, 0) < current_order:
+            if (
+                mid != model
+                and _TIER_ORDER.get(mspec.tier, 0) < current_order
+                and not ModelRouter.is_provider_disabled(mspec.provider)
+            ):
                 return mid
 
         return None

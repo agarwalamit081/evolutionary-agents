@@ -344,6 +344,17 @@ class ModelRouter:
             return "groq"
         return "unknown"
 
+    @staticmethod
+    def is_provider_disabled(provider: str) -> bool:
+        """Whether a provider is temporarily excluded from all routing.
+
+        Mirrors the gate ``_has_provider_key`` applies to router selection, so
+        the gateway's budget-fallback search (``_get_cheaper_fallback``) can skip
+        a disabled provider (e.g. anthropic under a quota cap) instead of
+        selecting it as the cheaper model and burning the fallback chain on a 400.
+        """
+        return provider in _TEMPORARY_DISABLED_PROVIDERS
+
     def _has_provider_key(self, provider: str) -> bool:
         """Check if an API key is available for a provider."""
         # TEMPORARY (REVERT BY 2026-07-01): report anthropic as key-less so it

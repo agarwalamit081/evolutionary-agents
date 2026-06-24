@@ -421,6 +421,42 @@ class TestGetCheaperFallback:
             assert fb_spec is not None
             assert fb_spec.tier != "moderate"
 
+    def test_fallback_skips_provider_marked_disabled(
+        self, gateway: LLMGateway, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: the budget-fallback must skip every model whose provider
+        is in _TEMPORARY_DISABLED_PROVIDERS. Without this guard, exhausting the
+        daily budget would degrade a run onto a provider that returns 400/quota
+        on every call, burning the whole fallback chain. (Monkeypatches the set
+        so the test does not depend on which provider is temporarily disabled.)"""
+        import src.llm.model_router as mr
+        from src.config.model_registry import MODEL_REGISTRY, ModelTier
+
+        # claude-sonnet-4-6 is MODERATE → it has cheaper fallbacks across
+        # providers. Disable 'openai' and assert the result is still a cheaper
+        # model, just never an openai one.
+        monkeypatch.setattr(mr, "_TEMPORARY_DISABLED_PROVIDERS", frozenset({"openai"}))
+        result = gateway._get_cheaper_fallback("claude-sonnet-4-6")
+        assert result is not None
+        fb_spec = MODEL_REGISTRY.get(result)
+        assert fb_spec is not None
+        assert fb_spec.tier in {ModelTier.CHEAP, ModelTier.VERY_CHEAP}
+        assert fb_spec.provider != "openai", (
+            f"budget fallback returned disabled provider 'openai' ({result})"
+        )
+
+    def test_is_provider_disabled_reads_temporary_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """is_provider_disabled returns True exactly for providers in the
+        temporary-disabled set (whatever it currently holds)."""
+        import src.llm.model_router as mr
+        from src.llm.model_router import ModelRouter
+
+        monkeypatch.setattr(mr, "_TEMPORARY_DISABLED_PROVIDERS", frozenset({"groq"}))
+        assert ModelRouter.is_provider_disabled("groq") is True
+        assert ModelRouter.is_provider_disabled("openai") is False
+
 
 # ─── Test _parse_response ────────────────────────────────────────────
 

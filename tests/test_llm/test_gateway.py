@@ -10,6 +10,7 @@ import pytest
 
 from src.config.settings import Settings
 from src.graph.enums import TaskComplexity
+from src.llm.exceptions import BudgetExhaustedError
 from src.llm.gateway import LLMGateway
 from src.llm.models import LLMResponse, ToolCallResponse
 
@@ -793,24 +794,54 @@ class TestBudgetEnforcement:
     """Tests for budget check during acompletion.
 
     _get_cheaper_fallback uses _TIER_ORDER for tier comparison.
-    When budget is exhausted, the gateway tries to find a cheaper fallback.
-    If no cheaper model exists, RuntimeError is raised.
+    When budget is exhausted, the gateway tries to find a cheaper fallback
+    (the default, downgrade path). If no cheaper model exists — OR the opt-in
+    ``budget_hard_stop`` is set — it raises ``BudgetExhaustedError`` (caught by
+    the worker as the terminal, resumable BUDGET_EXHAUSTED status).
     """
 
     @pytest.mark.asyncio
-    async def test_budget_exhausted_with_no_cheaper_fallback_raises_runtime_error(
+    async def test_budget_exhausted_with_no_cheaper_fallback_raises_budget_exhausted(
         self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
     ) -> None:
-        """When budget is exhausted and model is already cheapest, RuntimeError is raised."""
+        """When budget is exhausted and model is already cheapest,
+        BudgetExhaustedError is raised (typed signal, not a bare RuntimeError)."""
         mock_tracker = MagicMock()
         mock_tracker.check_budget = AsyncMock(return_value=(False, "Daily budget exhausted"))
         gateway.set_cost_tracker(mock_tracker)
 
-        with pytest.raises(RuntimeError, match="Budget exhausted"):
+        with pytest.raises(BudgetExhaustedError, match="Budget exhausted"):
             await gateway.acompletion(
                 messages=simple_messages,
                 model="gpt-4o-mini-2024-07-18",  # VERY_CHEAP — no cheaper option
             )
+
+    @pytest.mark.asyncio
+    async def test_budget_hard_stop_raises_even_when_cheaper_fallback_available(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """Opt-in hard-stop (D): with ``budget_hard_stop`` set, the gateway raises
+        BudgetExhaustedError immediately — it does NOT downgrade, even though a
+        cheaper fallback exists. Default-off behavior (downgrade) is covered by
+        the sibling test below; this pins the opt-in HARD-stop alternative that
+        prevents a degraded run from fabricating (battery-04 q09)."""
+        mock_tracker = MagicMock()
+        mock_tracker.check_budget = AsyncMock(return_value=(False, "Daily budget exhausted"))
+        gateway.set_cost_tracker(mock_tracker)
+        # Flip the opt-in flag on for this test only.
+        gateway._settings.budget.budget_hard_stop = True
+
+        # A cheaper fallback IS available — hard-stop must ignore it and raise.
+        with patch.object(
+            gateway, "_get_cheaper_fallback", return_value="gpt-4o-mini-2024-07-18"
+        ) as mock_fallback:
+            with pytest.raises(BudgetExhaustedError, match="Daily budget exhausted"):
+                await gateway.acompletion(
+                    messages=simple_messages,
+                    model="claude-sonnet-4-6",
+                )
+        # The fallback was never consulted (raise happens before the downgrade).
+        assert not mock_fallback.called
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_falls_back_when_cheaper_available(

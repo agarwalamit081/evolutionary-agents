@@ -33,6 +33,7 @@ from src.graph.models import CostRecord
 from src.llm.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from src.llm.cache import PromptCache
 from src.llm.cost_tracker import CostTracker
+from src.llm.exceptions import BudgetExhaustedError
 from src.llm.prompt_cache_control import inject_cache_breakpoints
 from src.llm.thinking_control import thinking_params_for
 from src.llm.model_router import ModelRouter
@@ -230,14 +231,28 @@ class LLMGateway:
             within_budget, budget_msg = await self._cost_tracker.check_budget(self._run_id)
             if not within_budget:
                 logger.error(f"Budget exhausted: {budget_msg}")
-                # Try fallback to cheaper model
+                # Opt-in budget hard-stop (D): instead of silently downgrading to a
+                # cheaper fallback — which under downgrade can fabricate (battery-04
+                # q09 degraded onto a free-tier provider and never completed) — stop
+                # cleanly here. The worker catches BudgetExhaustedError → terminal
+                # BUDGET_EXHAUSTED (resumable via checkpoint). Default OFF, so the
+                # downgrade path below is unchanged unless budget_hard_stop is set.
+                if self._settings.budget.budget_hard_stop:
+                    raise BudgetExhaustedError(budget_msg)
+                # Default: downgrade to the cheapest available fallback model.
                 fallback = self._get_cheaper_fallback(model)
                 if fallback:
                     logger.warning(f"Falling back to cheaper model: {fallback}")
                     model = fallback
                     provider = self._extract_provider(model)
                 else:
-                    raise RuntimeError(f"Budget exhausted and no cheaper fallback: {budget_msg}")
+                    # Already on the cheapest tier — no downgrade possible. Raise
+                    # the typed signal (not a bare RuntimeError) so the worker marks
+                    # a terminal BUDGET_EXHAUSTED instead of redelivering a doomed
+                    # retry (a budget-exhausted run won't recover on redelivery).
+                    raise BudgetExhaustedError(
+                        f"Budget exhausted and no cheaper fallback: {budget_msg}"
+                    )
 
         # Native JSON-schema structured outputs (opt-in). Convert a caller-
         # supplied schema to a provider-native response_format using the FINAL

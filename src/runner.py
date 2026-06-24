@@ -43,6 +43,17 @@ from src.config.settings import Settings  # noqa: TC003 — used in annotations
 RunProgressCallback = Callable[[int], Awaitable[None]]
 
 
+class RunCancelled(Exception):
+    """Raised by ``execute_run`` when a graceful cancel was requested — a Redis
+    flag set via ``POST /runs/{run_id}/cancel`` (E), checked at the per-iteration
+    progress callback. Caught by the worker as the terminal CANCELLED status with
+    ~1-iteration latency: the in-flight iteration completes first, then the flag
+    is observed and the run stops cleanly (no container restart needed, as the
+    q09 halt required). Defined here (the run engine module) so both execute_run
+    (the raiser) and the worker (the catcher) import it one-way without a cycle.
+    """
+
+
 def _thread_id_for_run(run_id: str | None, goal_text: str, *, origin: str = "cli") -> str:
     """Resolve the LangGraph thread_id for a run.
 

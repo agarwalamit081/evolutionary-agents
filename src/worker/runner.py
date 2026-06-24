@@ -21,6 +21,8 @@ from uuid import uuid4
 
 from loguru import logger
 
+from src.llm.exceptions import BudgetExhaustedError
+from src.runner import RunCancelled
 from src.worker.queue import RunsQueue
 from src.worker.schema import JobStatus, RunJob
 from src.worker.status import RunStatusStore
@@ -58,6 +60,21 @@ class RunConsumer:
     def thread_id_for(run_id: str) -> str:
         """Stable checkpoint thread key — the resume handle across redelivery."""
         return f"api-{run_id}"
+
+    def _resolve_timeout(self, job: RunJob) -> float:
+        """Resolve the per-run wall-clock timeout (seconds); ``0`` = disabled.
+
+        ``RunJob.run_timeout_s`` (the API per-run override) wins over the worker
+        default ``WorkerSettings.run_timeout_s``. An explicit ``0`` disables even
+        when the worker default is set; ``None`` falls back to the worker default
+        (which itself defaults to ``0`` — no timeout, the current behavior). A
+        negative value is treated as disabled.
+        """
+        per_run = job.run_timeout_s
+        timeout = (
+            float(per_run) if per_run is not None else float(self._s.run_timeout_s or 0.0)
+        )
+        return timeout if timeout > 0 else 0.0
 
     async def _process(self, entry_id: str, job: RunJob) -> bool:
         """Run one job. Returns True iff the entry was acked (terminal).
@@ -111,7 +128,72 @@ class RunConsumer:
                 )
 
             try:
-                result = await self._executor(job, _report_progress)
+                # ── Run-level wall-clock timeout (A, opt-in) ──────────────────
+                # When ``_resolve_timeout`` returns >0, wrap the executor in
+                # ``asyncio.timeout``; the inner ``except TimeoutError`` then
+                # marks a terminal TIMEOUT (acked, NOT redelivered — the
+                # per-iteration AsyncPostgresSaver checkpoint lets ``--resume``
+                # continue later). When unarmed (timeout_s == 0) we still enter
+                # the inner ``except`` on a *stray* downstream TimeoutError, but
+                # ``re-raise`` it so it falls through to the typed/dead-letter
+                # handlers below — preserving the prior default-path behavior.
+                timeout_s = self._resolve_timeout(job)
+                timeout_ctx = (
+                    asyncio.timeout(timeout_s) if timeout_s > 0 else contextlib.nullcontext()
+                )
+                try:
+                    # ``asyncio.timeout`` (a ``Timeout``) and ``nullcontext`` both
+                    # implement the async CM protocol, so ``async with`` is the
+                    # correct unifier (``with`` is rejected by the ``Timeout``
+                    # stub, which only exposes ``__aenter__``/``__aexit__``).
+                    async with timeout_ctx:
+                        result = await self._executor(job, _report_progress)
+                except TimeoutError:
+                    if timeout_s <= 0:
+                        raise  # stray downstream TimeoutError — dead-letter, not ours
+                    logger.warning(
+                        f"Run {run_id} timed out after {timeout_s}s (terminal, "
+                        f"resumable via --resume)"
+                    )
+                    await self._status.mark(
+                        run_id,
+                        thread_id,
+                        JobStatus.TIMEOUT,
+                        error=f"Run timeout after {timeout_s}s",
+                    )
+                    acked = await self._queue.ack([entry_id])
+                    return acked > 0  # terminal — resumable via checkpoint
+                except RunCancelled as exc:
+                    # Graceful cancel (E): a Redis flag set via POST
+                    # /runs/{run_id}/cancel, polled at the per-iteration progress
+                    # callback inside execute_run → raises RunCancelled with
+                    # ~1-iteration latency. Terminal + acked (NOT redelivered).
+                    logger.info(f"Run {run_id} cancelled (terminal): {exc}")
+                    await self._status.mark(
+                        run_id,
+                        thread_id,
+                        JobStatus.CANCELLED,
+                        error=str(exc),
+                    )
+                    acked = await self._queue.ack([entry_id])
+                    return acked > 0  # terminal
+                except BudgetExhaustedError as exc:
+                    # Opt-in budget hard-stop (D): the gateway raised instead of
+                    # downgrading to a cheaper fallback. Terminal + acked
+                    # (resumable via checkpoint — caveat: cumulative budget
+                    # re-trips on resume; deferred follow-up).
+                    logger.warning(
+                        f"Run {run_id} budget-exhausted (terminal, opt-in "
+                        f"hard_stop): {exc}"
+                    )
+                    await self._status.mark(
+                        run_id,
+                        thread_id,
+                        JobStatus.BUDGET_EXHAUSTED,
+                        error=str(exc),
+                    )
+                    acked = await self._queue.ack([entry_id])
+                    return acked > 0  # terminal — resumable
             except Exception as exc:
                 # Dead-letter cap (Bug B). ``record_attempt`` is keyed by run_id, so
                 # the count is stable across XAUTOCLAIM redelivery (same consumer or a

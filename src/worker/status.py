@@ -88,7 +88,21 @@ class RunStatusStore:
                 setattr(base, k, v)
         if status is JobStatus.RUNNING and not base.started_at:
             base.started_at = utc_now_iso()
-        if status in (JobStatus.COMPLETED, JobStatus.FAILED) and not base.finished_at:
+        # finished_at stamps every terminal transition: COMPLETED/FAILED plus the
+        # resumable-terminal run-control statuses (TIMEOUT / BUDGET_EXHAUSTED /
+        # CANCELLED) so the API reports when the run ended regardless of which
+        # clean-stop path it took.
+        if (
+            status
+            in (
+                JobStatus.COMPLETED,
+                JobStatus.FAILED,
+                JobStatus.TIMEOUT,
+                JobStatus.BUDGET_EXHAUSTED,
+                JobStatus.CANCELLED,
+            )
+            and not base.finished_at
+        ):
             base.finished_at = utc_now_iso()
         await self.put(base)
         return base

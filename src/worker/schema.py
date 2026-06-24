@@ -22,6 +22,14 @@ class JobStatus(str, Enum):
     RUNNING = "running"  # A worker claimed the job and is executing the run.
     COMPLETED = "completed"  # The run finished (is_complete may still be False).
     FAILED = "failed"  # The executor raised; left for redelivery / terminal error.
+    # ── Resumable-terminal statuses (run-control hardening) ──────────────
+    # Each is terminal (the entry is acked, NOT redelivered) but the per-iteration
+    # AsyncPostgresSaver checkpoint is intact, so ``--resume <run_id>`` continues
+    # from the last write. JobStatus lives in the Redis status hash as a string —
+    # NOT a DB column — so adding members needs no Alembic migration.
+    TIMEOUT = "timeout"  # Wall-clock bound exceeded (WorkerSettings.run_timeout_s / RunJob).
+    BUDGET_EXHAUSTED = "budget_exhausted"  # Opt-in budget hard-stop (budget_hard_stop). Caveat: resume re-trips.
+    CANCELLED = "cancelled"  # Graceful cancel via Redis flag (POST /runs/{id}/cancel).
 
 
 class RunJob(BaseModel):

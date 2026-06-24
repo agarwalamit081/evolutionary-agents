@@ -18,6 +18,8 @@ from typing import Any
 
 import pytest
 
+from src.llm.exceptions import BudgetExhaustedError
+from src.runner import RunCancelled
 from src.worker.queue import RunsQueue
 from src.worker.runner import RunConsumer
 from src.worker.schema import JobStatus, RunJob
@@ -423,4 +425,189 @@ class TestRunConsumerLeaseLock:
         await consumer_b._process(entry_id, job)
         assert a_calls == 1
         assert b_calls == 1  # B ran too — the bug, present only when the lease is off
+
+
+class TestRunConsumerRunControl:
+    """Run-control hardening (A/D/E + F glue). Three new terminal statuses —
+    TIMEOUT / BUDGET_EXHAUSTED / CANCELLED — are each acked (NOT redelivered) and
+    resumable via the per-iteration AsyncPostgresSaver checkpoint. The typed
+    exception handlers sit BEFORE the dead-letter ``except Exception`` so a
+    timeout/budget/cancel is never mis-redelivered as a poison message; and a
+    STRAY downstream ``TimeoutError`` while the wall-clock bound is UNARMED still
+    falls through to the dead-letter path (preserving the prior default
+    behavior). ``_resolve_timeout`` precedence is pinned so the per-run API
+    override wins, an explicit ``0`` disables, and ``None`` defers to the worker
+    default."""
+
+    def test_resolve_timeout_precedence(
+        self, fake_redis, worker_settings  # noqa: ARG002 — settings needed for ctor
+    ) -> None:
+        """``_resolve_timeout`` precedence (no executor call — pure resolution):
+        per-run override wins; an explicit per-run 0 disables even when the worker
+        default is set; None defers to the worker default; a worker-default 0 (the
+        shipped default) is disabled; negatives are disabled."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+
+        async def noop(_j: RunJob, _p: Any = None) -> dict[str, Any]:
+            return _ok_result()
+
+        # Worker default is 0.0 (shipped off) — so a None override stays disabled.
+        consumer_off = RunConsumer(queue, store, noop, worker_settings)
+        assert consumer_off._resolve_timeout(RunJob(run_id="a", goal="g")) == 0.0
+
+        # A set worker default is used when the job has no per-run override.
+        s_on = worker_settings.model_copy(update={"run_timeout_s": 1800.0})
+        consumer_on = RunConsumer(queue, store, noop, s_on)
+        assert consumer_on._resolve_timeout(RunJob(run_id="b", goal="g")) == 1800.0
+
+        # Per-run override wins over the worker default.
+        assert (
+            consumer_on._resolve_timeout(RunJob(run_id="c", goal="g", run_timeout_s=60.0))
+            == 60.0
+        )
+        # An explicit per-run 0 disables EVEN WHEN the worker default is set.
+        assert (
+            consumer_on._resolve_timeout(RunJob(run_id="d", goal="g", run_timeout_s=0.0))
+            == 0.0
+        )
+        # Negatives are disabled.
+        assert (
+            consumer_on._resolve_timeout(RunJob(run_id="e", goal="g", run_timeout_s=-5.0))
+            == 0.0
+        )
+
+    async def test_run_timeout_marks_terminal_timeout(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """A (armed): an executor that outlasts ``run_timeout_s`` is bounded by
+        ``asyncio.timeout`` → terminal TIMEOUT + acked (NOT redelivered, resumable
+        via checkpoint). Per-run override is the API surface exercised here."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        # Tiny per-run bound; the executor sleeps well past it.
+        job = RunJob(run_id="slow", goal="g", run_timeout_s=0.05)
+
+        async def slow(_j: RunJob, _p: Any = None) -> dict[str, Any]:
+            await asyncio.sleep(5.0)  # far exceeds the 0.05s bound
+            return _ok_result()
+
+        consumer = RunConsumer(queue, store, slow, worker_settings)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()  # claim into the PEL so ack resolves
+
+        assert await consumer._process(entry_id, job) is True  # terminal — acked
+        assert await queue.pending_count() == 0
+        rec = await store.get("slow")
+        assert rec is not None
+        assert rec.status is JobStatus.TIMEOUT
+        assert "timeout after 0.05s" in (rec.error or "")
+
+    async def test_worker_default_run_timeout_arms(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """A (worker default): with no per-run override, the worker-default
+        ``run_timeout_s`` arms the bound (the common production path when the
+        operator sets ``WORKER_RUN_TIMEOUT_S`` and jobs don't override it)."""
+        s = worker_settings.model_copy(update={"run_timeout_s": 0.05})
+        queue = RunsQueue(fake_redis, s)
+        store = RunStatusStore(fake_redis, s)
+        job = RunJob(run_id="wd", goal="g")  # no per-run override
+
+        async def slow(_j: RunJob, _p: Any = None) -> dict[str, Any]:
+            await asyncio.sleep(5.0)
+            return _ok_result()
+
+        consumer = RunConsumer(queue, store, slow, s)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()
+
+        assert await consumer._process(entry_id, job) is True
+        assert (await store.get("wd")).status is JobStatus.TIMEOUT  # type: ignore[union-attr]
+
+    async def test_run_cancelled_marks_terminal_cancelled(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """E (cancel): execute_run polls the Redis cancel flag at the per-iteration
+        progress callback and raises ``RunCancelled`` → terminal CANCELLED + acked
+        (NOT redelivered). Here the fake executor raises it directly."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        job = RunJob(run_id="can", goal="g")
+
+        async def cancelled(_j: RunJob, _p: Any = None) -> dict[str, Any]:
+            raise RunCancelled("cancelled via POST /runs/can/cancel")
+
+        consumer = RunConsumer(queue, store, cancelled, worker_settings)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()
+
+        assert await consumer._process(entry_id, job) is True  # terminal — acked
+        assert await queue.pending_count() == 0
+        rec = await store.get("can")
+        assert rec is not None
+        assert rec.status is JobStatus.CANCELLED
+        assert "cancelled" in (rec.error or "")
+
+    async def test_budget_exhausted_marks_terminal_budget_exhausted(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """D (opt-in hard-stop): when ``BUDGET_HARD_STOP`` is on, the gateway raises
+        ``BudgetExhaustedError`` instead of downgrading → terminal BUDGET_EXHAUSTED
+        + acked (resumable via checkpoint; caveat: cumulative cap re-trips on
+        resume — documented, deferred)."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        job = RunJob(run_id="over", goal="g")
+
+        async def over_budget(_j: RunJob, _p: Any = None) -> dict[str, Any]:
+            raise BudgetExhaustedError("per-task token limit reached (hard_stop on)")
+
+        consumer = RunConsumer(queue, store, over_budget, worker_settings)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()
+
+        assert await consumer._process(entry_id, job) is True  # terminal — acked
+        assert await queue.pending_count() == 0
+        rec = await store.get("over")
+        assert rec is not None
+        assert rec.status is JobStatus.BUDGET_EXHAUSTED
+        assert "token limit" in (rec.error or "")
+
+    async def test_stray_timeout_when_unarmed_dead_letters(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """F (fallthrough guarantee): while the wall-clock bound is UNARMED
+        (``run_timeout_s == 0``, the shipped default), a STRAY downstream
+        ``TimeoutError`` (e.g. an httpx read timeout) must NOT be mislabeled
+        TIMEOUT. ``_process`` re-raises it so it lands in the dead-letter path
+        (FAILED + left for redelivery) — preserving the prior default behavior so
+        the opt-in timeout can't change outcomes when off."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        # Default worker_settings → run_timeout_s == 0 (unarmed).
+        job = RunJob(run_id="stray", goal="g")
+
+        async def stray_timeout(_j: RunJob, _p: Any = None) -> dict[str, Any]:
+            # A downstream I/O read timeout — NOT our wall-clock bound.
+            raise TimeoutError("httpx read timeout")
+
+        consumer = RunConsumer(queue, store, stray_timeout, worker_settings)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()
+
+        # NOT terminal: dead-letter (attempt 1 < cap 3) → FAILED + left for redelivery.
+        assert await consumer._process(entry_id, job) is False
+        assert await queue.pending_count() == 1
+        rec = await store.get("stray")
+        assert rec is not None
+        # Decisive: it is FAILED (dead-letter), NOT mislabeled TIMEOUT.
+        assert rec.status is JobStatus.FAILED
+        assert rec.status is not JobStatus.TIMEOUT
+        assert "read timeout" in (rec.error or "")
 

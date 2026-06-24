@@ -42,7 +42,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir -r /tmp/requirements.optimizer.txt \
     && python -c "import dspy, gepa, litellm, sys; assert 'torch' not in sys.modules, 'dspy/gepa pulled torch at import time'" \
     && ! python -c "import torch" \
-    && python -c "import dspy, litellm; print('optimizer image deps OK: dspy', dspy.__version__, '| litellm', litellm.__version__)"
+    && python -c "import dspy, litellm; from importlib.metadata import version as _v; print('optimizer image deps OK: dspy', dspy.__version__, '| litellm', _v('litellm'))"
 
 USER turing
 

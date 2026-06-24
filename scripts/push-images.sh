@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Push the locally-built turing images (turing-agent / turing-runner /
+# Push the locally-built turing images (self-evolving-agent / turing-runner /
 # turing-toolbox) to the local registry defined in docker-compose.yml (the
 # `registry` service, registry:2 on host :5001). Named image tags + BuildKit
 # pip caching (S9) make builds reproducible; this script makes them shareable
@@ -14,7 +14,7 @@
 #   # config in the Docker daemon; localhost:5001 is permitted over HTTP as-is):
 #   REGISTRY=my-host:5000 scripts/push-images.sh
 #   # push a specific subset instead of all three:
-#   scripts/push-images.sh turing-agent turing-runner
+#   scripts/push-images.sh self-evolving-agent turing-runner
 set -euo pipefail
 
 REGISTRY="${REGISTRY:-localhost:5001}"
@@ -23,7 +23,7 @@ REGISTRY="${REGISTRY:-localhost:5001}"
 if [ "$#" -gt 0 ]; then
   IMAGES=("$@")
 else
-  IMAGES=(turing-agent turing-runner turing-toolbox)
+  IMAGES=(self-evolving-agent turing-runner turing-toolbox)
 fi
 
 echo "→ Pushing to registry: ${REGISTRY}"

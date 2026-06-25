@@ -297,6 +297,27 @@ class TestCodeExecutorCWD:
         assert not (tmp_path / "results" / "results" / "report.md").exists()
         assert not (tmp_path / "report.md").exists()
 
+    @pytest.mark.asyncio
+    async def test_bootstrap_defaults_mplbackend_agg(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D6: the ``_write_bootstrap`` shim defaults ``MPLBACKEND=Agg`` so a
+        generated tool that imports matplotlib and calls ``savefig`` works
+        headless — there is no display server in host subprocess / runner mode.
+        ``setdefault`` honors a caller that already set the backend, so clear the
+        host value to assert the injection engages deterministically.
+        """
+        from src.config.settings import AgentSettings
+
+        monkeypatch.delenv("MPLBACKEND", raising=False)
+        mock_settings = AgentSettings(results_root=str(tmp_path / "results"))
+        with patch("src.config.settings.get_settings", return_value=type("S", (), {"agent": mock_settings})):
+            out = await code_executor(
+                "import os\n"
+                "print(os.environ.get('MPLBACKEND'))\n"
+            )
+        assert "Agg" in out, out
+
 
 class TestCodeExecutorRunSubdir:
     """Per-run subfoldering: code_executor deliverables isolate under

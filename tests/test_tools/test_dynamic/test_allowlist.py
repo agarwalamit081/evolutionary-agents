@@ -454,6 +454,49 @@ class TestPhase3D5PackagesPassSafetyLayer4:
         assert result["issues"] == []
 
 
+class TestPhase3D6Allowlist:
+    """Phase 3 D6 (findings.md P2): matplotlib admitted for generated-tool plotting.
+
+    ``matplotlib`` + ``matplotlib.pyplot`` are allowed imports; ``matplotlib`` is
+    an installable dist; installed → pre-imported in the materializer namespace.
+    The code_executor bootstrap defaults ``MPLBACKEND=Agg`` (covered in
+    test_code_executor) so headless ``savefig`` works.
+    """
+
+    @pytest.mark.parametrize("import_name", ["matplotlib", "matplotlib.pyplot"])
+    def test_matplotlib_import_names_allowed(self, import_name: str) -> None:
+        assert import_name in ALLOWED_MODULES
+
+    def test_matplotlib_dist_name_installable(self) -> None:
+        assert "matplotlib" in SAFE_PIP_PACKAGES
+
+    def test_matplotlib_in_materializer_namespace_when_installed(self) -> None:
+        ns = get_materializer_namespace()
+        try:
+            importlib.import_module("matplotlib")
+        except ImportError:
+            assert "matplotlib" not in ns
+        else:
+            assert "matplotlib" in ns
+            assert hasattr(ns["matplotlib"], "__name__")
+
+    @pytest.mark.parametrize("import_name", ["matplotlib", "matplotlib.pyplot"])
+    def test_matplotlib_import_passes_layer4(self, import_name: str) -> None:
+        from src.safety.pipeline import SafetyPipeline
+
+        pipeline = SafetyPipeline()
+        code = f"import {import_name}\n"
+        result = pipeline._check_imports(
+            code, allowlisted=set(ALLOWED_MODULES)
+        )
+        assert result["passed"] is True, result["issues"]
+        assert result["issues"] == []
+
+    def test_still_excludes_dangerous_modules(self) -> None:
+        for name in ("os", "sys", "subprocess", "socket", "shutil", "ctypes"):
+            assert name not in ALLOWED_MODULES
+
+
 class TestBrowserPackagesStayBlocked:
     """Browser-automation packages are deliberately deferred — must stay blocked."""
 

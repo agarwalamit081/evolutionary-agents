@@ -144,6 +144,14 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     "selectolax",
     "mdformat",
     "mistune",
+    # ── Phase 3 D6 — plotting (matplotlib) ──
+    # ``matplotlib`` + its ``matplotlib.pyplot`` submodule so a generated tool can
+    # render a chart and ``savefig`` it under results/. Pure compute (no egress);
+    # the code_executor bootstrap defaults ``MPLBACKEND=Agg`` so headless savefig
+    # works (no display server in host subprocess / runner mode). The dist shares
+    # its import name.
+    "matplotlib",
+    "matplotlib.pyplot",
 })
 
 # Packages that can be pip-installed in the sandbox.
@@ -212,6 +220,9 @@ SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     "selectolax",
     "mdformat",
     "mistune",
+    # ── Phase 3 D6 — dist name for matplotlib (shares its import name) ──
+    # See the ALLOWED_MODULES Phase-3-D6 note for the Agg-backend rationale.
+    "matplotlib",
 })
 
 
@@ -304,6 +315,8 @@ def get_materializer_namespace() -> dict[str, Any]:
         "pyomo", "highspy",
         # Phase 3 D5: fast HTML/markdown libs (selectolax/mdformat/mistune).
         "selectolax", "mdformat", "mistune",
+        # Phase 3 D6: matplotlib (plotting); code_executor bootstrap sets Agg.
+        "matplotlib",
     ):
         try:
             mod = __import__(mod_name)

@@ -92,6 +92,7 @@ scipy==1.17.1
 sympy==1.14.0
 networkx==3.6.1
 pandas==2.2.3
+matplotlib==3.10.7                      # Plotting — allowlisted for generated tools (D6); code_executor bootstrap sets MPLBACKEND=Agg for headless savefig
 
 # ─── Web & Document Tools (builtin tooling) ─────────────────────
 ddgs==9.14.2                         # DuckDuckGo search (web_search tool)

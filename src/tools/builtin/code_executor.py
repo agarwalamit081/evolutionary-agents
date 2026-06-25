@@ -78,12 +78,18 @@ def _write_bootstrap(results_root_abs: str, run_subdir: str | None = None) -> st
     shim. This closes the flat-write contamination vector: code_executor
     deliverables used to land FLAT under ``results/`` (file_writer subfolders),
     so a prior run's flat file was recalled by a later run via the flat fallback.
+
+    Additionally (D6), every variant defaults ``MPLBACKEND=Agg`` so a generated
+    tool that imports ``matplotlib`` and calls ``savefig`` works headless — there
+    is no display server in host subprocess / runner mode. ``setdefault`` honors a
+    caller that already set the backend.
     """
     # Absolute-path + read-mode opens are never touched; only relative writes
     # are mkdir'd and (when a results root is given) relocated.
     if not results_root_abs:
         return (
             "import builtins as _turing_b, os as _turing_os\n"
+        "_turing_os.environ.setdefault('MPLBACKEND', 'Agg')  # headless backend so matplotlib savefig works (D6)\n"
             "_turing_open_orig = _turing_b.open\n"
             "def _turing_open(p, m='r', *a, **k):\n"
             "    if any(c in str(m) for c in 'wax'):\n"
@@ -101,6 +107,7 @@ def _write_bootstrap(results_root_abs: str, run_subdir: str | None = None) -> st
         # results/) is relocated into results_root_abs. Reads/abs-paths untouched.
         return (
             "import builtins as _turing_b, os as _turing_os\n"
+        "_turing_os.environ.setdefault('MPLBACKEND', 'Agg')  # headless backend so matplotlib savefig works (D6)\n"
             "_turing_open_orig = _turing_b.open\n"
             f'_TURING_RESULTS = "{root_literal}"\n'
             "def _turing_open(p, m='r', *a, **k):\n"
@@ -130,6 +137,7 @@ def _write_bootstrap(results_root_abs: str, run_subdir: str | None = None) -> st
     strip_literal = repr(tuple(sorted({"results", root_name, run_subdir.lower()})))
     return (
         "import builtins as _turing_b, os as _turing_os\n"
+        "_turing_os.environ.setdefault('MPLBACKEND', 'Agg')  # headless backend so matplotlib savefig works (D6)\n"
         "_turing_open_orig = _turing_b.open\n"
         f'_TURING_ROOT = "{root_literal}"\n'
         f'_TURING_SUB = "{sub_literal}"\n'

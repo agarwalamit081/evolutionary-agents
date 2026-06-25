@@ -14,6 +14,7 @@ from src.graph.models import ReflectionResult
 from src.graph.nodes.evolve import (
     _derive_input_schema,
     _sanitize_tool_name,
+    _synthesize_self_test,
     _try_register_deployed_tool,
     evolve_node,
 )
@@ -527,6 +528,25 @@ class TestEvolveHelpers:
             "type": "object",
             "properties": {},
         }
+
+    def test_synthesize_self_test_is_valid_for_d9_gate(self) -> None:
+        """D9: the evolved-handler self-test must clear the shared code gate —
+        non-empty, contains an ``assert``, and the handler is referenced by its
+        defined name so combined source has no undefined name (ruff F821)."""
+        test_code = _synthesize_self_test(_TOOL_HANDLER)
+        # Non-empty + asserts something.
+        assert test_code.strip()
+        assert "assert " in test_code
+        # Calls the evolved handler by its real name, passing the one required
+        # positional (path) as a sample string; the defaulted arg is omitted.
+        assert "asyncio.run(csv_normalizer(path=''))" in test_code
+
+    def test_synthesize_self_test_no_required_args(self) -> None:
+        """A handler with only defaulted params is called with no args."""
+        handler = "async def ping(flag: bool = False):\n    return 'pong'\n"
+        test_code = _synthesize_self_test(handler)
+        assert "asyncio.run(ping())" in test_code
+        assert "assert " in test_code
 
     @pytest.mark.asyncio
     async def test_try_register_success_persists_and_returns_true(self) -> None:

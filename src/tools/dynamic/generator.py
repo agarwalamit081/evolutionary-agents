@@ -14,15 +14,12 @@ from pydantic import BaseModel, Field
 
 from src.config import get_settings
 from src.graph.enums import TaskComplexity
-from src.tools.dynamic.allowlist import (
-    ALLOWED_MODULES,
-    get_materializer_namespace,
-)
+from src.tools.dynamic.allowlist import get_materializer_namespace
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
     from src.safety.pipeline import SafetyPipeline
-    from src.sandbox.executor import SandboxExecutor, SandboxResult
+    from src.sandbox.executor import SandboxExecutor
     from src.tools.registry import ToolRegistry
 
 
@@ -33,7 +30,13 @@ class GeneratedTool(BaseModel):
     description: str = Field(description="Human-readable description for LLM tool selection")
     input_schema: dict[str, Any] = Field(description="JSON Schema for tool parameters")
     handler_code: str = Field(description="Complete Python async function source code")
-    test_code: str = Field(default="", description="pytest-style test for the tool")
+    test_code: str = Field(
+        min_length=1,
+        description=(
+            "Self-contained test that calls the handler and asserts its result. "
+            "Required (D9): a tool with no asserting test cannot be registered."
+        ),
+    )
 
 
 class ToolGenerator:
@@ -179,45 +182,33 @@ class ToolGenerator:
                 ),
             }
 
-        # Step 1: Safety pipeline validation
-        safety_result = await self._safety.validate(
-            code=tool.handler_code,
-            context={
-                "mutation_type": "tool",
-                "description": "runtime generated tool",
-                "tool_name": tool.tool_name,
-            },
-            sandbox_executor=None,  # We handle sandbox separately below
-            allowlisted_modules=set(ALLOWED_MODULES),
+        # Step 1: shared code gate (D9) — assertion presence + ruff lint + 7-layer
+        # safety + optional sandbox smoke. Extracted to
+        # ``src.tools.dynamic.validation`` so the operator-facing edit→approve
+        # API (D10) applies the IDENTICAL bar; the two entry points cannot drift.
+        from src.tools.dynamic.validation import validate_tool_code
+
+        validation = await validate_tool_code(
+            handler_code=tool.handler_code,
+            test_code=tool.test_code,
+            tool_name=tool.tool_name,
+            safety_pipeline=self._safety,
+            sandbox=self._sandbox,
         )
-
-        if not safety_result.get("passed", False):
-            issues = safety_result.get("issues", [])
+        if not validation.passed:
             logger.warning(
-                f"Tool '{tool.tool_name}' failed safety validation: {issues}"
+                f"Tool '{tool.tool_name}' failed code validation: {validation.reason}"
             )
             return {
                 "success": False,
-                "reason": f"Safety validation failed: {'; '.join(issues[:3])}",
-                "safety_result": safety_result,
+                "reason": validation.reason,
+                "safety_result": validation.safety_result,
+                "lint_result": validation.lint_result,
+                "sandbox_result": validation.sandbox_result,
             }
 
-        # Step 2: Sandbox test
-        sandbox_result: dict[str, Any] = {"passed": True, "note": "no sandbox available"}
-        if self._sandbox is not None and tool.test_code:
-            sandbox_result = await self._run_sandbox_test(tool)
-
-        if not sandbox_result.get("passed", False):
-            logger.warning(
-                f"Tool '{tool.tool_name}' failed sandbox test: "
-                f"{sandbox_result.get('issues', [])}"
-            )
-            return {
-                "success": False,
-                "reason": f"Sandbox test failed: {sandbox_result.get('issues', ['unknown'])[:3]}",
-                "safety_result": safety_result,
-                "sandbox_result": sandbox_result,
-            }
+        safety_result = validation.safety_result
+        sandbox_result = validation.sandbox_result
 
         # Step 3: Materialize handler
         try:
@@ -255,6 +246,7 @@ class ToolGenerator:
             "success": True,
             "tool_name": tool.tool_name,
             "safety_result": safety_result,
+            "lint_result": validation.lint_result,
             "sandbox_result": sandbox_result,
         }
 
@@ -337,38 +329,3 @@ class ToolGenerator:
             raise ValueError(f"Function '{func_name}' not found in materialized namespace")
 
         return handler
-
-    async def _run_sandbox_test(self, tool: GeneratedTool) -> dict[str, Any]:
-        """Run handler + test code in sandbox executor.
-
-        Uses ``execute_code_subprocess`` (forced host-subprocess mode) rather than
-        ``execute_code`` (which honors the docker default). The handler has ALREADY
-        been statically vetted by the ``SafetyPipeline`` in step 1 of
-        ``validate_and_register``, so this is a functional smoke test — not a
-        security barrier — and it must run in the SAME interpreter + site-packages
-        the handler is materialized in (step 3), else it false-rejects any tool
-        that imports an allowlisted third-party dep present in the host env but
-        absent from the stripped ``python:3.12-slim`` self-test image. Falls back
-        to ``execute_code`` for back-compat with older/legacy sandbox objects.
-
-        Args:
-            tool: Generated tool with handler_code and test_code.
-
-        Returns:
-            Dict with 'passed' bool and 'issues' list.
-        """
-        if self._sandbox is None:
-            return {"passed": True, "note": "no sandbox available"}
-
-        combined_code = f"{tool.handler_code}\n\n{tool.test_code}"
-        runner = getattr(self._sandbox, "execute_code_subprocess", None) or self._sandbox.execute_code
-        try:
-            result: SandboxResult = await runner(combined_code)
-            if result.timed_out:
-                return {"passed": False, "issues": ["Tool test timed out in sandbox"]}
-            if not result.success:
-                stderr_preview = result.stderr[:300] if result.stderr else "unknown"
-                return {"passed": False, "issues": [f"Sandbox test failed: {stderr_preview}"]}
-            return {"passed": True, "issues": []}
-        except Exception as e:
-            return {"passed": False, "issues": [f"Sandbox execution error: {e}"]}

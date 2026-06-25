@@ -23,7 +23,9 @@ Respond with a JSON object matching this schema:
 - description: Clear description for LLM tool selection
 - input_schema: JSON Schema object defining parameters (type: "object", properties, required)
 - handler_code: Complete Python source code for an async function
-- test_code: Simple async test code that calls the handler
+- test_code: REQUIRED. Self-contained test that calls the handler exactly once \
+  and asserts the result. The tool is REJECTED if test_code is missing, empty, \
+  or contains no `assert` statement (D9) — an untested tool cannot be registered.
 
 The handler_code must be a complete, self-contained async function definition.
 Example structure:

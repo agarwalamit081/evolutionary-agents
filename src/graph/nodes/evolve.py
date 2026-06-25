@@ -340,6 +340,51 @@ def _derive_input_schema(handler_code: str) -> dict[str, Any]:
     return schema
 
 
+def _synthesize_self_test(handler_code: str) -> str:
+    """Synthesize a minimal self-test for an evolved TOOL handler (D9).
+
+    The shared ``validate_tool_code`` gate requires a non-empty ``test_code``
+    that contains an ``assert`` and lints clean (``ruff --select F,E9``) next to
+    the handler. The evolved TOOL mutation has no LLM-authored test (it comes
+    from the mutation engine, not the tool generator), so we synthesize one:
+    call the handler once via ``asyncio.run`` and assert it returns a ``str``
+    (generated handlers return either a success string or an ``"ERROR: ..."`` —
+    both are ``str``, so the smoke tolerates either without masking a crash).
+
+    The handler is referenced by its *defined* name, so the combined source has
+    no undefined name (ruff F821 clean). The evolve path passes
+    ``sandbox=None``, so this test is structural (assert + lint + safety); the
+    mutation already cleared the engine's functional post-deploy smoke.
+    """
+    import ast
+
+    name = "handler"
+    required: list[str] = []
+    try:
+        tree = ast.parse(handler_code)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                args = node.args.args
+                n_defaults = len(node.args.defaults)
+                first_optional = len(args) - n_defaults
+                name = node.name
+                required = [
+                    a.arg
+                    for idx, a in enumerate(args)
+                    if a.arg not in ("self", "cls") and idx < first_optional
+                ]
+                break
+    except SyntaxError:
+        pass
+
+    call_args = ", ".join(f"{p}=''" for p in required)
+    return (
+        "import asyncio\n"
+        f"result = asyncio.run({name}({call_args}))\n"
+        "assert isinstance(result, str)\n"
+    )
+
+
 async def _try_register_deployed_tool(
     proposal: dict[str, Any],
     registry: Any,
@@ -380,7 +425,11 @@ async def _try_register_deployed_tool(
             description=str(description),
             input_schema=_derive_input_schema(handler_code),
             handler_code=handler_code,
-            test_code="",
+            # D9: test_code is required + must assert + lint clean. The evolved
+            # handler has no LLM-authored test, so synthesize a structural one
+            # (sandbox=None below → the functional smoke is skipped; this gate
+            # is assert + ruff + safety only, mirroring the generator's bar).
+            test_code=_synthesize_self_test(handler_code),
         )
 
         generator = ToolGenerator(

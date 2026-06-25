@@ -9,6 +9,7 @@ import pytest
 
 from src.safety.pipeline import SafetyPipeline
 from src.tools.dynamic.generator import GeneratedTool, ToolGenerator
+from src.tools.dynamic.validation import _run_sandbox_smoke, validate_tool_code
 from src.tools.registry import ToolRegistry
 
 
@@ -82,18 +83,31 @@ class TestGeneratedTool:
             description="A test tool",
             input_schema={"type": "object", "properties": {}},
             handler_code="async def my_tool() -> str:\n    return 'ok'",
+            test_code="assert True\n",
         )
         assert tool.tool_name == "my_tool"
         assert tool.description == "A test tool"
 
-    def test_default_test_code(self) -> None:
-        tool = GeneratedTool(
-            tool_name="t",
-            description="d",
-            input_schema={},
-            handler_code="async def t() -> str:\n    return 'ok'",
-        )
-        assert tool.test_code == ""
+    def test_test_code_is_required(self) -> None:
+        # D9: test_code is mandatory (min_length=1) — a tool with no test cannot
+        # be registered. Construction without it, or with an empty string, raises.
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            GeneratedTool(
+                tool_name="t",
+                description="d",
+                input_schema={},
+                handler_code="async def t() -> str:\n    return 'ok'",
+            )
+        with pytest.raises(ValidationError):
+            GeneratedTool(
+                tool_name="t",
+                description="d",
+                input_schema={},
+                handler_code="async def t() -> str:\n    return 'ok'",
+                test_code="",
+            )
 
 
 class TestToolGeneratorMaterialize:
@@ -170,6 +184,11 @@ class TestToolGeneratorValidate:
                 "async def system_tool(cmd: str) -> str:\n"
                 "    return os.popen(cmd).read()\n"
             ),
+            test_code=(
+                "import asyncio\n"
+                "result = asyncio.run(system_tool('echo hi'))\n"
+                "assert isinstance(result, str)\n"
+            ),
         )
         result = await gen.validate_and_register(tool, registry)
         assert result["success"] is False
@@ -196,6 +215,11 @@ class TestToolGeneratorValidate:
                 "async def adder(a: int, b: int) -> str:\n"
                 "    return str(a + b)\n"
             ),
+            test_code=(
+                "import asyncio\n"
+                "result = asyncio.run(adder(3, 4))\n"
+                "assert result == '7'\n"
+            ),
         )
         result = await gen.validate_and_register(tool, registry)
         assert result["success"] is True
@@ -219,6 +243,7 @@ class TestToolGeneratorValidate:
                 description=f"Tool {i}",
                 input_schema={},
                 handler_code=f"async def tool_{i}() -> str:\n    return '{i}'",
+                test_code="assert True\n",
             )
             result = await gen.validate_and_register(tool, registry)
             if i < 3:
@@ -257,6 +282,7 @@ class TestToolGeneratorValidate:
                 "async def adder(a: int, b: int) -> str:\n"
                 "    return str(a + b)\n"
             ),
+            test_code="assert True\n",
         )
         result = await gen.validate_and_register(tool, registry)
 
@@ -395,6 +421,89 @@ class TestToolGeneratorCodegenModel:
         assert kwargs.get("response_format") == {"type": "json_object"}
 
 
+class TestValidateToolCode:
+    """D9: the shared code gate (assertion presence + ruff lint + 7-layer safety)
+    that BOTH the runtime generator and the D10 edit→approve route call. The
+    sandbox smoke is covered separately by ``TestRunSandboxTestEnvAlignment``;
+    these tests pass ``sandbox=None`` to isolate the static gates.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rejects_empty_test_code(self) -> None:
+        result = await validate_tool_code(
+            handler_code="async def t() -> str:\n    return 'ok'\n",
+            test_code="   \n",
+            tool_name="t",
+            safety_pipeline=SafetyPipeline(),
+        )
+        assert not result.passed
+        assert "empty" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_rejects_test_without_assert(self) -> None:
+        result = await validate_tool_code(
+            handler_code="async def t() -> str:\n    return 'ok'\n",
+            test_code="import asyncio\nresult = asyncio.run(t())\nprint(result)\n",
+            tool_name="t",
+            safety_pipeline=SafetyPipeline(),
+        )
+        assert not result.passed
+        assert "assert" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_rejects_undefined_name_via_lint(self) -> None:
+        # ruff --select F,E9 flags the undefined name (F821) — a genuine bug.
+        result = await validate_tool_code(
+            handler_code="async def broken() -> str:\n    return undefined_value\n",
+            test_code=(
+                "import asyncio\n"
+                "result = asyncio.run(broken())\n"
+                "assert result is not None\n"
+            ),
+            tool_name="broken",
+            safety_pipeline=SafetyPipeline(),
+        )
+        assert not result.passed
+        assert result.reason.startswith("Lint failed")
+        assert not result.lint_result["passed"]
+
+    @pytest.mark.asyncio
+    async def test_rejects_dangerous_import_via_safety(self) -> None:
+        result = await validate_tool_code(
+            handler_code=(
+                "import os\n\n"
+                "async def sys_tool(cmd: str) -> str:\n"
+                "    return os.popen(cmd).read()\n"
+            ),
+            test_code=(
+                "import asyncio\n"
+                "result = asyncio.run(sys_tool('echo x'))\n"
+                "assert isinstance(result, str)\n"
+            ),
+            tool_name="sys_tool",
+            safety_pipeline=SafetyPipeline(),
+        )
+        assert not result.passed
+        assert result.reason.startswith("Safety validation failed")
+
+    @pytest.mark.asyncio
+    async def test_accepts_valid_tool(self) -> None:
+        result = await validate_tool_code(
+            handler_code="async def echo(msg: str) -> str:\n    return msg\n",
+            test_code=(
+                "import asyncio\n"
+                "result = asyncio.run(echo('hi'))\n"
+                "assert result == 'hi'\n"
+            ),
+            tool_name="echo",
+            safety_pipeline=SafetyPipeline(),
+        )
+        assert result.passed
+        assert result.reason == ""
+        assert result.safety_result.get("passed") is True
+        assert result.lint_result.get("passed") is True
+
+
 class TestRunSandboxTestEnvAlignment:
     """Finding #2: the tool-gen self-test must run in the host subprocess env
     (``sys.executable`` + host-venv allowlisted deps), matching the in-process
@@ -419,76 +528,60 @@ class TestRunSandboxTestEnvAlignment:
 
     @pytest.mark.asyncio
     async def test_self_test_passes_for_host_dep_tool(self) -> None:
-        """A handler importing loguru + an asyncio.run self-test passes end-to-end."""
-        gen = ToolGenerator(
-            gateway=_make_gateway(""),
-            safety_pipeline=SafetyPipeline(),
-            sandbox=self._subprocess_sandbox(),  # type: ignore[arg-type]
+        """A handler importing loguru + an asyncio.run self-test passes end-to-end
+        through the shared sandbox smoke (the same path ``validate_tool_code``
+        runs) — Finding #2: an allowlisted host-installed dep must not be
+        false-rejected by a stripped docker image."""
+        handler_code = (
+            "from loguru import logger\n\n"
+            "async def loguru_echo(msg: str) -> str:\n"
+            "    '''Echo via loguru.'''\n"
+            "    try:\n"
+            "        logger.info(msg)\n"
+            "        return f'echo:{msg}'\n"
+            "    except Exception as e:\n"
+            "        return f'ERROR: {e}'\n"
         )
-        tool = GeneratedTool(
-            tool_name="loguru_echo",
-            description="Echo a message via loguru",
-            input_schema={
-                "type": "object",
-                "properties": {"msg": {"type": "string"}},
-                "required": ["msg"],
-            },
-            handler_code=(
-                "from loguru import logger\n\n"
-                "async def loguru_echo(msg: str) -> str:\n"
-                "    '''Echo via loguru.'''\n"
-                "    try:\n"
-                "        logger.info(msg)\n"
-                "        return f'echo:{msg}'\n"
-                "    except Exception as e:\n"
-                "        return f'ERROR: {e}'\n"
-            ),
-            test_code=(
-                "import asyncio\n"
-                "result = asyncio.run(loguru_echo('hello'))\n"
-                "assert 'ERROR' not in result\n"
-                "print('Test passed')\n"
-            ),
+        test_code = (
+            "import asyncio\n"
+            "result = asyncio.run(loguru_echo('hello'))\n"
+            "assert 'ERROR' not in result\n"
+            "print('Test passed')\n"
         )
-        result = await gen._run_sandbox_test(tool)
+        result = await _run_sandbox_smoke(
+            self._subprocess_sandbox(),  # type: ignore[arg-type]
+            handler_code,
+            test_code,
+        )
         assert result["passed"] is True, f"issues={result.get('issues')}"
 
     @pytest.mark.asyncio
     async def test_self_test_passes_writes_tempfile_fixture(self) -> None:
         """A handler writing a file fixture under the system temp dir passes —
-        the read-only docker FS would have failed the write (Finding #2)."""
-        gen = ToolGenerator(
-            gateway=_make_gateway(""),
-            safety_pipeline=SafetyPipeline(),
-            sandbox=self._subprocess_sandbox(),  # type: ignore[arg-type]
+        the read-only docker FS would have failed the write (Finding #2).
+        Exercised through the shared sandbox smoke path."""
+        handler_code = (
+            "import tempfile, pathlib\n\n"
+            "async def scratch_writer(payload: str) -> str:\n"
+            "    '''Write payload to a temp scratch file and read it back.'''\n"
+            "    try:\n"
+            "        p = pathlib.Path(tempfile.gettempdir()) / 'turing_scratch.txt'\n"
+            "        p.write_text(payload)\n"
+            "        return p.read_text()\n"
+            "    except Exception as e:\n"
+            "        return f'ERROR: {e}'\n"
         )
-        tool = GeneratedTool(
-            tool_name="scratch_writer",
-            description="Write a scratch file and report its contents",
-            input_schema={
-                "type": "object",
-                "properties": {"payload": {"type": "string"}},
-                "required": ["payload"],
-            },
-            handler_code=(
-                "import tempfile, pathlib\n\n"
-                "async def scratch_writer(payload: str) -> str:\n"
-                "    '''Write payload to a temp scratch file and read it back.'''\n"
-                "    try:\n"
-                "        p = pathlib.Path(tempfile.gettempdir()) / 'turing_scratch.txt'\n"
-                "        p.write_text(payload)\n"
-                "        return p.read_text()\n"
-                "    except Exception as e:\n"
-                "        return f'ERROR: {e}'\n"
-            ),
-            test_code=(
-                "import asyncio\n"
-                "result = asyncio.run(scratch_writer('fixture-ok'))\n"
-                "assert result == 'fixture-ok'\n"
-                "print('Test passed')\n"
-            ),
+        test_code = (
+            "import asyncio\n"
+            "result = asyncio.run(scratch_writer('fixture-ok'))\n"
+            "assert result == 'fixture-ok'\n"
+            "print('Test passed')\n"
         )
-        result = await gen._run_sandbox_test(tool)
+        result = await _run_sandbox_smoke(
+            self._subprocess_sandbox(),  # type: ignore[arg-type]
+            handler_code,
+            test_code,
+        )
         assert result["passed"] is True, f"issues={result.get('issues')}"
 
     def test_prompt_template_uses_asyncio_run(self) -> None:

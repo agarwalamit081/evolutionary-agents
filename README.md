@@ -201,7 +201,7 @@ turing-agent/
     │
     ├── tools/                     # Built-in + dynamic tools
     │   ├── registry.py            # Tool registry with @tool decorator
-    │   ├── builtin/               # 14 built-in tools (7 core + 7 capability-expansion)
+    │   ├── builtin/               # 16 built-in tools (core + capability-expansion; see Available Tools)
     │   ├── dynamic/               # Runtime tool generation
     │   │   ├── generator.py       # LLM tool generation + validation
     │   │   ├── persister.py       # DB persistence for generated tools
@@ -370,7 +370,7 @@ All tools use the **LangChain `@tool` decorator** with type-annotated parameters
 
 | Tool | Description |
 |---|---|
-| `code_executor` | Run Python in a subprocess (async, timeout-safe). Deliverables from `open()` are isolated under `results/<run-id>/` when `RESULTS_PER_RUN_SUBDIR` is on (no flat cross-run leakage); `glob`/`os.scandir` listings scan flat and are not relocated |
+| `code_executor` | Run Python in a subprocess (async, timeout-safe). Deliverables from `open()` are isolated under `results/<run-id>/` when `RESULTS_PER_RUN_SUBDIR` is on (no flat cross-run leakage); `glob`/`os.scandir` listings scan flat and are not relocated. In host mode the subprocess `cwd` is bound to the results subtree and an opt-in `CODE_EXECUTOR_HOST_PATH_GUARD` blocks `open()` of paths resolving outside the workspace (D8); docker/runner modes are already sandboxed |
 | `code_validator` | AST + security check on Python code |
 | `terminal_command` | Allowlisted, shell-free terminal command tool |
 | `file_reader` | Read any text file |
@@ -380,7 +380,8 @@ All tools use the **LangChain `@tool` decorator** with type-annotated parameters
 | `corpus_search` | Hybrid keyword+vector recall over previously-fetched pages (Meilisearch) |
 | `web_scraper` | Fetch a URL and return its main content as clean markdown |
 | `http_request` | Make controlled HTTP requests to external APIs/services |
-| `document_parser` | Extract text from PDF/DOCX/XLSX/CSV documents |
+| `document_parser` | Extract text from HTML + PDF/DOCX/XLSX/CSV; opt-in pymupdf figure/table extraction from PDFs (D1, D3) |
+| `arxiv_search` | Search arXiv papers → title, authors, summary, published, pdf_url (D7) |
 | `environment_inspect` | Inspect the runtime environment (OS, CPU, disk, RAM, packages) |
 | `get_current_time` | Return the current wall-clock timestamp, timezone, and date |
 | `self_inspect` | Read the agent's own source code |
@@ -406,11 +407,40 @@ Hardened capabilities:
 
 Env knobs: `SEARCH_*`, `WEB_SEARCH_*`, `WEB_SCRAPER_*`, `MEILISEARCH_*`, `TOOL_CACHE_*` (see `.env.example`).
 
-The agent can also **create new tools at runtime** when it detects a capability gap. When the LLM calls a non-existent tool, the reflect node identifies the missing capability, the `tool_create` node generates the tool via LLM, validates it through the 7-layer safety pipeline with a double-barrier security model (static analysis + constrained execution namespace), registers it in the `ToolRegistry` for immediate use, and persists it to PostgreSQL for future runs. Max 3 tools per run. See `docs/ARCHITECTURE.md` for details.
+The agent can also **create new tools at runtime** when it detects a capability gap. When the LLM calls a non-existent tool, the reflect node identifies the missing capability, the `tool_create` node generates the tool via LLM, validates it through the 7-layer safety pipeline with a double-barrier security model (static analysis + constrained execution namespace), registers it in the `ToolRegistry` for immediate use, and persists it to PostgreSQL for future runs. Max 3 tools per run. A generated tool **must ship a `test_code` containing an `assert`** and pass `ruff check --select F,E9` lint — the cheapest-first shared `validate_tool_code` gate (test-assert → pyflakes/syntax lint → 7-layer safety → optional sandbox smoke) that also backs the operator tool-edit API (D9). See `docs/ARCHITECTURE.md` for details.
 
 ### Sub-Agent Delegation
 
 The agent can also **spawn specialized sub-agents** as isolated LangGraph subgraphs. When the reflect node detects a need for specialized processing, the `agent_spawn` node designs a sub-agent via LLM, validates it through the safety pipeline, persists it to PostgreSQL, and registers it for immediate use. The `delegate` node then routes subtasks to the appropriate sub-agent, tracks performance with rolling metrics (success rate, cost, latency, quality), and auto-deprecates underperformers. Sub-agents are optimized over time by the main agent's evolution engine. Max 3 sub-agents per run. See `docs/ARCHITECTURE.md` for details.
+
+### Tooling breadth (Phase 3)
+
+A batch closing the tooling gaps documented in `docs/findings.md` P2. All provider-agnostic (no anthropic dependency), validatable live.
+
+| Item | Change |
+|---|---|
+| **D1** | `document_parser` reads HTML/Markdown via the same trafilatura→markdownify chain `web_scraper` uses (one shared path) |
+| **D3** | `document_parser` gains an opt-in `extract_figures` flag → pymupdf (`fitz`) table + figure rendering to PNG under the results root (pypdf stays the default text path) |
+| **D5** | `selectolax` + `mdformat` + `mistune` added to deps + the dynamic allowlist (fast HTML parse + markdown render for generated tools; `markitdown` rejected — its `magika` dep pulls `onnxruntime` into every image) |
+| **D6** | `matplotlib` installed + allowlisted; `code_executor` bootstrap sets `MPLBACKEND=Agg` so headless `savefig` works |
+| **D7** | `arxiv_search` builtin (`arxiv` package) → papers as `{title, authors, summary, published, pdf_url, entry_id}`, so arXiv isn't re-created every run |
+| **D8** | host-subprocess `code_executor` binds `cwd` to the per-run results subdir, and an opt-in `CODE_EXECUTOR_HOST_PATH_GUARD` injects an `open()` wrapper rejecting paths outside the workspace tree. docker/runner modes are already confined; host mode is relative-confined / absolute-trusted unless the guard is on |
+| **D9** | generated tools must ship a `test_code` with an `assert` and pass `ruff check --select F,E9` — the shared `validate_tool_code` gate |
+| **D10** | operator **tool-edit → review → approve** HITL API + `ToolVersion.status` migration (below) |
+
+#### Operator tool-edit API (D10)
+
+A stored generated tool can be edited by an operator, validated against the same bar a runtime-generated tool must clear, staged pending review, then approved/rejected before it reaches the live registry. Endpoints under `/api/v1/tools` (import-wrapped in `app.py`, like the agent router):
+
+| Method | Path | Behavior |
+|---|---|---|
+| `PATCH` | `/{name}` | body `{handler_code, test_code, description?, input_schema?}` → runs the shared `validate_tool_code` (assert + ruff `F,E9` + 7-layer safety; `sandbox=None` — the stateless API has no Docker, so the functional smoke is deferred to load/run) → on pass, stages a new `pending_review` ToolVersion (`202`); on fail, `422` with the reason |
+| `POST` | `/{name}/approve` | promote the latest `pending_review` version to live (`status='approved', is_active=True`; deactivates every other version) |
+| `POST` | `/{name}/reject` | dismiss the latest `pending_review` version (`?reason=` optional) |
+| `GET` | `` | list generated tools + their latest version/status |
+| `GET` | `/{name}` | inspect one tool + its version history |
+
+**`ToolVersion.status` lifecycle** — migration `i1b2c3d4e5f6` adds `status: NOT NULL DEFAULT 'approved'` (values `approved`/`pending_review`/`rejected`) and backfills existing rows to `approved`. A staged edit parks at `pending_review` + `is_active=False` and never touches prior versions, so the live tool keeps running unchanged while the edit is under review. `load_active_tools` now requires `status='approved'` *and* `is_active` (defense-in-depth; the backfill guarantees no stored tool regresses). A pending edit never runs until approved.
 
 ---
 

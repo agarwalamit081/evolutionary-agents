@@ -365,6 +365,95 @@ class TestPhase2dPackagesPassSafetyLayer4:
         assert result["issues"] == []
 
 
+class TestPhase3D5Allowlist:
+    """Phase 3 D5 (findings.md P2): fast HTML/markdown libs admitted.
+
+    The lightweight set (selectolax/mdformat/mistune) replaces markitdown, whose
+    core dep ``magika`` pulls ``onnxruntime`` into every image. Each new lib is
+    bound by BOTH controls (import name in ALLOWED_MODULES, dist name in
+    SAFE_PIP_PACKAGES) and pre-imported by the materializer when installed.
+    These share their import name with their dist name.
+    """
+
+    NEW_PACKAGES: list[tuple[str, str]] = [
+        ("selectolax", "selectolax"),
+        ("mdformat", "mdformat"),
+        ("mistune", "mistune"),
+    ]
+
+    def test_each_new_import_name_is_allowed(self) -> None:
+        for import_name, _ in self.NEW_PACKAGES:
+            assert import_name in ALLOWED_MODULES, (
+                f"{import_name} missing from ALLOWED_MODULES"
+            )
+
+    def test_each_new_pip_dist_name_is_installable(self) -> None:
+        for _, dist_name in self.NEW_PACKAGES:
+            assert dist_name in SAFE_PIP_PACKAGES, (
+                f"{dist_name} missing from SAFE_PIP_PACKAGES"
+            )
+
+    def test_markitdown_deliberately_excluded(self) -> None:
+        """markitdown was rejected — its core dep magika drags onnxruntime in."""
+        assert "markitdown" not in ALLOWED_MODULES
+        assert "markitdown" not in SAFE_PIP_PACKAGES
+
+    def test_no_duplicates_introduced(self) -> None:
+        new_imports = {name for name, _ in self.NEW_PACKAGES}
+        assert len(new_imports) == len(self.NEW_PACKAGES)
+        new_dists = {dist for _, dist in self.NEW_PACKAGES}
+        assert len(new_dists) == len(self.NEW_PACKAGES)
+
+    def test_new_packages_in_materializer_namespace_when_installed(self) -> None:
+        ns = get_materializer_namespace()
+        for import_name, _ in self.NEW_PACKAGES:
+            try:
+                importlib.import_module(import_name)
+            except ImportError:
+                assert import_name not in ns, (
+                    f"{import_name} present in namespace but not importable"
+                )
+            else:
+                assert import_name in ns, (
+                    f"{import_name} installed but missing from materializer namespace"
+                )
+                assert hasattr(ns[import_name], "__name__"), (
+                    f"{import_name} namespace entry is not a module"
+                )
+
+    def test_still_excludes_dangerous_modules(self) -> None:
+        for name in ("os", "sys", "subprocess", "socket", "shutil", "ctypes"):
+            assert name not in ALLOWED_MODULES
+
+
+class TestPhase3D5PackagesPassSafetyLayer4:
+    """Phase 3 D5: a generated tool importing each new lib clears Layer-4."""
+
+    @pytest.mark.parametrize("import_name", ["selectolax", "mdformat", "mistune"])
+    def test_import_statement_passes_layer4(self, import_name: str) -> None:
+        from src.safety.pipeline import SafetyPipeline
+
+        pipeline = SafetyPipeline()
+        code = f"import {import_name}\n"
+        result = pipeline._check_imports(
+            code, allowlisted=set(ALLOWED_MODULES)
+        )
+        assert result["passed"] is True, result["issues"]
+        assert result["issues"] == []
+
+    @pytest.mark.parametrize("import_name", ["selectolax", "mdformat", "mistune"])
+    def test_from_import_statement_passes_layer4(self, import_name: str) -> None:
+        from src.safety.pipeline import SafetyPipeline
+
+        pipeline = SafetyPipeline()
+        code = f"from {import_name} import something\n"
+        result = pipeline._check_imports(
+            code, allowlisted=set(ALLOWED_MODULES)
+        )
+        assert result["passed"] is True, result["issues"]
+        assert result["issues"] == []
+
+
 class TestBrowserPackagesStayBlocked:
     """Browser-automation packages are deliberately deferred — must stay blocked."""
 

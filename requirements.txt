@@ -103,6 +103,9 @@ python-docx==1.2.0                   # Word .docx extraction (document_parser)
 openpyxl==3.1.5                      # Excel .xlsx extraction (document_parser)
 unstructured==0.21.5                 # Document partitioning — allowlisted for generated tools
 markdown-it-py==4.2.0                # Markdown parsing — allowlisted for generated tools
+selectolax==0.4.10                   # Fast HTML parser (lexbor C, no deps) — allowlisted for generated tools (D5)
+mdformat==1.0.0                      # Markdown formatter (pure-py; builds on markdown-it-py<5) — allowlisted for generated tools (D5)
+mistune==3.3.2                       # Markdown renderer (pure-py, zero deps) — allowlisted for generated tools (D5)
 pymupdf==1.26.7                     # PDF render/extract — allowlisted for generated tools (import fitz/pymupdf)
 pulp==3.3.2                         # Linear programming, bundles CBC — allowlisted for generated tools
 cvxpy==1.9.1                        # Convex optimization, bundles OSQP/ECOS/SCS — allowlisted for generated tools

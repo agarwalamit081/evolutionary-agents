@@ -134,6 +134,16 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     # managed-binary invariant (the compiled HiGHS ships inside the highspy wheel).
     "pyomo",
     "highspy",
+    # ── Phase 3 D5 — fast HTML/markdown libs (lightweight, no ML runtime) ──
+    # ``selectolax``: fast HTML parser (lexbor C, ships wheels, zero deps).
+    # ``mdformat``: markdown formatter (pure-py; builds on markdown-it-py).
+    # ``mistune``: markdown renderer (pure-py, zero deps). Chosen over markitdown,
+    # whose core dep ``magika`` pulls ``onnxruntime`` into every image — at odds
+    # with the slim-image principle. HTML main-content extraction stays
+    # trafilatura (web_scraper); these give generated tools fast parse/render.
+    "selectolax",
+    "mdformat",
+    "mistune",
 })
 
 # Packages that can be pip-installed in the sandbox.
@@ -196,6 +206,12 @@ SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     # Phase-S8 note; both share their import name.
     "pyomo",
     "highspy",
+    # ── Phase 3 D5 — dist names for the fast HTML/markdown libs above ──
+    # selectolax/mdformat/mistune share their import name. See the
+    # ALLOWED_MODULES Phase-3-D5 note for the markitdown/onnxruntime rationale.
+    "selectolax",
+    "mdformat",
+    "mistune",
 })
 
 
@@ -286,6 +302,8 @@ def get_materializer_namespace() -> dict[str, Any]:
         "tree_sitter", "tree_sitter_python", "arxiv",
         # Phase S8: pyomo (modeling) + highspy (offline HiGHS solver backend).
         "pyomo", "highspy",
+        # Phase 3 D5: fast HTML/markdown libs (selectolax/mdformat/mistune).
+        "selectolax", "mdformat", "mistune",
     ):
         try:
             mod = __import__(mod_name)

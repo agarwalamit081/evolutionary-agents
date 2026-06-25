@@ -1,4 +1,4 @@
-"""Built-in tools package — 16 distinct tools for the agent.
+"""Built-in tools package — 17 distinct tools for the agent.
 
 The original 14 tools were audited for true duplicates (M7b); the 2 corpus
 tools (Phase 1 search stack) are additive — `index_corpus` (write) and
@@ -10,6 +10,7 @@ deliberately distinct, not mergeable. ``test_consolidation.py`` locks this in
 cluster, preventing the B3 capability bloat that dynamic-tool dedup addresses.
 """
 
+from src.tools.builtin.arxiv_search import TOOL_DEFINITION as ARXIV_SEARCH_DEF
 from src.tools.builtin.code_executor import TOOL_DEFINITION as CODE_EXECUTOR_DEF
 from src.tools.builtin.code_validator import TOOL_DEFINITION as CODE_VALIDATOR_DEF
 from src.tools.builtin.corpus import TOOL_DEFINITION_INDEX as CORPUS_INDEX_DEF
@@ -28,6 +29,7 @@ from src.tools.builtin.web_scraper import TOOL_DEFINITION as WEB_SCRAPER_DEF
 from src.tools.builtin.web_search import TOOL_DEFINITION as WEB_SEARCH_DEF
 
 ALL_TOOL_DEFINITIONS = [
+    ARXIV_SEARCH_DEF,
     CODE_EXECUTOR_DEF,
     CODE_VALIDATOR_DEF,
     CORPUS_INDEX_DEF,

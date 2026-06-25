@@ -40,7 +40,14 @@ def create_app() -> FastAPI:
 
     try:
         from src.api.routes.agent import API_PREFIX, router as agent_router
+        # Prefixed mount (backward compat) — /api/v1/agent/run, /runs/{id},
+        # /runs/{id}/cancel. ``enqueue_run``'s ``status_url`` points here.
         app.include_router(agent_router, prefix=API_PREFIX, tags=["agent"])
+        # Root mount so the documented paths (/run, /runs/{id},
+        # /runs/{id}/cancel) resolve without the prefix too — the cancel route
+        # previously 404'd at root (the agent router carries no router-level
+        # prefix, so mounting it at root exposes its routes verbatim).
+        app.include_router(agent_router, tags=["agent"])
     except ImportError:
         logger.warning("Agent routes not available yet")
 

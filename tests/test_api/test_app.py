@@ -31,3 +31,27 @@ class TestCreateApp:
         app = create_app()
         routes = [route.path for route in app.routes]
         assert "/ready" in routes
+
+    def test_agent_cancel_route_resolves_at_root(self) -> None:
+        """``POST /runs/{run_id}/cancel`` resolves at root, not only under the
+        ``/api/v1/agent`` prefix — the documented cancel path previously 404'd.
+        """
+        app = create_app()
+        routes = [route.path for route in app.routes]
+        assert "/runs/{run_id}/cancel" in routes
+
+    def test_agent_routes_dual_mounted(self) -> None:
+        """The agent router is mounted at BOTH root and ``/api/v1/agent`` so the
+        prefixed path stays backward-compatible while the bare documented paths
+        (``/run``, ``/runs/{run_id}``, ``/runs/{run_id}/cancel``) also resolve.
+        """
+        app = create_app()
+        routes = [route.path for route in app.routes]
+        # Prefixed (backward compat) — enqueue_run's status_url points here.
+        assert "/api/v1/agent/run" in routes
+        assert "/api/v1/agent/runs/{run_id}" in routes
+        assert "/api/v1/agent/runs/{run_id}/cancel" in routes
+        # Root (documented paths).
+        assert "/run" in routes
+        assert "/runs/{run_id}" in routes
+        assert "/runs/{run_id}/cancel" in routes

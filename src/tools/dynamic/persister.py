@@ -144,6 +144,331 @@ class ToolPersister:
             logger.warning(f"Failed to persist tool '{tool_name}': {e}")
             return None
 
+    # ---- D10: operator edit → review → approve lifecycle -------------------
+
+    async def submit_pending_version(
+        self,
+        tool_name: str,
+        description: str,
+        input_schema: dict[str, Any],
+        handler_code: str,
+        test_code: str = "",
+        capability_embedding: list[float] | None = None,
+        capability_text: str | None = None,
+    ) -> uuid.UUID | None:
+        """Stage an operator-edited tool version for HITL approval (D10).
+
+        Like :meth:`persist` but the new ToolVersion is parked at
+        ``status='pending_review', is_active=False`` so :meth:`load_active_tools`
+        does NOT materialize it until :meth:`approve_pending` flips it. Every
+        prior version is left untouched, so the current live tool keeps running
+        unchanged while the edit is under review.
+
+        The ToolRegistration description/input_schema are updated to the new
+        values now (the registration is the tool's identity + latest-known
+        description, not version-pinned — the same framing :meth:`find_similar`
+        already uses). The materialized handler still comes from the
+        approved+active version's ``code_content``, so during the review window
+        the LLM-visible description may briefly precede the executing code (an
+        acceptable HITL artifact; :meth:`approve_pending` closes the gap).
+
+        Returns:
+            UUID of the staged ``ToolVersion`` row, or None on failure.
+        """
+        try:
+            from sqlalchemy import update
+
+            from src.db.models import ToolRegistration, ToolVersion
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                existing = await self._get_registration(session, tool_name)
+
+                if existing is not None:
+                    # Refresh the capability embedding only with a real vector
+                    # (a None must never clobber a stored one — see persist()).
+                    values: dict[str, Any] = {
+                        "description": description,
+                        "input_schema": input_schema,
+                    }
+                    if capability_embedding is not None:
+                        values["capability_embedding"] = capability_embedding
+                        values["capability_text"] = capability_text
+                    await session.execute(
+                        update(ToolRegistration)
+                        .where(ToolRegistration.id == existing.id)
+                        .values(**values)
+                    )
+                    registration_id = existing.id
+                    latest = await self._latest_version(session, existing.id)
+                    next_version = (latest.version + 1) if latest else 1
+                else:
+                    registration = ToolRegistration(
+                        tool_name=tool_name,
+                        tool_type="generated",
+                        description=description,
+                        input_schema=input_schema,
+                        is_active=True,
+                        capability_embedding=capability_embedding,
+                        capability_text=capability_text,
+                    )
+                    session.add(registration)
+                    await session.flush()
+                    registration_id = registration.id
+                    next_version = 1
+
+                pending = ToolVersion(
+                    tool_id=registration_id,
+                    version=next_version,
+                    code_content=handler_code,
+                    test_content=test_code or None,
+                    is_active=False,
+                    status="pending_review",
+                )
+                session.add(pending)
+                await session.flush()
+
+                logger.info(
+                    f"Staged pending version {next_version} for tool '{tool_name}'"
+                )
+                return pending.id
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to stage pending version for tool '{tool_name}': {e}"
+            )
+            return None
+
+    async def approve_pending(self, tool_name: str) -> dict[str, Any] | None:
+        """Promote the latest ``pending_review`` version to live (D10).
+
+        Sets the tool's latest ``pending_review`` ToolVersion to
+        ``status='approved', is_active=True`` and deactivates every OTHER
+        version (prior live + any older pending). The ToolRegistration
+        description/input_schema were synced at :meth:`submit_pending_version`
+        time, so :meth:`load_active_tools` materializes the approved code with a
+        matching description.
+
+        Returns:
+            A dict (``tool_name``, ``version``, ``status``) describing the
+            approved version, or None if there was no ``pending_review``
+            version or the write failed.
+        """
+        try:
+            from sqlalchemy import update
+
+            from src.db.models import ToolVersion
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                reg = await self._get_registration(session, tool_name)
+                if reg is None:
+                    logger.debug(f"approve_pending: no tool '{tool_name}'")
+                    return None
+
+                pending = await self._latest_version(
+                    session, reg.id, status="pending_review"
+                )
+                if pending is None:
+                    logger.debug(
+                        f"approve_pending: no pending_review version for '{tool_name}'"
+                    )
+                    return None
+
+                # Deactivate every version of this tool, then activate + approve
+                # the staged one. Two statements so the staged row's is_active
+                # flip is unconditional regardless of its prior state.
+                await session.execute(
+                    update(ToolVersion)
+                    .where(ToolVersion.tool_id == reg.id)
+                    .values(is_active=False)
+                )
+                await session.execute(
+                    update(ToolVersion)
+                    .where(ToolVersion.id == pending.id)
+                    .values(status="approved", is_active=True)
+                )
+                logger.info(
+                    f"Approved pending version {pending.version} for tool '{tool_name}'"
+                )
+                return {
+                    "tool_name": tool_name,
+                    "version": pending.version,
+                    "status": "approved",
+                }
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to approve pending version for tool '{tool_name}': {e}"
+            )
+            return None
+
+    async def reject_pending(self, tool_name: str, *, reason: str | None = None) -> bool:
+        """Dismiss the latest ``pending_review`` version (D10).
+
+        Marks the tool's latest ``pending_review`` ToolVersion
+        ``status='rejected'`` (``is_active`` stays False — it was never live).
+        Prior approved versions are untouched, so the live tool is unaffected.
+
+        Returns:
+            True if a pending version was rejected, False otherwise.
+        """
+        try:
+            from sqlalchemy import update
+
+            from src.db.models import ToolVersion
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                reg = await self._get_registration(session, tool_name)
+                if reg is None:
+                    logger.debug(f"reject_pending: no tool '{tool_name}'")
+                    return False
+
+                pending = await self._latest_version(
+                    session, reg.id, status="pending_review"
+                )
+                if pending is None:
+                    logger.debug(
+                        f"reject_pending: no pending_review version for '{tool_name}'"
+                    )
+                    return False
+
+                await session.execute(
+                    update(ToolVersion)
+                    .where(ToolVersion.id == pending.id)
+                    .values(status="rejected")
+                )
+                logger.info(
+                    f"Rejected pending version {pending.version} for tool '{tool_name}'"
+                    + (f": {reason}" if reason else "")
+                )
+                return True
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to reject pending version for tool '{tool_name}': {e}"
+            )
+            return False
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        """List generated tool registrations + their latest version (D10).
+
+        Returns one dict per registration: ``tool_name``, ``description``,
+        ``is_active`` (registration), and the latest version's ``version``,
+        ``status`` (``approved``/``pending_review``/``rejected``),
+        ``version_active``. Best-effort: ``[]`` on DB error.
+        """
+        try:
+            from sqlalchemy import select
+
+            from src.db.models import ToolRegistration
+            from src.db.session import get_session
+
+            tools: list[dict[str, Any]] = []
+            async with get_session() as session:
+                result = await session.execute(
+                    select(ToolRegistration).where(
+                        ToolRegistration.tool_type == "generated"
+                    )
+                )
+                for reg in result.scalars().all():
+                    latest = await self._latest_version(session, reg.id)
+                    tools.append(
+                        {
+                            "tool_name": reg.tool_name,
+                            "description": reg.description,
+                            "is_active": reg.is_active,
+                            "version": latest.version if latest else None,
+                            "status": latest.status if latest else None,
+                            "version_active": latest.is_active if latest else None,
+                        }
+                    )
+            return tools
+        except Exception as e:
+            logger.debug(f"list_tools failed: {e}")
+            return []
+
+    async def get_tool(self, tool_name: str) -> dict[str, Any] | None:
+        """Inspect a single generated tool + its latest version (D10).
+
+        Returns ``None`` when no registration exists. Best-effort: ``None`` on
+        DB error.
+        """
+        try:
+            from sqlalchemy import select
+
+            from src.db.models import ToolVersion
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                reg = await self._get_registration(session, tool_name)
+                if reg is None:
+                    return None
+                latest = await self._latest_version(session, reg.id)
+                versions = await session.execute(
+                    select(ToolVersion)
+                    .where(ToolVersion.tool_id == reg.id)
+                    .order_by(ToolVersion.version.desc())
+                )
+                history = [
+                    {
+                        "version": v.version,
+                        "status": v.status,
+                        "is_active": v.is_active,
+                        "created_at": v.created_at.isoformat()
+                        if v.created_at
+                        else None,
+                    }
+                    for v in versions.scalars().all()
+                ]
+                return {
+                    "tool_name": reg.tool_name,
+                    "description": reg.description,
+                    "input_schema": reg.input_schema,
+                    "is_active": reg.is_active,
+                    "version": latest.version if latest else None,
+                    "status": latest.status if latest else None,
+                    "code_content": latest.code_content if latest else None,
+                    "test_content": latest.test_content if latest else None,
+                    "history": history,
+                }
+        except Exception as e:
+            logger.debug(f"get_tool '{tool_name}' failed: {e}")
+            return None
+
+    # ---- D10 helpers -------------------------------------------------------
+
+    async def _get_registration(self, session: Any, tool_name: str) -> Any:
+        """Fetch a ToolRegistration by name (or None)."""
+        from sqlalchemy import select
+
+        from src.db.models import ToolRegistration
+
+        result = await session.execute(
+            select(ToolRegistration).where(ToolRegistration.tool_name == tool_name)
+        )
+        return result.scalar_one_or_none()
+
+    async def _latest_version(
+        self, session: Any, tool_id: uuid.UUID, *, status: str | None = None
+    ) -> Any:
+        """Latest ToolVersion for a tool, optionally filtered by ``status``.
+
+        Ordered by version desc — the newest version matching ``status`` (or the
+        newest overall when ``status`` is None).
+        """
+        from sqlalchemy import select
+
+        from src.db.models import ToolVersion
+
+        stmt = select(ToolVersion).where(ToolVersion.tool_id == tool_id)
+        if status is not None:
+            stmt = stmt.where(ToolVersion.status == status)
+        stmt = stmt.order_by(ToolVersion.version.desc()).limit(1)
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def find_similar(
         self,
         embedding: list[float],
@@ -602,10 +927,15 @@ class ToolPersister:
 
                 for reg in registrations:
                     try:
-                        # Get the active version
+                        # Get the active approved version. D10: status filter
+                        # means a pending_review version (operator-edited,
+                        # is_active=False until approved) is never materialized
+                        # — defense-in-depth alongside is_active (approve flips
+                        # both, so the live version is always approved+active).
                         ver_stmt = select(ToolVersion).where(
                             ToolVersion.tool_id == reg.id,
                             ToolVersion.is_active.is_(True),
+                            ToolVersion.status == "approved",
                         ).order_by(ToolVersion.version.desc()).limit(1)
                         ver_result = await session.execute(ver_stmt)
                         version = ver_result.scalar_one_or_none()

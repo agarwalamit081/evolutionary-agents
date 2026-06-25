@@ -44,4 +44,13 @@ def create_app() -> FastAPI:
     except ImportError:
         logger.warning("Agent routes not available yet")
 
+    # D10: operator tool-edit → review → approve HITL routes. Import-wrapped so
+    # the API still boots if an optional dep (e.g. the safety stack) is absent.
+    try:
+        from src.api.routes.tool import API_PREFIX as TOOL_PREFIX
+        from src.api.routes.tool import router as tool_router
+        app.include_router(tool_router, prefix=TOOL_PREFIX, tags=["tools"])
+    except ImportError:
+        logger.warning("Tool edit routes not available yet")
+
     return app

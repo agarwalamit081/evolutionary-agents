@@ -16,6 +16,7 @@ from sqlalchemy import (
     SmallInteger,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -617,6 +618,17 @@ class ToolVersion(Base):
     test_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     test_pass_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # D10 review lifecycle: ``approved`` (loadable), ``pending_review`` (operator-
+    # edited, awaiting HITL approval), ``rejected``. Existing/auto-persisted
+    # versions default to ``approved`` so the migration backfill + ``persist()``
+    # never regress recall (``load_active_tools`` requires status='approved' AND
+    # is_active). ``server_default`` keeps raw SQL inserts + alembic consistent.
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="approved",
+        server_default=text("'approved'"),
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

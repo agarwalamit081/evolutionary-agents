@@ -76,11 +76,11 @@ class TestToolRegistry:
 class TestCreateDefaultRegistry:
     """Tests for the create_default_registry factory function."""
 
-    def test_create_default_registry_has_sixteen_tools(self) -> None:
-        """create_default_registry returns a registry with all 16 built-in tools."""
+    def test_create_default_registry_has_seventeen_tools(self) -> None:
+        """create_default_registry returns a registry with all 17 built-in tools."""
         registry = create_default_registry()
         assert isinstance(registry, ToolRegistry)
-        assert registry.count == 16
+        assert registry.count == 17
 
         names = registry.list_names()
         assert "code_executor" in names

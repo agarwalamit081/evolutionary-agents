@@ -98,7 +98,12 @@ def _allowed_dist_names() -> set[str]:
     for imp in ALLOWED_MODULES:
         if imp in _STDLIB_MODULES:
             continue
-        dists.add(_IMPORT_TO_DIST.get(imp, imp))
+        # A submodule import (e.g. ``matplotlib.pyplot``) resolves to its
+        # top-level package's dist name — pip installs the root package, so
+        # ``matplotlib.pyplot`` → ``matplotlib`` (already in the image). The
+        # special-case map keys are all root names, so splitting first is safe.
+        root = imp.split(".", 1)[0]
+        dists.add(_IMPORT_TO_DIST.get(root, root))
     return dists
 
 

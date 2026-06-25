@@ -10,8 +10,16 @@ from typing import TYPE_CHECKING, Optional
 from loguru import logger
 
 from src.config.settings import ToolSandboxSettings, get_settings
+from src.config import settings as _config_settings
 from src.sandbox.executor import SandboxUnavailable
-from src.tools._paths import _subdir_active, get_active_run_id, project_root, results_root
+from src.tools._paths import (
+    _subdir_active,
+    get_active_run_id,
+    project_root,
+    results_root,
+    run_subdir_path,
+    workspace_root,
+)
 
 if TYPE_CHECKING:
     from src.sandbox.executor import SandboxResult
@@ -43,7 +51,97 @@ def _active_run_subdir() -> str | None:
     return get_active_run_id() if _subdir_active() else None
 
 
-def _write_bootstrap(results_root_abs: str, run_subdir: str | None = None) -> str:
+def _agent_settings() -> object:
+    """Call-time accessor for the AgentSettings path-confinement knobs (D8).
+
+    Reads ``get_settings`` through the ``src.config.settings`` MODULE (not the
+    symbol imported above) so a test patching ``src.config.settings.get_settings``
+    takes effect here — the same trap ``src/tools/_paths.py`` documents. Without
+    this, the guard/cwd knobs would always read the unpatched (off/default)
+    settings and the confinement would never engage under a patched get_settings.
+    """
+    return _config_settings.get_settings().agent
+
+
+def _host_cwd_mode() -> str:
+    """``code_executor_host_cwd`` knob — ``project_root`` (default) | ``results_subdir``."""
+    return str(getattr(_agent_settings(), "code_executor_host_cwd", "project_root"))
+
+
+def _host_path_guard_on() -> bool:
+    """``code_executor_host_path_guard`` knob (default OFF)."""
+    return bool(getattr(_agent_settings(), "code_executor_host_path_guard", False))
+
+
+def _host_guard_roots() -> tuple[str, ...]:
+    """Roots the host path guard treats as in-tree (deduped, order-preserving).
+
+    A path under ``results_root`` (deliverables) OR ``workspace_root`` (fixtures)
+    is allowed; anything else (repo-root ``.env``, ``/etc/hosts``, ``~/.ssh/...``)
+    is blocked. Two roots because both are legitimate code_executor touch points.
+    """
+    seen: list[str] = []
+    for root in (results_root(), workspace_root()):
+        s = str(root)
+        if s not in seen:
+            seen.append(s)
+    return tuple(seen)
+
+
+def _resolve_host_cwd() -> Path:
+    """Host-subprocess cwd per the ``code_executor_host_cwd`` knob (D8).
+
+    ``project_root`` (default) is the cwd every file-touching tool shares —
+    ``results_subdir`` opts into the per-run results subfolder (``results_root``
+    fallback). An unsafe run_id (never expected — CLI/worker validate it) falls
+    back to ``results_root`` rather than an invalid path.
+    """
+    if _host_cwd_mode() == "results_subdir":
+        rid = get_active_run_id()
+        if _subdir_active() and rid:
+            try:
+                return run_subdir_path(rid)
+            except ValueError:
+                logger.debug("host cwd: unsafe run_id {!r}; using results_root", rid)
+                return results_root()
+        return results_root()
+    return project_root()
+
+
+def _guard_open_def(guard_roots: tuple[str, ...]) -> str:
+    """Bootstrap source defining the dispatch point each relocating
+    ``_turing_open`` hands its FINAL (post-relocation) path to.
+
+    Empty ``guard_roots`` (guard OFF) -> ``_turing_open_orig`` is a plain alias of
+    the real builtin (byte-identical behavior). With roots set (guard ON) it is a
+    wrapper rejecting any path resolving outside the allowed tree -- so a
+    relocated ``results/<file>`` write passes while ``open(".env")`` /
+    ``open("/etc/hosts")`` raise ``PermissionError``.
+    """
+    if not guard_roots:
+        return "_turing_open_orig = _turing_open_real\n"
+    escaped = [r.replace("\\", "\\\\").replace('"', '\\"') for r in guard_roots]
+    if len(escaped) == 1:
+        roots_lit = '("' + escaped[0] + '",)'
+    else:
+        roots_lit = "(" + ",".join(f'"{r}"' for r in escaped) + ")"
+    return (
+        f"_TURING_GUARD = {roots_lit}\n"
+        "def _turing_open_orig(_gp, _gm='r', *_ga, **_gk):\n"
+        "    _resolved = _turing_os.path.abspath(str(_gp))\n"
+        "    for _r in _TURING_GUARD:\n"
+        "        if _resolved == _r or _resolved.startswith(_r + _turing_os.sep):\n"
+        "            return _turing_open_real(_gp, _gm, *_ga, **_gk)\n"
+        "    raise PermissionError('host path guard blocked access outside workspace: ' + str(_gp))\n"
+    )
+
+
+def _write_bootstrap(
+    results_root_abs: str,
+    run_subdir: str | None = None,
+    *,
+    guard_roots: tuple[str, ...] = (),
+) -> str:
     """Build the shim prepended to every executed script.
 
     For write/append/exclusive opens (``w``/``a``/``x``) the shim has two
@@ -83,6 +181,16 @@ def _write_bootstrap(results_root_abs: str, run_subdir: str | None = None) -> st
     tool that imports ``matplotlib`` and calls ``savefig`` works headless — there
     is no display server in host subprocess / runner mode. ``setdefault`` honors a
     caller that already set the backend.
+
+    Additionally (D8), when a non-empty ``guard_roots`` is passed each variant
+    rebinds the dispatch point (``_turing_open_orig``) to a guard wrapper that
+    rejects any path resolving outside ``guard_roots`` (results_root +
+    workspace_root) — checked on the FINAL post-relocation path, so legitimate
+    relocated writes pass while ``open(".env")`` (repo root) and
+    ``open("/etc/hosts")`` raise ``PermissionError``. An empty ``guard_roots``
+    (the default) rebinds it to a plain alias of the real builtin (byte-
+    identical to the pre-D8 shim); the host caller wires the roots, docker/runner
+    modes pass none (already confined).
     """
     # Absolute-path + read-mode opens are never touched; only relative writes
     # are mkdir'd and (when a results root is given) relocated.
@@ -90,8 +198,9 @@ def _write_bootstrap(results_root_abs: str, run_subdir: str | None = None) -> st
         return (
             "import builtins as _turing_b, os as _turing_os\n"
         "_turing_os.environ.setdefault('MPLBACKEND', 'Agg')  # headless backend so matplotlib savefig works (D6)\n"
-            "_turing_open_orig = _turing_b.open\n"
-            "def _turing_open(p, m='r', *a, **k):\n"
+            "_turing_open_real = _turing_b.open\n"
+            + _guard_open_def(guard_roots)
+            + "def _turing_open(p, m='r', *a, **k):\n"
             "    if any(c in str(m) for c in 'wax'):\n"
             "        _d = _turing_os.path.dirname(str(p))\n"
             "        if _d and not _turing_os.path.isabs(str(p)):\n"
@@ -108,8 +217,9 @@ def _write_bootstrap(results_root_abs: str, run_subdir: str | None = None) -> st
         return (
             "import builtins as _turing_b, os as _turing_os\n"
         "_turing_os.environ.setdefault('MPLBACKEND', 'Agg')  # headless backend so matplotlib savefig works (D6)\n"
-            "_turing_open_orig = _turing_b.open\n"
-            f'_TURING_RESULTS = "{root_literal}"\n'
+            "_turing_open_real = _turing_b.open\n"
+            + _guard_open_def(guard_roots)
+            + f'_TURING_RESULTS = "{root_literal}"\n'
             "def _turing_open(p, m='r', *a, **k):\n"
             "    if any(c in str(m) for c in 'wax'):\n"
             "        _s = str(p)\n"
@@ -138,8 +248,9 @@ def _write_bootstrap(results_root_abs: str, run_subdir: str | None = None) -> st
     return (
         "import builtins as _turing_b, os as _turing_os\n"
         "_turing_os.environ.setdefault('MPLBACKEND', 'Agg')  # headless backend so matplotlib savefig works (D6)\n"
-        "_turing_open_orig = _turing_b.open\n"
-        f'_TURING_ROOT = "{root_literal}"\n'
+        "_turing_open_real = _turing_b.open\n"
+        + _guard_open_def(guard_roots)
+        + f'_TURING_ROOT = "{root_literal}"\n'
         f'_TURING_SUB = "{sub_literal}"\n'
         f"_TURING_STRIP = {strip_literal}\n"
         "def _turing_parts(_p):\n"
@@ -255,15 +366,25 @@ async def _run_host_subprocess(code: str, timeout: int) -> str:
     """
     # Subprocess CWD = project root (parent of results_root), shared with
     # file_writer/terminal_command so ``results/<file>`` resolves uniformly.
-    cwd_dir = project_root()
+    cwd_dir = _resolve_host_cwd()
     cwd_dir.mkdir(parents=True, exist_ok=True)
 
     # Relocating bootstrap keyed on the host results dir: a bare relative write
     # (``open("x.py", "w")``) lands under results/ instead of the project root.
+    # D8: when the host path guard is on, the bootstrap also blocks any path
+    # resolving outside the results/workspace tree.
+    guard_on = _host_path_guard_on()
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", prefix="turing_exec_", delete=False
     ) as tmp:
-        tmp.write(_write_bootstrap(str(results_root()), _active_run_subdir()) + code)
+        tmp.write(
+            _write_bootstrap(
+                str(results_root()),
+                _active_run_subdir(),
+                guard_roots=_host_guard_roots() if guard_on else (),
+            )
+            + code
+        )
         tmp_path = tmp.name
 
     try:

@@ -932,6 +932,24 @@ class AgentSettings(BaseSettings):
     # run_id is set (non-run-id runs behave exactly as before). Env: RESULTS_PER_RUN_SUBDIR.
     results_per_run_subdir: bool = True
 
+    # D8: host-subprocess confinement for code_executor (subprocess mode only).
+    # When the host path guard is ON, the bootstrap-injected ``open`` wrapper
+    # rejects any path resolving OUTSIDE the results/workspace tree — checked
+    # AFTER relocation, so a script reads/writes its own deliverables + fixtures
+    # but cannot reach repo-root secrets (``open(".env")``) or system files
+    # (``open("/etc/hosts")``). Default OFF (behavior unchanged): docker/runner
+    # modes are already confined; this hardens the host fallback only. Env:
+    # CODE_EXECUTOR_HOST_PATH_GUARD.
+    code_executor_host_path_guard: bool = False
+    # D8: the host-subprocess working directory. ``project_root`` (default) is
+    # the cwd every other file-touching tool shares, so ``glob('results/*.md')``
+    # resolves uniformly — KEEP this default (``results_subdir`` double-nests a
+    # ``results/<file>`` write and breaks that contract). ``results_subdir``
+    # opts into cwd = the per-run results subfolder (``results_root`` fallback)
+    # for tighter disk isolation where a run's scripts use bare names. Env:
+    # CODE_EXECUTOR_HOST_CWD.
+    code_executor_host_cwd: Literal["project_root", "results_subdir"] = "project_root"
+
     # Memory folding (autonomous context compression)
     memory_folding_enabled: bool = True
     # Cooldown between folds. Tuned to the default max_iterations (~18-25): an

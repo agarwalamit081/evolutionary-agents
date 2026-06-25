@@ -180,9 +180,9 @@ class TestToolDefinitions:
         for tool_def in ALL_TOOL_DEFINITIONS:
             assert callable(tool_def["handler"]), f"Handler not callable for {tool_def['name']}"
 
-    def test_sixteen_tools_registered(self) -> None:
-        """Exactly 16 built-in tools are registered (14 audited + 2 corpus tools)."""
-        assert len(ALL_TOOL_DEFINITIONS) == 16
+    def test_seventeen_tools_registered(self) -> None:
+        """Exactly 17 built-in tools are registered (14 audited + arxiv_search + 2 corpus tools)."""
+        assert len(ALL_TOOL_DEFINITIONS) == 17
 
 
 class TestCodeExecutorCWD:
@@ -480,6 +480,172 @@ class TestCodeExecutorRunSubdir:
         # The traversal was NOT relocated into the run cell (or the results root).
         assert not (results / "q09" / "escape.txt").exists()
         assert not (results / "escape.txt").exists()
+
+
+class TestCodeExecutorHostPathGuard:
+    """D8 opt-in host path guard: when ``code_executor_host_path_guard`` is on,
+    the bootstrap-injected ``open`` rejects any path resolving OUTSIDE the
+    results/workspace tree — checked AFTER relocation, so a script still reads
+    and writes its own deliverables/inputs but cannot reach the repo root
+    (``open(".env")``) or an absolute escape (``open("/etc/hosts")``). OFF by
+    default (the dispatch point aliases the real builtin, byte-identical)."""
+
+    @pytest.mark.asyncio
+    async def test_guard_on_blocks_absolute_escape(self, tmp_path: Path) -> None:
+        """An absolute path OUTSIDE the guard roots is refused with a guard error."""
+        from src.config.settings import AgentSettings
+
+        secret = tmp_path / "outside_root.txt"  # sits at project_root, NOT under results/workspace
+        secret.write_text("ROOT_SECRET")
+        mock_settings = AgentSettings(
+            results_root=str(tmp_path / "results"),
+            workspace_root=str(tmp_path / "workspace"),
+            code_executor_host_path_guard=True,
+        )
+        with patch(
+            "src.config.settings.get_settings",
+            return_value=type("S", (), {"agent": mock_settings}),
+        ):
+            result = await code_executor(f"print(open({str(secret)!r}).read())\n")
+        # The read was blocked — the secret never printed, and the guard surfaced.
+        assert "ROOT_SECRET" not in result
+        assert "host path guard" in result.lower(), result
+
+    @pytest.mark.asyncio
+    async def test_guard_on_blocks_repo_root_env(self, tmp_path: Path) -> None:
+        """A relative ``open('.env')`` resolves to the cwd (project_root = repo
+        root in prod) which is NOT a guard root — so it is blocked, not read."""
+        from src.config.settings import AgentSettings
+
+        (tmp_path / ".env").write_text("API_KEY=sk-leak")  # cwd = tmp_path (project_root)
+        mock_settings = AgentSettings(
+            results_root=str(tmp_path / "results"),
+            workspace_root=str(tmp_path / "workspace"),
+            code_executor_host_path_guard=True,
+        )
+        with patch(
+            "src.config.settings.get_settings",
+            return_value=type("S", (), {"agent": mock_settings}),
+        ):
+            result = await code_executor("print(open('.env').read())\n")
+        assert "sk-leak" not in result
+        assert "host path guard" in result.lower(), result
+
+    @pytest.mark.asyncio
+    async def test_guard_on_allows_results_write_and_read(self, tmp_path: Path) -> None:
+        """A legitimate deliverable under results/ (and an input under
+        workspace/) passes the guard — confinement, not a blanket block."""
+        from src.config.settings import AgentSettings
+
+        (tmp_path / "workspace").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "workspace" / "fixture.txt").write_text("FIXTURE")
+        mock_settings = AgentSettings(
+            results_root=str(tmp_path / "results"),
+            workspace_root=str(tmp_path / "workspace"),
+            code_executor_host_path_guard=True,
+        )
+        with patch(
+            "src.config.settings.get_settings",
+            return_value=type("S", (), {"agent": mock_settings}),
+        ):
+            result = await code_executor(
+                "with open('results/out.md', 'w') as f:\n"
+                "    f.write('OK')\n"
+                "print(open('results/out.md').read())\n"
+                "print(open('workspace/fixture.txt').read())\n"
+            )
+        assert "OK" in result
+        assert "FIXTURE" in result
+        assert (tmp_path / "results" / "out.md").read_text() == "OK"
+
+    @pytest.mark.asyncio
+    async def test_guard_off_is_unchanged(self, tmp_path: Path) -> None:
+        """OFF (default): the dispatch aliases the real builtin, so a path that
+        the guard WOULD block reads normally — proves the off path is inert."""
+        from src.config.settings import AgentSettings
+
+        secret = tmp_path / "outside_root.txt"
+        secret.write_text("ROOT_SECRET")
+        mock_settings = AgentSettings(
+            results_root=str(tmp_path / "results"),
+            workspace_root=str(tmp_path / "workspace"),
+            code_executor_host_path_guard=False,  # default
+        )
+        with patch(
+            "src.config.settings.get_settings",
+            return_value=type("S", (), {"agent": mock_settings}),
+        ):
+            result = await code_executor(f"print(open({str(secret)!r}).read())\n")
+        assert "ROOT_SECRET" in result  # read succeeded — no guard engaged
+
+
+class TestCodeExecutorHostCwd:
+    """D8 cwd knob: ``code_executor_host_cwd`` (default ``project_root``) opts
+    the host subprocess into ``cwd = results/<run_id>/`` (or ``results_root``
+    when no run_id) for tighter disk isolation. The default MUST stay
+    ``project_root`` so a ``results/<file>`` write + ``glob('results/*.md')``
+    resolve uniformly across every file-touching tool."""
+
+    @pytest.mark.asyncio
+    async def test_results_subdir_cwd_is_run_cell(self, tmp_path: Path) -> None:
+        """``results_subdir`` sets the subprocess cwd to results/<run_id>/, and a
+        bare write still isolates there (isolation holds under the tighter cwd)."""
+        from src.config.settings import AgentSettings
+        from src.tools._paths import set_active_run_id
+
+        mock_settings = AgentSettings(
+            results_root=str(tmp_path / "results"),
+            workspace_root=str(tmp_path / "workspace"),
+            code_executor_host_cwd="results_subdir",
+            results_per_run_subdir=True,
+        )
+        set_active_run_id("q09")
+        try:
+            with patch(
+                "src.config.settings.get_settings",
+                return_value=type("S", (), {"agent": mock_settings}),
+            ):
+                result = await code_executor(
+                    "import os\n"
+                    "print('CWD=' + os.getcwd())\n"
+                    "with open('bare.txt', 'w') as f:\n"
+                    "    f.write('X')\n"
+                )
+        finally:
+            set_active_run_id(None)
+
+        cwd_line = next(  # pragma: no branch
+            line for line in result.splitlines() if line.startswith("CWD=")
+        )
+        subprocess_cwd = Path(cwd_line[len("CWD="):])
+        assert subprocess_cwd.name == "q09"  # cwd is the run subdir, not project root
+        assert subprocess_cwd.parent == (tmp_path / "results").resolve()
+        # Bare write landed in the run cell — no flat/project-root leakage.
+        assert (tmp_path / "results" / "q09" / "bare.txt").read_text() == "X"
+        assert not (tmp_path / "results" / "bare.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_default_cwd_is_project_root(self, tmp_path: Path) -> None:
+        """Default ``project_root`` cwd is unchanged — the documented contract
+        that ``results/<file>`` resolves the same as every other tool."""
+        from src.config.settings import AgentSettings
+
+        mock_settings = AgentSettings(
+            results_root=str(tmp_path / "results"),
+            workspace_root=str(tmp_path / "workspace"),
+            code_executor_host_cwd="project_root",  # default, explicit
+        )
+        with patch(
+            "src.config.settings.get_settings",
+            return_value=type("S", (), {"agent": mock_settings}),
+        ):
+            result = await code_executor("import os\nprint('CWD=' + os.getcwd())\n")
+        cwd_line = next(  # pragma: no branch
+            line for line in result.splitlines() if line.startswith("CWD=")
+        )
+        subprocess_cwd = Path(cwd_line[len("CWD="):])
+        assert subprocess_cwd == tmp_path  # project_root = parent of results_root
+        assert subprocess_cwd == (tmp_path / "results").resolve().parent
 
 
 class TestFileWriterResultsDir:

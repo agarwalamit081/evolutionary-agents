@@ -151,6 +151,38 @@ class RunsQueue:
             return 0
         return int(await self._redis.xack(self._stream, self._group, *ids))
 
+    async def ack_and_delete(self, entry_ids: Iterable[str]) -> int:
+        """Terminal acknowledgement: ``XACK`` then ``XDEL`` each entry.
+
+        ``ack`` alone drops an entry from the group's pending list but LEAVES
+        it in the stream body — so every completed/terminal run's entry
+        accumulates in ``XRANGE`` indefinitely (observed on
+        complex-arxiv-stats-3, whose success-path entry lingered and had to
+        be purged manually). A completed job is never re-processed and the
+        stream body is never read for history, so there is no reason to keep
+        a terminal entry: this XACKs (so it can never be redelivered) and
+        then XDELs (so it does not accumulate).
+
+        Distinct from ``delete_entry`` (the cancel-path primitive): that one
+        is single-id, returns a bool, and swallows even the XACK failure
+        because cancel races an in-flight worker and must never raise. This
+        method returns the ``XACK`` count (matching ``ack``) and lets an
+        ``XACK`` failure PROPAGATE (a failed ack means the run is not
+        terminal — leave it for redelivery); only the trailing ``XDEL`` is
+        best-effort, because by then the entry is already out of the PEL, so
+        a failed XDEL just reverts to the pre-fix lingering behavior.
+        """
+        ids = [eid for eid in entry_ids if eid]
+        if not ids:
+            return 0
+        acked = int(await self._redis.xack(self._stream, self._group, *ids))
+        if acked:
+            try:
+                await self._redis.xdel(self._stream, *ids)
+            except Exception as exc:  # noqa: BLE001 — best-effort; never break ack
+                logger.warning(f"xdel after ack failed for {ids}: {exc}")
+        return acked
+
     async def delete_entry(self, entry_id: str) -> bool:
         """Terminal removal of one entry: ``XACK`` then ``XDEL`` (P1).
 

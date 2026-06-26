@@ -118,6 +118,61 @@ class TestRunsQueue:
         assert await q.reclaim_stale() == []
 
 
+class TestAckAndDelete:
+    """``ack_and_delete`` — the terminal-completion primitive the worker's
+    success/terminal paths call (complex-arxiv-stats-3 regression).
+
+    ``ack`` alone removes an entry from the pending list but LEAVES it in the
+    stream body, so every completed run's entry accumulated in XRANGE
+    indefinitely (one had to be purged manually). ``ack_and_delete`` XACKs
+    then XDELs so a terminal run leaves no lingering entry — while still
+    returning the ``XACK`` count (matching ``ack``) so the worker's
+    ``acked_total`` counter stays accurate. Distinct from ``delete_entry``
+    (cancel-path: single-id, bool, swallows even the XACK failure)."""
+
+    async def test_ack_and_delete_removes_entry_entirely(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """Terminal completion drops the entry from BOTH the pending list
+        (``pending_count``) and the stream body (``xlen``) — the regression:
+        ``ack``-only leaves the entry lingering at xlen==1."""
+        q = RunsQueue(fake_redis, worker_settings)
+        await q.ensure_group()
+        await q.enqueue(RunJob(run_id="r1", goal="g"))
+        entries = await q.read_new()
+        entry_id = entries[0][0]
+        assert await q.pending_count() == 1
+
+        assert await q.ack_and_delete([entry_id]) == 1
+        assert await q.pending_count() == 0
+        # XDEL proof: the stream body is empty (ack-only would leave xlen==1).
+        assert int(await fake_redis.xlen(worker_settings.runs_stream)) == 0
+
+    async def test_ack_and_delete_empty_or_blank_returns_zero(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """No real ids → 0 (mirrors ack's filter)."""
+        q = RunsQueue(fake_redis, worker_settings)
+        await q.ensure_group()
+        assert await q.ack_and_delete([]) == 0
+        assert await q.ack_and_delete([""]) == 0  # blank ids are filtered
+
+    async def test_ack_and_delete_already_acked_returns_zero(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """A second ack_and_delete on an entry already removed from the
+        pending list returns 0 (XACK count) and does not raise — terminal
+        removal is idempotent (cancel's delete_entry may have raced ahead)."""
+        q = RunsQueue(fake_redis, worker_settings)
+        await q.ensure_group()
+        await q.enqueue(RunJob(run_id="r1", goal="g"))
+        entries = await q.read_new()
+        entry_id = entries[0][0]
+        assert await q.ack_and_delete([entry_id]) == 1
+        # Second call: entry already acked+deleted → XACK returns 0, no raise.
+        assert await q.ack_and_delete([entry_id]) == 0
+
+
 class TestDeleteEntry:
     """``delete_entry`` — the terminal-removal primitive cancel calls (P1) so a
     cancelled run's pending entry can never be reclaimed by a peer worker.

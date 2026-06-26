@@ -171,7 +171,7 @@ class RunConsumer:
                         JobStatus.TIMEOUT,
                         error=f"Run timeout after {timeout_s}s",
                     )
-                    acked = await self._queue.ack([entry_id])
+                    acked = await self._queue.ack_and_delete([entry_id])
                     return acked > 0  # terminal — resumable via checkpoint
                 except RunCancelled as exc:
                     # Graceful cancel (E): a Redis flag set via POST
@@ -185,7 +185,7 @@ class RunConsumer:
                         JobStatus.CANCELLED,
                         error=str(exc),
                     )
-                    acked = await self._queue.ack([entry_id])
+                    acked = await self._queue.ack_and_delete([entry_id])
                     return acked > 0  # terminal
                 except BudgetExhaustedError as exc:
                     # Opt-in budget hard-stop (D): the gateway raised instead of
@@ -202,7 +202,7 @@ class RunConsumer:
                         JobStatus.BUDGET_EXHAUSTED,
                         error=str(exc),
                     )
-                    acked = await self._queue.ack([entry_id])
+                    acked = await self._queue.ack_and_delete([entry_id])
                     return acked > 0  # terminal — resumable
             except Exception as exc:
                 # Dead-letter cap (Bug B). ``record_attempt`` is keyed by run_id, so
@@ -222,7 +222,7 @@ class RunConsumer:
                         JobStatus.FAILED,
                         error=f"{exc} (dead-lettered after {attempts} attempts)",
                     )
-                    acked = await self._queue.ack([entry_id])
+                    acked = await self._queue.ack_and_delete([entry_id])
                     return acked > 0  # terminal — NOT redelivered
                 logger.warning(
                     f"Run {run_id} executor raised (attempt {attempts}/"
@@ -241,7 +241,7 @@ class RunConsumer:
                 is_complete=bool(result.get("is_complete", False)),
                 iteration_count=int(result.get("iteration_count", 0) or 0),
             )
-            acked = await self._queue.ack([entry_id])
+            acked = await self._queue.ack_and_delete([entry_id])
             logger.info(f"Run {run_id} completed (acked={acked})")
             return acked > 0
         finally:

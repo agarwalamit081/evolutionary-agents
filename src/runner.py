@@ -328,6 +328,11 @@ async def execute_run(
             _redis_client = _aioredis.from_url(settings.redis.redis_url)
             cache = PromptCache(_redis_client, settings)
             gateway.set_cache(cache)
+            # Share the Redis client with the rate limiter so the worker fleet
+            # (multiple gateway instances across processes) coordinates against
+            # ONE provider RPM/TPM budget instead of each process slamming its
+            # own 60-RPM bucket. Best-effort + opt-in (degrades to in-memory).
+            gateway.set_rate_limiter_redis(_redis_client)
             logger.info("Redis prompt cache injected into gateway")
         except Exception as e:
             logger.debug(f"Prompt cache not available: {e}")

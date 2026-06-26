@@ -180,6 +180,25 @@ class ResilienceSettings(BaseSettings):
     llm_default_temperature: float = 0.5  # Env: LLM_DEFAULT_TEMPERATURE
     # Default output cap when no model spec supplies max_tokens.
     llm_default_max_tokens: int = 4096  # Env: LLM_DEFAULT_MAX_TOKENS
+    # litellm's OWN internal retries (litellm/main.py defaults num_retries=3
+    # when it is not passed). Layered UNDER this tenacity layer, that silently
+    # multiplies every transient-error HTTP hit (one logical call → up to 9
+    # provider hits = 3 litellm × 3 tenacity) — the root cause of the recurring
+    # "Z.AI degradation": a single 429 fans into ~9 immediate re-hits, which
+    # Z.AI correctly rate-limits, which our retries hit even harder. Set 0 so
+    # tenacity is the SINGLE retry authority (it already backs off with jitter).
+    # Applies to EVERY provider — GLM is hosted on zai/nvidia/etc. alike.
+    llm_litellm_num_retries: int = 0  # Env: LLM_LITELLM_NUM_RETRIES
+    # Hard cap on the default max_tokens when a caller omits it. Without this,
+    # _build_kwargs falls back to spec.max_output (128_000 for glm-4.7) on EVERY
+    # classify/plan/verify/codegen call. A 128K max_tokens reserves that whole
+    # budget in the rate limiter's TPM accounting and signals an enormous
+    # response to the provider, which inflates rate-limit pressure for no
+    # benefit (no single classify/plan response approaches 16K). 16K covers any
+    # realistic single response; callers genuinely needing more pass max_tokens
+    # explicitly. Sits ABOVE spec.max_output in min() so it also bounds models
+    # that over-declare (e.g. deepseek-v4-flash ~384K).
+    llm_max_output_cap: int = 16384  # Env: LLM_MAX_OUTPUT_CAP
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -252,6 +271,18 @@ class RateLimiterSettings(BaseSettings):
     # unchanged. Lets a deployment tune a provider's limits without a code
     # change. Env: RATE_LIMIT_PROVIDER_OVERRIDES.
     rate_limit_provider_overrides: dict[str, list[int]] = Field(default_factory=dict)
+    # When True AND a Redis client is attached to the limiter, the per-provider
+    # rate budget is enforced CROSS-PROCESS via an atomic Redis token-bucket so
+    # concurrent workers/sub-agents SHARE one RPM/TPM budget per provider. The
+    # in-memory aiolimiter is per-LLMGateway-instance (built per-run), so two
+    # workers each silently got their own 60-RPM zai bucket = 120 RPM against a
+    # 60-RPM provider — the real trigger of the recurring "Z.AI degradation".
+    # Keyed off provider name, so it applies to GLM on zai/nvidia/etc. alike.
+    rate_limit_cross_process_enabled: bool = True  # Env: RATE_LIMIT_CROSS_PROCESS_ENABLED
+    # Max blocking acquire attempts (with backoff) in the cross-process path
+    # before proceeding best-effort. Rate limiting is observability-only — it
+    # must NEVER hard-fail a run, so after bounded waiting the call proceeds.
+    rate_limit_max_wait_attempts: int = 5  # Env: RATE_LIMIT_MAX_WAIT_ATTEMPTS
 
     model_config = SettingsConfigDict(
         env_file=".env",

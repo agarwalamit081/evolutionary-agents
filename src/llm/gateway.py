@@ -122,6 +122,17 @@ class LLMGateway:
         """Inject a Redis prompt cache."""
         self._cache = cache
 
+    def set_rate_limiter_redis(self, client: Any) -> None:
+        """Attach a shared Redis client for cross-process rate coordination.
+
+        Forwards to the rate limiter so the worker fleet (multiple gateway
+        instances across processes) shares ONE provider RPM/TPM budget instead
+        of each process slamming its own 60-RPM bucket. Best-effort + opt-in
+        (``RATE_LIMIT_CROSS_PROCESS_ENABLED``); degrades to in-memory-only when
+        the client is absent or registration fails.
+        """
+        self._rate_limiter.attach_redis(client)
+
     def set_run_id(self, run_id: str | None) -> None:
         """Bind the per-run correlation key for cost-ledger attribution.
 
@@ -217,8 +228,11 @@ class LLMGateway:
         # Compress older messages to reduce token consumption
         messages = self._history_compressor.compress(messages)
 
-        # Rate limiting
-        await self._rate_limiter.acquire(provider, self._estimate_tokens(messages))
+        # Rate limiting moved into _retry_call (retry-aware, keyed on the ACTUAL
+        # attempt provider) so a fallback onto a different provider is paced
+        # against THAT provider's budget — the old single acquire here paced only
+        # the original model's provider and left every fallback unpaced (a
+        # glm-4.7→deepseek fallback hit deepseek with zero rate limiting).
 
         # Cache lookup
         if self._cache and cache_key is None:
@@ -429,9 +443,13 @@ class LLMGateway:
 
         provider = self._extract_provider(model)
         temperature = self._resolve_temperature(temperature)
-        await self._rate_limiter.acquire(provider, self._estimate_tokens(messages))
-
         kwargs = self._build_kwargs(model, temperature, max_tokens, metadata)
+        # Retry-aware pacing (mirrors _retry_call): reserve input + the capped
+        # max_tokens against the ACTUAL provider's budget. Keyed on the model's
+        # provider; the fallback loop below re-acquires per fallback model.
+        await self._rate_limiter.acquire(
+            provider, self._estimate_tokens(messages) + int(kwargs.get("max_tokens") or 0)
+        )
 
         try:
             response = await litellm.acompletion(
@@ -450,6 +468,12 @@ class LLMGateway:
             for fallback_model in fallbacks:
                 try:
                     fb_kwargs = self._build_kwargs(fallback_model, temperature, max_tokens, metadata)
+                    fb_provider = self._extract_provider(fallback_model)
+                    await self._rate_limiter.acquire(
+                        fb_provider,
+                        self._estimate_tokens(messages)
+                        + int(fb_kwargs.get("max_tokens") or 0),
+                    )
                     response = await litellm.acompletion(
                         messages=messages,
                         stream=True,
@@ -665,7 +689,9 @@ class LLMGateway:
                     min_system_tokens=cache_cfg.min_system_tokens,
                 )
 
-                response = await self._retry_call(call_messages, **kwargs)
+                response = await self._retry_call(
+                    call_messages, provider=attempt_provider, **kwargs
+                )
                 await self._circuit_breaker.record_success(attempt_provider)
                 return self._parse_response(response, attempt_model, attempt_provider)
 
@@ -720,7 +746,9 @@ class LLMGateway:
                             "thinking": {"type": "disabled"},
                         }
                         try:
-                            response = await self._retry_call(call_messages, **retry_kwargs)
+                            response = await self._retry_call(
+                                call_messages, provider=attempt_provider, **retry_kwargs
+                            )
                             await self._circuit_breaker.record_success(attempt_provider)
                             return self._parse_response(
                                 response, attempt_model, attempt_provider
@@ -741,7 +769,9 @@ class LLMGateway:
                     )
                     kwargs.pop("tool_choice", None)
                     try:
-                        response = await self._retry_call(call_messages, **kwargs)
+                        response = await self._retry_call(
+                            call_messages, provider=attempt_provider, **kwargs
+                        )
                         await self._circuit_breaker.record_success(attempt_provider)
                         return self._parse_response(
                             response, attempt_model, attempt_provider
@@ -768,14 +798,35 @@ class LLMGateway:
             f"All fallbacks exhausted for {model}. Last error: {last_error}"
         )
 
-    async def _retry_call(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
-        """Execute a litellm call with tenacity retry.
+    async def _retry_call(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        provider: str,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a litellm call with tenacity retry + retry-aware rate pacing.
 
         Retry params (attempts, backoff) are read from ``ResilienceSettings`` at
         call time so they're tunable via ``.env`` (LLM_MAX_RETRIES,
         LLM_RETRY_INITIAL_DELAY/MAX_DELAY/JITTER) without redecorating at import.
+
+        Rate pacing is RETRY-AWARE: the per-provider budget is acquired on EVERY
+        tenacity attempt (not once per logical call), so a retry fan-out is
+        charged against the budget exactly as the provider charges it — every
+        HTTP hit counts, including retries. Keyed on ``provider`` (the ACTUAL
+        attempt provider passed by the fallback loop), so a fallback onto a
+        different provider is paced against THAT provider's budget; the old
+        single top-level acquire paced only the original model's provider and
+        left every fallback unpaced. The estimated budget reserves input tokens
+        PLUS the (capped) max_tokens so the TPM window reflects the reserved
+        output, not just the prompt. A limiter hiccup is best-effort (logged at
+        debug, never blocks the call) — rate limiting is observability-only.
         """
         resilience = self._settings.resilience
+        estimated_tokens = self._estimate_tokens(messages) + int(
+            kwargs.get("max_tokens") or 0
+        )
         async for attempt in AsyncRetrying(
             retry=retry_if_exception_type(_TRANSIENT_ERRORS),
             stop=stop_after_attempt(resilience.llm_max_retries),
@@ -791,6 +842,15 @@ class LLMGateway:
             reraise=True,
         ):
             with attempt:
+                # Retry-aware pacing: reserve the per-provider budget on every
+                # attempt. Best-effort — never let a limiter error abort a call.
+                try:
+                    await self._rate_limiter.acquire(provider, estimated_tokens)
+                except Exception:
+                    logger.debug(
+                        f"rate limiter acquire failed for {provider}; "
+                        f"proceeding best-effort"
+                    )
                 return await litellm.acompletion(messages=messages, **kwargs)
         raise RuntimeError("unreachable")  # pragma: no cover
 
@@ -883,14 +943,34 @@ class LLMGateway:
             timeout if timeout is not None else self._settings.llm.request_timeout
         )
 
+        # litellm's OWN internal retries default to 3, which layered UNDER our
+        # tenacity layer silently multiplies every transient-error hit (one
+        # logical call → up to 9 provider hits = 3 litellm × 3 tenacity). A
+        # single 429 then fans into ~9 immediate re-hits the provider correctly
+        # rate-limits, which our retries hit even harder — the recurring "Z.AI
+        # degradation". Pin to the configured value (default 0) so tenacity is
+        # the SINGLE retry authority (it already backs off with jitter). Applies
+        # to every provider. Env: LLM_LITELLM_NUM_RETRIES.
+        kwargs["num_retries"] = self._settings.resilience.llm_litellm_num_retries
+
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
         else:
-            # Use model-specific defaults
+            # Use model-specific defaults, hard-capped so a model that
+            # over-declares its max_output (e.g. glm-4.7=128_000,
+            # deepseek-v4-flash=~384_000) cannot reserve a runaway output
+            # budget in the rate limiter's TPM accounting and inflate provider
+            # rate-limit pressure on every classify/plan/verify/codegen call.
+            # No single node response approaches 16K. Explicit caller max_tokens
+            # (the optimizer passes a specific value) is NOT capped — a caller
+            # asking for a concrete size knows its need. Env: LLM_MAX_OUTPUT_CAP.
+            cap = self._settings.resilience.llm_max_output_cap
             if spec and spec.max_output:
-                kwargs["max_tokens"] = spec.max_output
+                kwargs["max_tokens"] = min(spec.max_output, cap)
             else:
-                kwargs["max_tokens"] = self._settings.resilience.llm_default_max_tokens
+                kwargs["max_tokens"] = min(
+                    self._settings.resilience.llm_default_max_tokens, cap
+                )
 
         if metadata:
             kwargs["metadata"] = metadata

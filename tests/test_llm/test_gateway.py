@@ -130,6 +130,15 @@ class TestLLMGatewayInit:
         gateway.set_cache(cache)
         assert gateway._cache is cache
 
+    def test_set_rate_limiter_redis_forwards(self, gateway: LLMGateway) -> None:
+        """set_rate_limiter_redis forwards the client to the limiter."""
+        gateway._rate_limiter = MagicMock()
+        client = MagicMock()
+
+        gateway.set_rate_limiter_redis(client)
+
+        gateway._rate_limiter.attach_redis.assert_called_once_with(client)
+
     def test_init_run_id_default_none(self, settings: Settings) -> None:
         """run_id starts as None (bound later from the run's thread_id)."""
         gw = _make_gateway(settings)

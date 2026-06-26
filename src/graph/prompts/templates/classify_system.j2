@@ -42,6 +42,14 @@ Classification guidelines:
 - complex: multi-step tasks with dependencies, 6-12 steps
 - critical: production deployments, security audits, large refactors, 10+ steps
 
+Do NOT under-rate by step count alone. A goal is COMPLEX (not simple) when it
+has ANY of these objective signals — even if the step count looks modest:
+- multiple distinct deliverable artifacts (e.g. a .csv table AND a .md summary
+  AND a .py script)
+- an explicit verification / recomputation / cross-check requirement (the
+  result must be independently recomputed or validated, not just produced)
+- cross-tool or multi-source data dependencies (fetch → transform → verify)
+
 Strategy guidelines:
 - react: search, investigate, explore, analyze data
 - planning: step-by-step, multi-step, roadmap, sequence

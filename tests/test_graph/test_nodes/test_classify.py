@@ -226,3 +226,69 @@ class TestIntentAndAmbiguity:
         assert result["ambiguity_type"] == "none"
         assert result["ambiguity_severity"] == 0.0
         assert result["ambiguity_notes"] == []
+
+
+class TestComplexityFloor:
+    """P2 — a deterministic floor promotes TRIVIAL/SIMPLE → COMPLEX on objective
+    signals (multi-deliverable artifacts / explicit verification), so an
+    under-rating LLM never routes a genuinely complex goal to a SIMPLE-tier
+    model. Never demotes a higher tier.
+    """
+
+    @pytest.mark.asyncio
+    async def test_floor_promotes_multi_artifact_to_complex(self) -> None:
+        """≥3 distinct artifact extensions → COMPLEX (heuristic path: was SIMPLE)."""
+        state = initial_state(
+            goal_text=(
+                "summarize the dataset into report.csv, a summary.md, "
+                "and a stats.py recomputation script"
+            ),
+            thread_id="thread-floor-multi",
+        )
+        result = await classify_node(state)
+        assert result["current_goal"].complexity == TaskComplexity.COMPLEX
+
+    @pytest.mark.asyncio
+    async def test_floor_promotes_verify_keyword_to_complex(self) -> None:
+        """An explicit 'verify' requirement → COMPLEX even with few steps."""
+        state = initial_state(
+            goal_text="tally the votes and verify the total matches the records",
+            thread_id="thread-floor-verify",
+        )
+        result = await classify_node(state)
+        assert result["current_goal"].complexity == TaskComplexity.COMPLEX
+
+    @pytest.mark.asyncio
+    async def test_floor_overrides_an_under_rating_llm(self) -> None:
+        """If the LLM returns 'simple' but the goal carries a verify signal, the
+        deterministic floor promotes it to COMPLEX regardless."""
+        classify_json = (
+            '{"complexity": "simple", "strategy": "direct", '
+            '"estimated_steps": 3, "confidence": 0.9, "reasoning": "few steps"}'
+        )
+        state = initial_state(
+            goal_text="compute the totals and verify the result independently",
+            thread_id="thread-floor-llm",
+        )
+        result = await classify_node(state, gateway=_mock_gateway(classify_json))
+        assert result["current_goal"].complexity == TaskComplexity.COMPLEX
+
+    @pytest.mark.asyncio
+    async def test_floor_never_demotes_higher_tier(self) -> None:
+        """A CRITICAL goal stays CRITICAL — the floor only promotes, never demotes."""
+        state = initial_state(
+            goal_text="deploy to production and verify the rollout",
+            thread_id="thread-floor-nodeMOTE",
+        )
+        result = await classify_node(state)
+        assert result["current_goal"].complexity == TaskComplexity.CRITICAL
+
+    @pytest.mark.asyncio
+    async def test_genuinely_simple_goal_unaffected(self) -> None:
+        """A simple goal with no floor signals stays SIMPLE."""
+        state = initial_state(
+            goal_text="write a function to compute fibonacci numbers",
+            thread_id="thread-floor-simple",
+        )
+        result = await classify_node(state)
+        assert result["current_goal"].complexity == TaskComplexity.SIMPLE

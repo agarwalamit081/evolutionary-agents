@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -40,6 +41,53 @@ _STRATEGY_KEYWORDS: dict[Strategy, list[str]] = {
     Strategy.TOT: ["compare", "evaluate options", "best approach", "alternatives"],
     Strategy.DEBATE: ["argue", "pros and cons", "debate", "from multiple perspectives"],
 }
+
+# P2 — deterministic complexity floor. The LLM classifier can under-rate a
+# multi-deliverable / verification goal as SIMPLE because it keys off step
+# count ("complex = 6-12 steps" per the prompt). A goal that asks for several
+# distinct artifacts OR an explicit recomputation/verification step is
+# objectively COMPLEX regardless of step count; under-rating it routes the run
+# to a SIMPLE-tier model (deepseek-v4-flash) that then struggles and burns
+# tokens on the cascade. These signals promote TRIVIAL/SIMPLE → COMPLEX.
+_FLOOR_VERIFY_KEYWORDS: tuple[str, ...] = (
+    "verify", "recompute", "re-compute", "cross-check", "cross check",
+    "re-derive", "rederive", "validate that", "assert that", "check that",
+    "independently confirm",
+)
+
+# File extensions that signal a distinct deliverable artifact (not a decimal
+# number or version string). ≥3 distinct ones ⟹ multi-artifact ⟹ COMPLEX.
+_FLOOR_ARTIFACT_EXTS: frozenset[str] = frozenset({
+    "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "md", "rst", "txt",
+    "py", "js", "ts", "rs", "go", "java", "sql", "html", "htm", "pdf",
+    "xlsx", "xls", "png", "jpg", "jpeg", "svg", "parquet", "db", "sqlite",
+})
+
+_FLOOR_EXT_RE = re.compile(r"\.([a-z0-9]{2,4})\b")
+
+
+def _apply_complexity_floor(
+    goal_text: str, complexity: TaskComplexity
+) -> TaskComplexity:
+    """Promote an under-rated complexity to COMPLEX on objective structural
+    signals, so multi-deliverable / verification goals never get a SIMPLE-tier
+    model. Never demotes; only TRIVIAL/SIMPLE are candidates for promotion.
+    """
+    if complexity not in (TaskComplexity.TRIVIAL, TaskComplexity.SIMPLE):
+        return complexity
+    lowered = goal_text.lower()
+    # (a) explicit verification / recomputation requirement.
+    if any(kw in lowered for kw in _FLOOR_VERIFY_KEYWORDS):
+        return TaskComplexity.COMPLEX
+    # (b) ≥3 distinct output file extensions → multi-artifact deliverable.
+    exts = {
+        m.group(1)
+        for m in _FLOOR_EXT_RE.finditer(lowered)
+        if m.group(1) in _FLOOR_ARTIFACT_EXTS
+    }
+    if len(exts) >= 3:
+        return TaskComplexity.COMPLEX
+    return complexity
 
 
 async def classify_node(
@@ -104,6 +152,22 @@ async def classify_node(
     else:
         complexity, strategy, estimated_steps = _heuristic_classify(goal_text.lower())
         confidence = Confidence.MEDIUM
+
+    # P2 — deterministic complexity floor. Promote TRIVIAL/SIMPLE → COMPLEX on
+    # hard structural signals (multi-deliverable artifacts / explicit
+    # verification or recomputation), overriding an LLM that under-rated the
+    # goal by step count. Floor the step estimate to the COMPLEX baseline when
+    # promoted so the planning node is not misled. Never demotes.
+    _floored = _apply_complexity_floor(goal_text, complexity)
+    if _floored != complexity:
+        logger.info(
+            f"Complexity floor promoted {complexity.value} → {_floored.value} "
+            f"(multi-deliverable / verification signals)"
+        )
+        complexity = _floored
+        estimated_steps = max(
+            estimated_steps, _estimate_steps(TaskComplexity.COMPLEX)
+        )
 
     # Build updated goal
     updated_goal = Goal(

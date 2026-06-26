@@ -442,6 +442,20 @@ A stored generated tool can be edited by an operator, validated against the same
 
 **`ToolVersion.status` lifecycle** — migration `i1b2c3d4e5f6` adds `status: NOT NULL DEFAULT 'approved'` (values `approved`/`pending_review`/`rejected`) and backfills existing rows to `approved`. A staged edit parks at `pending_review` + `is_active=False` and never touches prior versions, so the live tool keeps running unchanged while the edit is under review. `load_active_tools` now requires `status='approved'` *and* `is_active` (defense-in-depth; the backfill guarantees no stored tool regresses). A pending edit never runs until approved.
 
+### Routing, selection & recall (Phase 4)
+
+The P2 batch from `docs/findings.md` that turns the codebase's dead *recall* pillar into real, measurable behavior — embeddings for tools and sub-agents are now consumed by **selection**, not just governance dedup. All seven items ship **default-off / opt-in** (zero behavior change unless toggled) and are **provider-agnostic** (no anthropic dependency), so they're validatable live against glm-4.7 / deepseek / gemini while anthropic is under quota.
+
+| Item | Change | Knob(s) |
+|---|---|---|
+| **F2** | Operator JSON env overrides merged on top of the curated `NODE_TIER_MAP` / `COMPLEXITY_TIER_MAP` at `route()` call-time — pin a node (`{"COMPLEX:execute": "glm-4.7"}`) or a whole complexity tier. Empty / unparseable ⇒ identical behavior | `ROUTING_NODE_TIER_OVERRIDES_JSON`, `ROUTING_COMPLEXITY_TIER_OVERRIDES_JSON` |
+| **E1** | Retrieval-quality harness — `src/eval/retrieval.py` computes **precision@k + MRR** over a deterministic seeded fixture via a `Retriever` protocol (the real `MemoryManager` recall surface). Inspect with `python main.py --retrieval-eval`; rows written via `EvalStore` (no new table). The A/B backbone that justifies E2/F1 ("did recall improve?") | `--retrieval-eval` (CLI) |
+| **E2** | Tool **score-blend**: retrieve top-N (≥k) by cosine, then re-rank by `cosine · (base + weight·success_rate·(1−empty_output_rate))`, take top_k. Reads the per-tool `success_rate` / `empty_output_rate` already maintained atomically in `metrics.py`. `weight=0` ⇒ pure cosine; any error ⇒ full-set fallback | `TOOL_RETRIEVAL_BLEND_SUCCESS` |
+| **F1** | Semantic **sub-agent selection**: before the delegate fan-out, embed the subtask and rank the *already-spawned* subset against `sub_agent_definitions.capability_embedding`, running only the top-k. Default-off ⇒ current all-fan-out; fail-safe ⇒ all-spawn | `AGENT_SELECTION_ENABLED`, `AGENT_SELECTION_TOP_K` |
+| **F3** | **Tool category tags + MCP hints** (`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`) on every builtin + the dynamic generator schema; a tool whose `destructiveHint` is True routes its invocation through the existing HITL interrupt. In-memory registry lookup — **no DB migration** | `DESTRUCTIVE_TOOL_HITL_ENABLED` |
+| **E3** | **structure_analysis LLM-assist**: after the regex pass, when on AND the goal is COMPLEX/CRITICAL AND regex found nothing/ambiguous, a one-shot gateway call (glm-4.7) returns `{tool_gaps, agent_gaps}`, json-repair-salvaged and merged into `pending_*_gaps` (respecting `attempted_*` + the single-shot `structure_analysis_done` guard). Fail-safe ⇒ regex-only | `STRUCTURE_ANALYSIS_LLM_ASSIST_ENABLED` |
+| **D2** | **Gateway multimodal/vision**: `LLMGateway.acompletion(images=...)` folds images into the last user message as OpenAI-format text + `image_url` blocks, and the fallback chain is restricted to `ModelSpec.supports_images` entries (original chain kept if none are image-capable). `_estimate_tokens` tolerates list-content. Default-off ⇒ byte-identical text-only | `VISION_ENABLED` |
+
 ---
 
 ## Memory System
@@ -571,6 +585,13 @@ All config loaded via `pydantic-settings` from `.env` or environment variables. 
 | `OPTIMIZER_REQUIRE_CURVE_CLEAR` | `true` | Refuse to optimize while the capability curve is regressed OR inconclusive (false overrides on a cold curve, accepting the proxy→canary transfer risk) |
 | `OPTIMIZER_CANARY_MIN_SCORE` | `None` | Min canary MARGIN (candidate−baseline) to promote; `None` reuses `EVAL_CANARY_MIN_SCORE` as the absolute floor |
 | `OPTIMIZER_MAX_COST_USD` | `0.50` | Hard spend cap for one optimization run (queried before compile + before promote); spend lands in `cost_ledger` under `run_id=optimizer-<node>-<ts>` |
+| `ROUTING_NODE_TIER_OVERRIDES_JSON` | `{}` | Operator JSON override pinning a specific model onto a `(complexity:node)` route, e.g. `{"COMPLEX:execute": "glm-4.7"}` — merged on top of the curated `NODE_TIER_MAP` at `route()` call-time (F2). Empty/unparseable ⇒ unchanged |
+| `ROUTING_COMPLEXITY_TIER_OVERRIDES_JSON` | `{}` | Operator JSON override for a whole complexity tier, e.g. `{"COMPLEX": "glm-4.7"}` — merged on top of `COMPLEXITY_TIER_MAP` (F2). A node-specific override wins; empty/unparseable ⇒ unchanged |
+| `TOOL_RETRIEVAL_BLEND_SUCCESS` | `false` | Tool retrieval re-ranks the top-N-by-cosine pool by `cosine · (base + weight·success_rate·(1−empty_output_rate))` (E2). Off ⇒ pure-cosine ranking; on ⇒ a reliable near-match beats a flaky closer one. Any error ⇒ full-set fallback |
+| `AGENT_SELECTION_ENABLED` | `false` | Before the delegate fan-out, rank the already-spawned sub-agents against the subtask embedding and run only the top `AGENT_SELECTION_TOP_K` (F1). Off ⇒ all spawned agents run; fail-safe ⇒ all-spawn |
+| `AGENT_SELECTION_TOP_K` | `3` | How many of the spawned sub-agents actually run when `AGENT_SELECTION_ENABLED` (F1) is on |
+| `STRUCTURE_ANALYSIS_LLM_ASSIST_ENABLED` | `false` | On a COMPLEX/CRITICAL goal where the deterministic regex pass found no gaps, make a one-shot gateway call (glm-4.7) to refine `{tool_gaps, agent_gaps}` (E3). Single-shot (guarded by `structure_analysis_done`); any LLM/parse error ⇒ regex-only |
+| `VISION_ENABLED` | `false` | Allow `LLMGateway.acompletion(images=...)` — images fold into the last user message as text + `image_url` blocks and the fallback chain is restricted to image-capable models (`ModelSpec.supports_images`) (D2). Off ⇒ byte-identical text-only; the chain is kept unchanged if no image-capable model is configured |
 
 ---
 

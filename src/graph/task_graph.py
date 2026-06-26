@@ -143,7 +143,7 @@ def build_task_graph(
     graph.add_node("disambiguate", _wrap(disambiguate_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("plan", _wrap(plan_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("retrieve_memory", _wrap(retrieve_memory_node, memory=memory))  # type: ignore[arg-type]
-    graph.add_node("structure_analysis", _wrap(structure_analysis_node, tools=tools, sub_agent_registry=sub_agent_registry))  # type: ignore[arg-type]
+    graph.add_node("structure_analysis", _wrap(structure_analysis_node, tools=tools, sub_agent_registry=sub_agent_registry, gateway=gateway))  # type: ignore[arg-type]
     graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools, result_cache=result_cache))  # type: ignore[arg-type]
     graph.add_node("reflect", _wrap(reflect_node, gateway=gateway, tools=tools, memory=memory, folding_cfg=_folding_cfg_from_settings()))  # type: ignore[arg-type]
     graph.add_node("verify", _wrap(verify_node, gateway=gateway))  # type: ignore[arg-type]

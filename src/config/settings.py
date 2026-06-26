@@ -1084,6 +1084,12 @@ class AgentSettings(BaseSettings):
     # Proactive structure analysis: detect tool-creation / parallel sub-agent
     # intent from the goal before the execute loop and seed the spawn nodes.
     structure_analysis_enabled: bool = True
+    # E3: opt-in LLM-assist refinement. When on AND the goal is COMPLEX/CRITICAL
+    # AND the deterministic regex pass found nothing, a one-shot gateway call
+    # (glm-4.7 under the configured routing) infers capability gaps the static
+    # patterns miss. Fail-safe: any LLM/parse error leaves the regex result
+    # unchanged. Default off → behavior is byte-identical to regex-only.
+    structure_analysis_llm_assist_enabled: bool = False  # Env: STRUCTURE_ANALYSIS_LLM_ASSIST_ENABLED
 
     # ── Ambiguity-resolution cascade (Feature B; all default-off) ─────────
     # Master switch: when off, route_after_classify always returns "plan" and

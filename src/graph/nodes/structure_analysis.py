@@ -28,10 +28,11 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from src.config import get_settings
-from src.graph.enums import Phase
+from src.graph.enums import Phase, TaskComplexity
 
 if TYPE_CHECKING:
     from src.agents.registry import SubAgentRegistry
+    from src.llm.gateway import LLMGateway
     from src.tools.registry import ToolRegistry
 
 # ── Intent signals ──────────────────────────────────────────────────────
@@ -76,6 +77,7 @@ async def structure_analysis_node(
     *,
     tools: ToolRegistry | None = None,
     sub_agent_registry: SubAgentRegistry | None = None,
+    gateway: LLMGateway | None = None,
 ) -> dict[str, Any]:
     """Proactively seed capability gaps from the goal before execution.
 
@@ -89,6 +91,11 @@ async def structure_analysis_node(
             checked so a goal that references previously-created agents by name
             (e.g. "use the doc_outline sub-agent") does not proactively spawn a
             redundant helper (battery-02 N8 over-spawn).
+        gateway: Optional LLMGateway for the opt-in LLM-assist refinement (E3).
+            When ``structure_analysis_llm_assist_enabled`` is on AND the goal is
+            COMPLEX/CRITICAL AND the deterministic regex pass found nothing, a
+            one-shot LLM call infers capability gaps the static patterns miss.
+            ``None`` (or any LLM/parse failure) ⇒ regex-only behavior.
 
     Returns:
         Partial state update. Always sets ``structure_analysis_done=True`` and
@@ -129,6 +136,28 @@ async def structure_analysis_node(
     recalled_names = _recalled_agent_names(sub_agent_registry)
     agent_gaps = _detect_agent_gaps(goal_text, attempted_agents, recalled_names)
 
+    # E3 — opt-in LLM-assist refinement. Only fires when the deterministic
+    # regex pass found NOTHING, the goal is COMPLEX/CRITICAL (the guard),
+    # the knob is on, and a gateway is wired. Ambiguous-but-expensive goals
+    # can then seed capability gaps the static patterns miss. Fail-safe: any
+    # LLM/parse error returns ([], []) so the regex result is unchanged.
+    if (
+        gateway is not None
+        and not tool_gaps
+        and not agent_gaps
+        and _goal_complexity(goal) in (TaskComplexity.COMPLEX, TaskComplexity.CRITICAL)
+        and _llm_assist_enabled()
+    ):
+        ll_tool, ll_agent = await _llm_refine_gaps(
+            goal_text,
+            _existing_tool_names(tools),
+            attempted_tools,
+            attempted_agents,
+            gateway,
+        )
+        tool_gaps = ll_tool
+        agent_gaps = ll_agent
+
     if tool_gaps:
         result["pending_tool_gaps"] = tool_gaps
         logger.info(f"Structure analysis: proactive tool gaps -> {tool_gaps}")
@@ -137,6 +166,144 @@ async def structure_analysis_node(
         logger.info(f"Structure analysis: proactive sub-agent gaps -> {agent_gaps}")
 
     return result
+
+
+# ── LLM-assist refinement (E3) ───────────────────────────────────────────
+
+# One-shot capability-gap inference. Kept short and literal — no Jinja needed.
+_LLM_ASSIST_SYSTEM = (
+    "You analyze a task GOAL for an autonomous agent and infer ONLY the "
+    "capabilities it genuinely requires and does not already have.\n"
+    "- tool_gaps: a custom TOOL the agent would need to build (a data-processing, "
+    "file-format, or API helper). One short phrase each, e.g. "
+    "\"a tool that converts PDF tables to CSV\".\n"
+    "- agent_gaps: an independent SUB-AGENT work unit worth parallelizing. One "
+    "short phrase each.\n"
+    "Prefer an empty list over speculation. Do NOT re-list capabilities the "
+    "agent already has or that were already attempted. Respond with ONLY a JSON "
+    "object: {\"tool_gaps\": [\"...\", ...], \"agent_gaps\": [\"...\", ...]}."
+)
+_LLM_ASSIST_USER = (
+    "Goal:\n{goal_text}\n\n"
+    "Capabilities the agent already has: {existing_tools}.\n"
+    "Capabilities already attempted (do not repeat): tools={attempted_tools}; "
+    "agents={attempted_agents}.\n\n"
+    "Infer the missing tool_gaps and agent_gaps as JSON."
+)
+
+# Phrase length bounds for an LLM-inferred gap hint (guards against the model
+# emitting a whole sentence or a single token).
+_GAP_MIN_LEN = 3
+_GAP_MAX_LEN = 120
+
+
+def _llm_assist_enabled() -> bool:
+    """Best-effort read of the opt-in knob (never fails the run)."""
+    try:
+        return bool(get_settings().agent.structure_analysis_llm_assist_enabled)
+    except Exception:  # noqa: BLE001 — settings access must not break planning
+        return False
+
+
+def _goal_complexity(goal: Any) -> TaskComplexity:
+    """Normalized complexity from the current goal (SIMPLE on any hiccup)."""
+    try:
+        cx = getattr(goal, "complexity", None)
+        if isinstance(cx, TaskComplexity):
+            return cx
+        if isinstance(cx, str):
+            return TaskComplexity(cx.lower())
+    except Exception:  # noqa: BLE001 — defensive; goal shape varies in tests
+        pass
+    return TaskComplexity.SIMPLE
+
+
+def _normalize_llm_gaps(
+    raw: Any,
+    attempted: set[str],
+    formatter: Any,
+    cap: int,
+) -> list[str]:
+    """Coerce raw LLM list items into deduped, attempted-filtered, capped gaps."""
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    attempted_lower = {a.lower() for a in attempted}
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        phrase = " ".join(item.split()).strip(" .:-")
+        if not (_GAP_MIN_LEN <= len(phrase) <= _GAP_MAX_LEN):
+            continue
+        gap = formatter(phrase)
+        key = gap.lower()
+        if key in seen or key in attempted_lower:
+            continue
+        seen.add(key)
+        out.append(gap)
+        if len(out) >= cap:
+            break
+    return out
+
+
+async def _llm_refine_gaps(
+    goal_text: str,
+    existing_tools: set[str],
+    attempted_tools: set[str],
+    attempted_agents: set[str],
+    gateway: LLMGateway,
+) -> tuple[list[str], list[str]]:
+    """One-shot LLM inference of capability gaps the regex patterns missed.
+
+    Returns ([], []) on any failure (empty content, bad JSON, gateway error) so
+    the caller falls back to the regex result unchanged. json-repair salvages
+    fences/quotes the model wraps the JSON in.
+    """
+    try:
+        import json_repair
+
+        agent_cfg = get_settings().agent
+        user_prompt = _LLM_ASSIST_USER.format(
+            goal_text=goal_text[:1500],
+            existing_tools=", ".join(sorted(existing_tools)) or "none",
+            attempted_tools=", ".join(sorted(attempted_tools)) or "none",
+            attempted_agents=", ".join(sorted(attempted_agents)) or "none",
+        )
+        response = await gateway.acompletion(
+            messages=[
+                {"role": "system", "content": _LLM_ASSIST_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        content = (getattr(response, "content", "") or "").strip()
+        if not content:
+            return [], []
+
+        data = json_repair.loads(content)
+        if not isinstance(data, dict):
+            return [], []
+
+        tool_gaps = _normalize_llm_gaps(
+            data.get("tool_gaps"),
+            attempted_tools,
+            lambda p: f"inferred custom tool: {p}",
+            agent_cfg.max_tools_per_run,
+        )
+        agent_gaps = _normalize_llm_gaps(
+            data.get("agent_gaps"),
+            attempted_agents,
+            lambda p: f"inferred sub-agent for: {p}",
+            agent_cfg.max_sub_agents_per_run,
+        )
+        logger.info(
+            "Structure analysis: LLM-assist inferred gaps -> "
+            f"tools={tool_gaps} agents={agent_gaps}"
+        )
+        return tool_gaps, agent_gaps
+    except Exception as exc:  # noqa: BLE001 — LLM/parse failure must not break planning
+        logger.warning(f"structure_analysis LLM-assist failed, falling back to regex: {exc}")
+        return [], []
 
 
 # ── Tool-creation detection ─────────────────────────────────────────────

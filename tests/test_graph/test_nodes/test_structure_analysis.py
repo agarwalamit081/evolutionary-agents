@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.agents.registry import SubAgentRegistry
 from src.config import get_settings
-from src.graph.enums import Phase
+from src.graph.enums import Phase, TaskComplexity
 from src.graph.factory import initial_state
 from src.graph.models import SubAgentSpec
 from src.graph.nodes.structure_analysis import structure_analysis_node
@@ -466,3 +467,163 @@ class TestStructureAnalysisAgentRoleScope:
                 f"phantom sub-agent role {phantom!r} seeded from goal prose: "
                 f"{gaps}"
             )
+
+
+class TestStructureAnalysisLLMAssist:
+    """E3: opt-in LLM-assist refinement over the deterministic regex pass.
+
+    Fires only when the regex pass found nothing AND the goal is
+    COMPLEX/CRITICAL AND ``structure_analysis_llm_assist_enabled`` is on AND a
+    gateway is wired. Fail-safe: any LLM/parse error leaves the regex result
+    unchanged (no crash). Default-off is byte-identical to regex-only.
+    """
+
+    # A COMPLEX goal the regex patterns CANNOT match (no tool/utility/script
+    # build verb, no quoted underscored name, no sub-agent / parallel keyword,
+    # no numbered list) — so the regex pass yields nothing and the LLM-assist
+    # branch is the only thing that could seed gaps.
+    AMBIGUOUS_COMPLEX_GOAL = (
+        "Analyze the long-term macroeconomic impact of supply-chain "
+        "decoupling across three regional markets and produce a strategic "
+        "brief synthesizing the trade-flow forecasts."
+    )
+
+    @staticmethod
+    def _state(goal: str, thread: str, *, complexity: TaskComplexity):
+        state = initial_state(goal, thread)
+        state["current_goal"].complexity = complexity
+        return state
+
+    @staticmethod
+    def _gateway(content: str | None, *, raises: BaseException | None = None):
+        gw = MagicMock()
+        if raises is not None:
+            gw.acompletion = AsyncMock(side_effect=raises)
+        else:
+            gw.acompletion = AsyncMock(return_value=SimpleNamespace(content=content))
+        return gw
+
+    @pytest.mark.asyncio
+    async def test_off_is_regex_only_gateway_never_called(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default-off: a wired gateway is never invoked (byte-identical regex path)."""
+        monkeypatch.setattr(
+            get_settings().agent, "structure_analysis_llm_assist_enabled", False
+        )
+        gateway = self._gateway('{"tool_gaps": ["a thing"], "agent_gaps": []}')
+        result = await structure_analysis_node(
+            self._state(self.AMBIGUOUS_COMPLEX_GOAL, "thread-e3-off", complexity=TaskComplexity.COMPLEX),
+            gateway=gateway,
+        )
+        gateway.acompletion.assert_not_called()
+        assert "pending_tool_gaps" not in result
+        assert "pending_agent_gaps" not in result
+        assert result["structure_analysis_done"] is True
+
+    @pytest.mark.asyncio
+    async def test_on_refines_gaps_when_regex_found_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On + COMPLEX + empty regex: the LLM-inferred gaps are merged in."""
+        monkeypatch.setattr(
+            get_settings().agent, "structure_analysis_llm_assist_enabled", True
+        )
+        gateway = self._gateway(
+            '{"tool_gaps": ["convert PDF tables to CSV"], '
+            '"agent_gaps": ["regional market survey"]}'
+        )
+        result = await structure_analysis_node(
+            self._state(self.AMBIGUOUS_COMPLEX_GOAL, "thread-e3-on", complexity=TaskComplexity.COMPLEX),
+            gateway=gateway,
+        )
+        gateway.acompletion.assert_awaited_once()
+        tool_gaps = result.get("pending_tool_gaps", [])
+        agent_gaps = result.get("pending_agent_gaps", [])
+        assert any("PDF tables to CSV" in g for g in tool_gaps)
+        assert any("regional market survey" in g for g in agent_gaps)
+
+    @pytest.mark.asyncio
+    async def test_skipped_when_regex_already_seeded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On + COMPLEX, but regex already matched -> LLM is NOT consulted."""
+        monkeypatch.setattr(
+            get_settings().agent, "structure_analysis_llm_assist_enabled", True
+        )
+        gateway = self._gateway('{"tool_gaps": ["should be ignored"]}')
+        # Explicit quoted tool name -> regex seeds a gap, so LLM-assist is skipped.
+        result = await structure_analysis_node(
+            self._state(
+                "Create a custom tool 'csv_exporter' for the workflow",
+                "thread-e3-regex",
+                complexity=TaskComplexity.COMPLEX,
+            ),
+            gateway=gateway,
+        )
+        gateway.acompletion.assert_not_called()
+        assert any("csv_exporter" in g for g in result["pending_tool_gaps"])
+
+    @pytest.mark.asyncio
+    async def test_skipped_for_simple_complexity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On but SIMPLE goal: the complexity guard keeps it regex-only."""
+        monkeypatch.setattr(
+            get_settings().agent, "structure_analysis_llm_assist_enabled", True
+        )
+        gateway = self._gateway('{"tool_gaps": ["nope"], "agent_gaps": []}')
+        result = await structure_analysis_node(
+            self._state(self.AMBIGUOUS_COMPLEX_GOAL, "thread-e3-simple", complexity=TaskComplexity.SIMPLE),
+            gateway=gateway,
+        )
+        gateway.acompletion.assert_not_called()
+        assert "pending_tool_gaps" not in result
+
+    @pytest.mark.asyncio
+    async def test_fail_safe_on_gateway_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On + COMPLEX but gateway raises -> no crash, no gaps (regex result)."""
+        monkeypatch.setattr(
+            get_settings().agent, "structure_analysis_llm_assist_enabled", True
+        )
+        gateway = self._gateway(None, raises=RuntimeError("provider down"))
+        result = await structure_analysis_node(
+            self._state(self.AMBIGUOUS_COMPLEX_GOAL, "thread-e3-err", complexity=TaskComplexity.COMPLEX),
+            gateway=gateway,
+        )
+        gateway.acompletion.assert_awaited_once()
+        assert "pending_tool_gaps" not in result
+        assert "pending_agent_gaps" not in result
+        assert result["structure_analysis_done"] is True
+
+    @pytest.mark.asyncio
+    async def test_respects_attempted_gaps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An LLM gap matching an attempted gap is filtered out (no re-request)."""
+        monkeypatch.setattr(
+            get_settings().agent, "structure_analysis_llm_assist_enabled", True
+        )
+        gateway = self._gateway(
+            '{"tool_gaps": ["convert PDF tables to CSV"], "agent_gaps": []}'
+        )
+        state = self._state(self.AMBIGUOUS_COMPLEX_GOAL, "thread-e3-attempted", complexity=TaskComplexity.COMPLEX)
+        state["attempted_tool_gaps"] = ["inferred custom tool: convert PDF tables to CSV"]
+        result = await structure_analysis_node(state, gateway=gateway)
+        assert result.get("pending_tool_gaps", []) == []
+
+    @pytest.mark.asyncio
+    async def test_no_gateway_is_regex_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On + COMPLEX + empty regex but no gateway wired -> regex-only."""
+        monkeypatch.setattr(
+            get_settings().agent, "structure_analysis_llm_assist_enabled", True
+        )
+        result = await structure_analysis_node(
+            self._state(self.AMBIGUOUS_COMPLEX_GOAL, "thread-e3-nogw", complexity=TaskComplexity.COMPLEX),
+        )
+        assert "pending_tool_gaps" not in result
+        assert "pending_agent_gaps" not in result

@@ -323,6 +323,91 @@ class TestPlanDeliverableAwareReplan:
         assert "CORRECTION RE-PLAN" not in prompt
 
 
+class TestPlanMissingDeliverableReplan:
+    """complex-arxiv-stats-3 regression: a re-plan after verify found a
+    missing/empty goal deliverable must target ONLY that deliverable — write
+    it minimally via file_writer — instead of regenerating the whole pipeline.
+
+    Root cause: the planner was missing-deliverable-blind. Each re-plan rebuilt
+    the full pipeline (re-deriving papers.jsonl/stats.json), so it never
+    reached the missing-deliverable step before the memory-folding checkpoint
+    interrupted it mid-plan — observed looping 40 iterations never writing
+    attention_report.md. ``_missing_deliverable_context`` injects a targeted
+    directive only when ``state["missing_deliverables"]`` is non-empty (fresh
+    plans are untouched). Mirrors ``TestPlanDeliverableAwareReplan`` but for
+    the VERIFY-driven (not eval-driven) missing case.
+    """
+
+    @staticmethod
+    def _user_prompt(mock_gateway: object) -> str:
+        return mock_gateway.acompletion.call_args.kwargs["messages"][1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_fresh_plan_has_no_missing_directive(
+        self, mock_gateway: object
+    ) -> None:
+        """A fresh plan (no missing_deliverables in state) omits the directive."""
+        state = initial_state("summarize arxiv papers", "thread-md-fresh")
+        state["strategy"] = Strategy.REACT
+        await plan_node(state, gateway=mock_gateway)
+
+        prompt = self._user_prompt(mock_gateway)
+        assert "MISSING-DELIVERABLE RE-PLAN" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_empty_missing_list_omits_directive(
+        self, mock_gateway: object
+    ) -> None:
+        """An empty missing list (all deliverables now present) = no directive."""
+        state = initial_state("summarize arxiv papers", "thread-md-empty")
+        state["strategy"] = Strategy.REACT
+        state["missing_deliverables"] = []
+        await plan_node(state, gateway=mock_gateway)
+
+        prompt = self._user_prompt(mock_gateway)
+        assert "MISSING-DELIVERABLE RE-PLAN" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_missing_deliverable_surfaces_targeted_directive(
+        self, mock_gateway: object
+    ) -> None:
+        """A missing deliverable names the file and demands a minimal file_writer
+        plan — the exact complex-arxiv-stats-3 fix."""
+        state = initial_state("summarize arxiv papers", "thread-md-targeted")
+        state["strategy"] = Strategy.REACT
+        state["missing_deliverables"] = ["results/attention_report.md"]
+        await plan_node(state, gateway=mock_gateway)
+
+        prompt = self._user_prompt(mock_gateway)
+        assert "MISSING-DELIVERABLE RE-PLAN" in prompt
+        # The missing file is named so the plan targets it, not the pipeline.
+        assert "results/attention_report.md" in prompt
+        # The plan must be minimal (finish before the fold checkpoint interrupts).
+        assert "MINIMAL" in prompt
+        # The producing step must persist via file_writer (not narrate in text).
+        assert "file_writer" in prompt
+        assert "Do NOT regenerate" in prompt
+
+    @pytest.mark.asyncio
+    async def test_missing_deliverable_list_capped_at_eight(
+        self, mock_gateway: object
+    ) -> None:
+        """More than 8 missing deliverables lists only the first 8 (the [:8]
+        cap) so the directive stays bounded."""
+        state = initial_state("many deliverables", "thread-md-cap")
+        state["strategy"] = Strategy.REACT
+        state["missing_deliverables"] = [
+            f"results/file_{i}.md" for i in range(1, 11)
+        ]
+        await plan_node(state, gateway=mock_gateway)
+
+        prompt = self._user_prompt(mock_gateway)
+        assert "results/file_8.md" in prompt
+        # The 9th/10th are beyond the cap → not enumerated in the directive.
+        assert "results/file_9.md" not in prompt
+        assert "results/file_10.md" not in prompt
+
+
 class TestTechniqueInjection:
     """§5: a CRITICAL goal injects ≥1 technique body above the JSON footer.
 

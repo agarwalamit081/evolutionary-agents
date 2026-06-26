@@ -220,6 +220,53 @@ def _correction_context(state: AgentState) -> str:
     return "\n".join(lines)
 
 
+def _missing_deliverable_context(state: AgentState) -> str:
+    """Targeted re-plan directive when verify found absent/empty deliverables.
+
+    Mirrors ``_correction_context`` but for the VERIFY-driven (not eval-driven)
+    case: the agent wrote SOME goal deliverables to disk but at least one is
+    still missing or empty. Without this directive the planner regenerates the
+    WHOLE pipeline every re-plan, which (a) burns tokens re-running finished
+    steps and (b) is interrupted by the memory-folding checkpoint before it ever
+    reaches the missing-deliverable step — observed on complex-arxiv-stats-3,
+    which looped 40 iterations never writing ``attention_report.md`` while
+    re-deriving ``papers.jsonl``/``stats.json`` repeatedly.
+
+    The directive makes the re-plan MINIMAL (produce only what's missing) so it
+    finishes in one or two steps — before the fold checkpoint (which fires
+    >=6 iterations after the last fold, mid-plan) can interrupt it — and
+    insists the producing step persist the file via file_writer/code_executor
+    rather than narrating it in the response.
+
+    Returns ``""`` for a fresh plan (no missing deliverables in state) so the
+    first-attempt prompt — and the heuristic-fallback path — is unchanged.
+    """
+    raw = state.get("missing_deliverables") or []
+    missing = [str(p) for p in raw if str(p).strip()]
+    if not missing:
+        return ""
+
+    lines: list[str] = [
+        "MISSING-DELIVERABLE RE-PLAN — a prior execution pass already wrote SOME "
+        "of the goal's deliverables to disk, but the following required "
+        "deliverable(s) are STILL MISSING (absent or empty):"
+    ]
+    for p in missing[:8]:
+        lines.append(f"  - {p}")
+    lines.append(
+        "Generate a MINIMAL plan that produces ONLY the missing deliverable(s) "
+        "above. Do NOT regenerate or re-run steps for deliverables already on "
+        "disk — read and reuse those files unchanged. A minimal plan finishes "
+        "in one or two steps, before the context-folding checkpoint can "
+        "interrupt it. For each missing deliverable, the producing step MUST "
+        "persist the file by calling the `file_writer` tool (or `code_executor` "
+        "for a computed data file) with the full content — do NOT merely "
+        "describe or narrate the content in your response text. A deliverable "
+        "counts as done ONLY once the file exists and is non-empty on disk."
+    )
+    return "\n".join(lines)
+
+
 async def _llm_plan(
     gateway: LLMGateway,
     goal: Goal,
@@ -258,6 +305,11 @@ async def _llm_plan(
         # deliverables (state["eval_checks"]), tell the planner what passes
         # (reuse) vs what failed (fix in place). Empty for a fresh plan.
         correction_ctx = _correction_context(state)
+        # Missing-deliverable re-plan: when verify found absent/empty goal
+        # deliverables (state["missing_deliverables"]), tell the planner to
+        # produce ONLY those, minimally, via file_writer — so the re-plan
+        # finishes before the fold checkpoint interrupts it. Empty otherwise.
+        missing_ctx = _missing_deliverable_context(state)
         # Feature B advisory: the disambiguate cascade's proposed resolution
         # + assumptions + evidence. Rendered into plan_user.j2's ADVISORY
         # block — it explains the goal, never rewrites it (the OBJECTIVE slot
@@ -274,6 +326,7 @@ async def _llm_plan(
             memory_context=memory_ctx,
             disambiguation_context=disambig_ctx,
             correction_context=correction_ctx,
+            missing_deliverable_context=missing_ctx,
         )
         # Build dynamic tool list for the plan prompt. When tool retrieval is
         # enabled (findings-05), select_tools_for_query returns the built-ins

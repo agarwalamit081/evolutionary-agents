@@ -202,6 +202,15 @@ class AgentState(TypedDict, total=False):
     final_output: str
     is_complete: bool
     errors: Annotated[list[str], operator.add]
+    # Missing/empty/malformed goal deliverables found by the LAST verify pass.
+    # Last-write-wins (NO reducer): each verify recomputes this from disk and
+    # overwrites it, so the field clears the moment the agent writes the file.
+    # Read by plan_node to build a TARGETED re-plan that produces ONLY the
+    # missing deliverable(s) instead of regenerating the whole pipeline (which
+    # the memory-folding checkpoint interrupts before the missing step). The
+    # accumulated ``errors`` entry (operator.add) can't serve this role — it
+    # never clears, so a stale "missing" entry would poison every later plan.
+    missing_deliverables: list[str]
 
     # ─── Memory Folding ─────────────────────────────────────────────────
     fold_history: Annotated[list[dict[str, Any]], operator.add]

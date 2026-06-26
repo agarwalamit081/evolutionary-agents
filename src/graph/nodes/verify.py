@@ -236,7 +236,11 @@ async def verify_node(
             # so a normal goal (no spec) and incomplete runs are untouched, and
             # the LLM-judge adds at most ~one call per completion attempt.
             result = await _run_correctness_checks(result, state, deliverable_paths, gateway)
-            return _stamp_convergence_fingerprint(result, state, goal_paths, completed_steps)
+            result = _stamp_convergence_fingerprint(result, state, goal_paths, completed_steps)
+            # Mirror the heuristic path: refresh the missing-deliverable list so
+            # plan_node can target the next plan at whatever is still absent.
+            result["missing_deliverables"] = list(deliverable_problems)
+            return result
 
     result = _heuristic_verify(
         state,
@@ -307,6 +311,10 @@ def _heuristic_verify(
         "phase": Phase.COMPLETE if is_complete else Phase.EXECUTE,
         "is_complete": is_complete,
         "final_output": final_output,
+        # Refreshed every pass (last-write-wins) so plan_node can build a
+        # targeted re-plan for whatever is still missing; clears to [] once the
+        # agent writes the file.
+        "missing_deliverables": list(deliverable_problems),
     }
     # Surface missing/empty deliverables as state errors (operator.add reducer
     # appends) so they reach the report instead of being silently swallowed.

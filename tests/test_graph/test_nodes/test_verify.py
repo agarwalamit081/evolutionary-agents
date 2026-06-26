@@ -524,6 +524,77 @@ class TestVerifyDeliverableEvidence:
         assert any("final_report.md" in e for e in result.get("errors", []))
 
     @pytest.mark.asyncio
+    async def test_missing_deliverable_recorded_for_targeted_replan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """verify surfaces the missing deliverable in state (not just
+        ``errors``) so plan_node can build a TARGETED re-plan — the
+        complex-arxiv-stats-3 regression. Mirrors
+        test_missing_deliverable_forces_incomplete but asserts the new
+        last-write-wins ``missing_deliverables`` field."""
+        _patch_deliverable_roots(monkeypatch, tmp_path)
+        state = self._state_with_file_writer(
+            "Synthesize findings into results/attention_report.md",
+            "results/attention_report.md",
+        )
+        result = await verify_node(state, gateway=None)
+        assert result["is_complete"] is False
+        missing = result.get("missing_deliverables", [])
+        assert any("attention_report.md" in p for p in missing)
+
+    @pytest.mark.asyncio
+    async def test_missing_deliverable_recorded_under_optimistic_llm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The LLM path stamps ``missing_deliverables`` too, so plan_node can
+        target the re-plan even when the verify LLM rubberstamps completion
+        (filesystem evidence wins). Mirrors the heuristic-path test above."""
+        _patch_deliverable_roots(monkeypatch, tmp_path)
+        state = self._state_with_file_writer(
+            "Generate a report and save it to results/final_report.md",
+            "results/final_report.md",
+        )
+        llm_json = (
+            '{"is_complete": true, "completion_percentage": 100.0, '
+            '"gaps": [], "quality_assessment": "Looks done", "should_evolve": false}'
+        )
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(
+            return_value=LLMResponse(
+                content=llm_json,
+                model="gpt-4o-mini-2024-07-18",
+                provider="openai",
+                input_tokens=10,
+                output_tokens=20,
+                total_tokens=30,
+                cost_usd=0.0001,
+            )
+        )
+        result = await verify_node(state, gateway=gateway)
+        assert result["is_complete"] is False
+        missing = result.get("missing_deliverables", [])
+        assert any("final_report.md" in p for p in missing)
+
+    @pytest.mark.asyncio
+    async def test_present_deliverable_clears_missing_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Once the deliverable exists, verify recomputes ``missing_deliverables``
+        to [] (last-write-wins), so a prior pass's stale 'missing' entry does
+        not poison every later plan. This is exactly why missing_deliverables
+        is a separate field from the accumulated ``errors`` list (never clears)."""
+        results_root = _patch_deliverable_roots(monkeypatch, tmp_path)
+        Path(results_root, "report.md").write_text("the answer", encoding="utf-8")
+        state = self._state_with_file_writer(
+            "Save the answer to report.md", "report.md"
+        )
+        # Simulate a prior verify pass that flagged this deliverable missing.
+        state["missing_deliverables"] = ["report.md"]
+        result = await verify_node(state, gateway=None)
+        assert result["is_complete"] is True
+        assert result.get("missing_deliverables") == []
+
+    @pytest.mark.asyncio
     async def test_pessimistic_llm_overridden_by_present_deliverable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -151,6 +151,35 @@ class RunsQueue:
             return 0
         return int(await self._redis.xack(self._stream, self._group, *ids))
 
+    async def delete_entry(self, entry_id: str) -> bool:
+        """Terminal removal of one entry: ``XACK`` then ``XDEL`` (P1).
+
+        Cancel (``POST /runs/{id}/cancel``) calls this the instant its flag is
+        set so the pending entry can never be redelivered by ``reclaim_stale``
+        (XAUTOCLAIM) to a peer worker — which would otherwise resume the run
+        from its last checkpoint and burn tokens while the in-flight owner is
+        still (cooperatively) winding down. ``XACK`` drops it from the group's
+        pending-entries list (the only set ``XAUTOCLAIM`` re-hands out); ``XDEL``
+        then drops it from the stream body so cancelled runs don't accumulate.
+
+        Safe to race with the in-flight worker's own terminal ``ack``: ``XACK``
+        on an already-acked entry is a 0-return no-op, and ``XDEL`` on an entry
+        a consumer is mid-processing does not interrupt it (the record is gone
+        but the in-memory job is unaffected — and the cancel flag stops that
+        worker at its next iteration anyway). Best-effort: a Redis hiccup logs
+        a WARNING and returns False (the worker's own ack + the run-level
+        timeout remain the backstop).
+        """
+        if not entry_id:
+            return False
+        try:
+            await self._redis.xack(self._stream, self._group, entry_id)
+            await self._redis.xdel(self._stream, entry_id)
+            return True
+        except Exception as exc:  # noqa: BLE001 — best-effort; never break cancel
+            logger.warning(f"delete_entry failed for {entry_id}: {exc}")
+            return False
+
     async def pending_count(self) -> int:
         """Number of entries pending (delivered but not acked) in the group.
 

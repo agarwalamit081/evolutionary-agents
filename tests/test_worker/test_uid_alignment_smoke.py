@@ -77,6 +77,13 @@ class _FakeStatus:
     async def mark(self, run_id: str, thread_id: str, status: JobStatus, **_fields: object) -> None:
         self.marked = (run_id, thread_id, status)
 
+    async def get(self, _run_id: str) -> None:
+        """No prior in-flight run — a fresh enqueue must clear the dedup check
+        (P1). The real ``RunStatusStore.get`` returns ``None`` for an unknown
+        run_id; this stand-in mirrors that so ``enqueue_run``'s dedup lookup
+        passes and the route proceeds to ``mark``."""
+        return None
+
 
 # ─── the invariant ────────────────────────────────────────────────────
 

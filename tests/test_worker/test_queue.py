@@ -118,6 +118,78 @@ class TestRunsQueue:
         assert await q.reclaim_stale() == []
 
 
+class TestDeleteEntry:
+    """``delete_entry`` — the terminal-removal primitive cancel calls (P1) so a
+    cancelled run's pending entry can never be reclaimed by a peer worker.
+
+    Cancel must make the entry vanish the instant the flag is set, not merely
+    when the in-flight worker gets around to acking: ``reclaim_stale``
+    (XAUTOCLAIM) re-hands out any entry still in the group's pending-entries
+    list, which would resume the run from its checkpoint and burn tokens while
+    the owner cooperatively winds down. ``XACK`` drops it from the PEL;
+    ``XDEL`` drops it from the stream body so cancelled runs don't accumulate.
+    """
+
+    async def test_delete_entry_acks_and_deletes(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """After delete_entry the entry is gone from BOTH the pending list
+        (``pending_count``) and the stream body (``xlen``) — distinguishing it
+        from a plain ``ack`` (which leaves the entry in the stream)."""
+        q = RunsQueue(fake_redis, worker_settings)
+        await q.ensure_group()
+        await q.enqueue(RunJob(run_id="r1", goal="g"))
+        claimed = await q.read_new()
+        assert await q.pending_count() == 1
+        entry_id = claimed[0][0]
+
+        assert await q.delete_entry(entry_id) is True
+        assert await q.pending_count() == 0
+        # XDEL proof: the stream length is 0 (ack-only would leave it at 1).
+        assert int(await fake_redis.xlen(worker_settings.runs_stream)) == 0
+
+    async def test_delete_entry_defeats_reclaim(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """The regression for the respawn bug: a claimed-but-unacked entry,
+        once delete_entry'd, is NOT handed to a peer by ``reclaim_stale``
+        (``reclaim_min_idle_ms=0`` here, so a still-present entry WOULD be
+        reclaimed). Without the fix this returns the entry → respawn."""
+        settings_a = worker_settings.model_copy(update={"consumer_name": "wa"})
+        settings_b = worker_settings.model_copy(update={"consumer_name": "wb"})
+        q_a = RunsQueue(fake_redis, settings_a)
+        q_b = RunsQueue(fake_redis, settings_b)
+        await q_a.ensure_group()
+        await q_a.enqueue(RunJob(run_id="x", goal="g"))
+
+        claimed = await q_a.read_new()  # worker-a claims; simulates cancel BEFORE ack
+        assert len(claimed) == 1
+        entry_id = claimed[0][0]
+
+        # Cancel path: delete the entry the worker is still nominally "holding".
+        assert await q_a.delete_entry(entry_id) is True
+
+        reclaimed = await q_b.reclaim_stale()  # would-be respawn
+        assert reclaimed == []
+
+    async def test_delete_entry_blank_returns_false(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """A blank entry id is a no-op False (cancel when no id was recorded)."""
+        q = RunsQueue(fake_redis, worker_settings)
+        await q.ensure_group()
+        assert await q.delete_entry("") is False
+
+    async def test_delete_entry_unknown_id_is_harmless(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """XACK/XDEL on an id that isn't pending is a 0-return no-op (no raise) —
+        cancel racing with the worker's own terminal ack must not error."""
+        q = RunsQueue(fake_redis, worker_settings)
+        await q.ensure_group()
+        assert await q.delete_entry("9999-0") is True
+
+
 def test_entry_to_job_raises_on_missing_job_field() -> None:
     """A malformed entry (no 'job' field) raises, not silently dropped."""
     with pytest.raises(ValueError):

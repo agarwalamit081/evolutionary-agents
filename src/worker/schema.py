@@ -73,6 +73,14 @@ class RunStatus(BaseModel):
     error: str = ""
     started_at: str = ""
     finished_at: str = ""
+    # The stream entry id (XACK/XDEL handle) returned by ``RunsQueue.enqueue``.
+    # Cancel records it so ``POST /runs/{id}/cancel`` can delete the pending
+    # entry the instant the flag is set (P1 — otherwise ``reclaim_stale``
+    # redelivers it to a peer before the in-flight worker acks, respawning the
+    # run from its checkpoint). Empty for status hashes written before this
+    # field existed (a load-bearing default — ``from_hash`` round-trips cleanly)
+    # and for any future enqueue path that does not yet capture the id.
+    entry_id: str = ""
 
     def to_hash(self) -> dict[str, str]:
         """Flatten to a Redis hash mapping (all values str).

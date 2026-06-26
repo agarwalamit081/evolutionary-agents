@@ -117,6 +117,28 @@ async def enqueue_run(request: RunRequest) -> EnqueueResponse:
     queue, status_store = _client_and_queue()
 
     run_id = request.run_id or uuid.uuid4().hex
+    thread_id = f"api-{run_id}"
+
+    # P1 dedup — a run_id IS the run's identity (thread_id = api-{run_id}, the
+    # checkpoint-resume key). A second entry for an already-QUEUED/RUNNING run
+    # would resume the SAME checkpoint (double-spend until the lease lock
+    # serializes them) — exactly the "respawn" shape. Refuse it (409) so a
+    # repeated POST /run can't mint a duplicate; terminal statuses leave the
+    # door open for a deliberate fresh re-enqueue (resume-by-run_id intact).
+    existing = await status_store.get(run_id)
+    if existing is not None and existing.status in (
+        JobStatus.QUEUED,
+        JobStatus.RUNNING,
+    ):
+        logger.info(
+            f"API: reject duplicate enqueue for in-flight run {run_id} "
+            f"({existing.status.value})"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"run_id {run_id} already {existing.status.value}",
+        )
+
     job = RunJob(
         run_id=run_id,
         goal=request.goal,
@@ -125,12 +147,13 @@ async def enqueue_run(request: RunRequest) -> EnqueueResponse:
         model=request.model,
         run_timeout_s=request.run_timeout_s,
     )
-    thread_id = f"api-{run_id}"
 
     try:
         await queue.ensure_group()
-        await queue.enqueue(job)
-        await status_store.mark(run_id, thread_id, JobStatus.QUEUED)
+        entry_id = await queue.enqueue(job)
+        await status_store.mark(
+            run_id, thread_id, JobStatus.QUEUED, entry_id=entry_id
+        )
     except Exception as exc:
         logger.warning(f"Enqueue failed for run {run_id}: {exc}")
         raise HTTPException(
@@ -174,8 +197,17 @@ async def cancel_run(run_id: str) -> CancelResponse:
     the hard bound. ``404`` when no status record exists for ``run_id``
     (unknown/expired). Idempotent: a repeat POST is a no-op (the flag's mere
     presence is the signal), so cancelling an already-terminal run is harmless.
+
+    P1 — terminal NOW, not just cooperative: in addition to the flag, the
+    pending stream entry is ``XACK``+``XDEL``'d on the spot, so ``reclaim_stale``
+    (XAUTOCLAIM) can never hand it to a peer worker that would resume the run
+    from its last checkpoint and keep spending while the in-flight owner winds
+    down. If no ``entry_id`` was recorded (status hash predates the field, or a
+    future enqueue path didn't capture it) the flag + worker ack + run timeout
+    remain the backstop. ``404`` (not a silent no-op) only when no status record
+    exists at all.
     """
-    _, status_store = _client_and_queue()
+    queue, status_store = _client_and_queue()
     record: RunStatus | None = await status_store.get(run_id)
     if record is None:
         raise HTTPException(
@@ -183,7 +215,17 @@ async def cancel_run(run_id: str) -> CancelResponse:
             detail=f"Unknown or expired run_id: {run_id}",
         )
     await status_store.request_cancel(run_id)
-    logger.info(f"API: cancel requested for run {run_id}")
+    if record.entry_id:
+        deleted = await queue.delete_entry(record.entry_id)
+        logger.info(
+            f"API: cancel requested for run {run_id} "
+            f"(stream entry {record.entry_id} deleted={deleted})"
+        )
+    else:
+        logger.info(
+            f"API: cancel requested for run {run_id} "
+            f"(no entry_id on record — flag-only)"
+        )
     return CancelResponse(run_id=run_id, status="cancel_requested")
 
 

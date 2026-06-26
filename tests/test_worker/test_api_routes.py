@@ -129,3 +129,86 @@ class TestCancelRoute:
 
         store = RunStatusStore(shared["client"], get_settings().worker)  # type: ignore[arg-type]
         assert await store.is_cancelled("rF") is True
+
+    async def test_cancel_deletes_stream_entry_no_redelivery(self, monkeypatch) -> None:
+        """P1 regression — cancel must delete the pending stream entry
+        (XACK+XDEL) the instant the flag is set, so ``reclaim_stale`` cannot
+        hand it to a peer worker that would resume the run from its checkpoint
+        (the respawn / token-burn vector). Also pins that enqueue captured
+        ``entry_id`` onto the status record so cancel knows what to delete."""
+        from src.config import get_settings
+        from src.worker.queue import RunsQueue
+        from src.worker.status import RunStatusStore
+
+        server = fakeredis.FakeServer()
+        client = fakeredis.FakeAsyncRedis(server=server)
+        monkeypatch.setattr(
+            agent_mod.aioredis, "from_url", lambda _url, **_kw: client
+        )
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            post = await ac.post(f"{API_PREFIX}/run", json={"goal": "g", "run_id": "rE"})
+            cancel = await ac.post(f"{API_PREFIX}/runs/rE/cancel")
+        assert post.status_code == 202
+        assert cancel.status_code == 202
+
+        ws = get_settings().worker
+        # entry_id was captured on the status record at enqueue time.
+        store = RunStatusStore(client, ws)  # type: ignore[arg-type]
+        record = await store.get("rE")
+        assert record is not None
+        assert record.entry_id  # captured + non-empty
+
+        # The pending entry is GONE — no peer can reclaim it (no respawn).
+        q = RunsQueue(client, ws)  # type: ignore[arg-type]
+        assert int(await client.xlen(ws.runs_stream)) == 0  # XDEL: stream body empty
+        assert await q.reclaim_stale() == []  # XACK: removed from the PEL
+
+
+class TestEnqueueDedup:
+    """P1 — a run_id IS the run's identity (thread_id / checkpoint-resume key),
+    so a repeated ``POST /run`` for an already-QUEUED/RUNNING run is refused
+    (409): a second entry would resume the SAME checkpoint (double-spend until
+    the lease lock serializes them). Terminal runs may re-enqueue."""
+
+    async def test_post_run_rejects_duplicate_queued_run_id(
+        self, fakeredis_app
+    ) -> None:
+        transport = ASGITransport(app=fakeredis_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            first = await ac.post(
+                f"{API_PREFIX}/run", json={"goal": "g", "run_id": "rD"}
+            )
+            second = await ac.post(
+                f"{API_PREFIX}/run", json={"goal": "g", "run_id": "rD"}
+            )
+        assert first.status_code == 202
+        assert second.status_code == 409
+        assert "already" in second.json()["detail"]
+
+    async def test_post_run_allows_reenqueue_after_terminal(
+        self, monkeypatch
+    ) -> None:
+        """A TERMINAL run_id (COMPLETED/FAILED/CANCELLED/...) may be re-enqueued
+        (resume-by-run_id stays available); only QUEUED/RUNNING are blocked."""
+        from src.config import get_settings
+        from src.worker.schema import JobStatus
+        from src.worker.status import RunStatusStore
+
+        server = fakeredis.FakeServer()
+        client = fakeredis.FakeAsyncRedis(server=server)
+        monkeypatch.setattr(
+            agent_mod.aioredis, "from_url", lambda _url, **_kw: client
+        )
+        # Seed a terminal status so the dedup check sees COMPLETED, not QUEUED.
+        store = RunStatusStore(client, get_settings().worker)  # type: ignore[arg-type]
+        await store.mark("rT", "api-rT", JobStatus.COMPLETED, is_complete=True)
+
+        app = create_app()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                f"{API_PREFIX}/run", json={"goal": "g", "run_id": "rT"}
+            )
+        assert resp.status_code == 202

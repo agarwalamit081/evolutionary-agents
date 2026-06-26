@@ -1,15 +1,18 @@
-"""Built-in tools package — 20 distinct tools for the agent.
+"""Built-in tools package — 22 distinct tools for the agent.
 
 The original 14 tools were audited for true duplicates (M7b); the 2 corpus
 tools (Phase 1 search stack) are additive — `index_corpus` (write) and
 `corpus_search` (read) are a distinct gather/recall cluster, not a dup of
 `web_search` (live) or `web_scraper` (single page). `create_scheduled_task`
 (Phase 5 I1) is another distinct cluster — durable future-work scheduling, not
-a compute/read/write of the present moment. All names and descriptions remain
-unique; the similar clusters (listing / reading / fetching) are deliberately
-distinct, not mergeable. ``test_consolidation.py`` locks this in — it fails if a
-future change duplicates a name/description or collapses a cluster, preventing
-the B3 capability bloat that dynamic-tool dedup addresses.
+a compute/read/write of the present moment. `git_clone` + `code_search` (Phase 5
+I2) are yet another — index an external REPO's source into semantic memory +
+recall a symbol by query, distinct from corpus (web PAGES) and memory_search
+(tier memory). All names and descriptions remain unique; the similar clusters
+(listing / reading / fetching) are deliberately distinct, not mergeable.
+``test_consolidation.py`` locks this in — it fails if a future change duplicates
+a name/description or collapses a cluster, preventing the B3 capability bloat
+that dynamic-tool dedup addresses.
 """
 
 from src.tools.builtin.arxiv_search import TOOL_DEFINITION as ARXIV_SEARCH_DEF
@@ -22,6 +25,8 @@ from src.tools.builtin.environment_inspect import TOOL_DEFINITION as ENVIRONMENT
 from src.tools.builtin.file_reader import TOOL_DEFINITION as FILE_READER_DEF
 from src.tools.builtin.file_writer import TOOL_DEFINITION as FILE_WRITER_DEF
 from src.tools.builtin.get_current_time import TOOL_DEFINITION as GET_CURRENT_TIME_DEF
+from src.tools.builtin.git_clone import TOOL_DEFINITION_CLONE as GIT_CLONE_DEF
+from src.tools.builtin.git_clone import TOOL_DEFINITION_SEARCH as CODE_SEARCH_DEF
 from src.tools.builtin.http_request import TOOL_DEFINITION as HTTP_REQUEST_DEF
 from src.tools.builtin.image_generator import TOOL_DEFINITION as IMAGE_GENERATOR_DEF
 from src.tools.builtin.list_directory import TOOL_DEFINITION as LIST_DIRECTORY_DEF
@@ -37,6 +42,7 @@ ALL_TOOL_DEFINITIONS = [
     ARXIV_SEARCH_DEF,
     CODE_EXECUTOR_DEF,
     CODE_VALIDATOR_DEF,
+    CODE_SEARCH_DEF,
     CORPUS_INDEX_DEF,
     CORPUS_SEARCH_DEF,
     DOCUMENT_PARSER_DEF,
@@ -44,6 +50,7 @@ ALL_TOOL_DEFINITIONS = [
     FILE_READER_DEF,
     FILE_WRITER_DEF,
     GET_CURRENT_TIME_DEF,
+    GIT_CLONE_DEF,
     HTTP_REQUEST_DEF,
     IMAGE_GENERATOR_DEF,
     LIST_DIRECTORY_DEF,
@@ -75,12 +82,14 @@ TOOL_ANNOTATIONS: dict[str, dict[str, object]] = {
     "arxiv_search": {"tags": ["search", "read"], "mcp_hints": {"readOnlyHint": True, "openWorldHint": True}},
     "code_executor": {"tags": ["compute"], "mcp_hints": {"openWorldHint": True}},
     "code_validator": {"tags": ["compute", "read"], "mcp_hints": {"readOnlyHint": True}},
+    "code_search": {"tags": ["code", "search", "read"], "mcp_hints": {"readOnlyHint": True}},
     "corpus_search": {"tags": ["search", "read"], "mcp_hints": {"readOnlyHint": True}},
     "document_parser": {"tags": ["read", "compute"], "mcp_hints": {"readOnlyHint": True}},
     "environment_inspect": {"tags": ["read", "system"], "mcp_hints": {"readOnlyHint": True}},
     "file_reader": {"tags": ["read", "filesystem"], "mcp_hints": {"readOnlyHint": True}},
     "file_writer": {"tags": ["write", "filesystem"], "mcp_hints": {}},
     "get_current_time": {"tags": ["read", "system"], "mcp_hints": {"readOnlyHint": True, "idempotentHint": True}},
+    "git_clone": {"tags": ["code", "fetch", "write"], "mcp_hints": {"openWorldHint": True}},
     "http_request": {"tags": ["network"], "mcp_hints": {"destructiveHint": True, "openWorldHint": True}},
     "image_generator": {"tags": ["generate", "write"], "mcp_hints": {"openWorldHint": True}},
     "index_corpus": {"tags": ["search", "write"], "mcp_hints": {"destructiveHint": True}},

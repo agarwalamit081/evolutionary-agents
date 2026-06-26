@@ -1922,6 +1922,56 @@ class AgentCronSettings(BaseSettings):
     )
 
 
+class GitCloneSettings(BaseSettings):
+    """Git-clone code indexer (Phase 5 I2).
+
+    Lets the agent ``git_clone`` a PUBLIC repo into a confined workspace subdir
+    and index its source into pgvector cold memory (``episode_type="code"``) so a
+    later ``code_search`` recalls symbols by semantic similarity — the agent's
+    "codebase memory" for repos it has read. Default-off: when disabled the
+    handler is a no-op that tells the caller, so a host run is byte-identical to
+    pre-I2 behavior (mirrors the corpus / agent-cron opt-in convention).
+
+    The caps are the abuse/cost guardrail: a maliciously-large or pathologically-
+    structured repo cannot exhaust disk (``max_files``/``max_file_bytes``/
+    ``max_total_bytes``) or burn unbounded embedding cost (``max_chunks`` bounds
+    the gateway calls, one per symbol). ``clone_timeout_s`` bounds a hanging
+    remote so a node never wedges.
+    """
+
+    # Master opt-in. Default False so the tool no-ops on a clean host run. Env:
+    # GIT_CLONE_ENABLED.
+    enabled: bool = False  # Env: GIT_CLONE_ENABLED
+    # Hard ceiling on the number of code files walked per clone. Bounds disk +
+    # embed cost against a sprawling repo. Env: GIT_CLONE_MAX_FILES.
+    max_files: int = 200  # Env: GIT_CLONE_MAX_FILES
+    # A single file larger than this is skipped (never chunked/embedded). Guards
+    # against a giant generated/minified blob swamping the index. Env:
+    # GIT_CLONE_MAX_FILE_BYTES.
+    max_file_bytes: int = 262144  # 256 KiB. Env: GIT_CLONE_MAX_FILE_BYTES
+    # The walk stops once the CUMULATIVE file size exceeds this. Bounds the
+    # whole-clone footprint + total embedding tokens. Env:
+    # GIT_CLONE_MAX_TOTAL_BYTES.
+    max_total_bytes: int = 20971520  # 20 MiB. Env: GIT_CLONE_MAX_TOTAL_BYTES
+    # Hard ceiling on the number of chunks embedded + stored (one ColdMemory row
+    # per symbol). Bounds gateway embedding calls. Env: GIT_CLONE_MAX_CHUNKS.
+    max_chunks: int = 300  # Env: GIT_CLONE_MAX_CHUNKS
+    # Wall-clock seconds the ``git clone`` subprocess may run before it is killed.
+    # Bounds a slow/hanging remote so a node never wedges. Env:
+    # GIT_CLONE_CLONE_TIMEOUT_S.
+    clone_timeout_s: int = 120  # Env: GIT_CLONE_CLONE_TIMEOUT_S
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps GIT_CLONE_* vars to these fields, mirroring the
+        # AgentCron/Worker pattern (a missing prefix silently ignores vars).
+        env_prefix="git_clone_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class Settings(BaseSettings):
     """Root settings class that composes all settings groups."""
 
@@ -1955,6 +2005,7 @@ class Settings(BaseSettings):
     governance_prune: GovernancePruneSettings = GovernancePruneSettings()  # type: ignore[assignment]
     optimizer: OptimizerSettings = OptimizerSettings()  # type: ignore[assignment]
     agent_cron: AgentCronSettings = AgentCronSettings()  # type: ignore[assignment]
+    git_clone: GitCloneSettings = GitCloneSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

@@ -57,8 +57,8 @@ class TestBuiltinConsolidation:
         assert len(descriptions) == len(set(descriptions))
 
     def test_tool_count_matches_baseline(self) -> None:
-        """The baseline is 20 distinct built-ins (14 audited + arxiv_search + 2 corpus tools + ocr_parser + image_generator + create_scheduled_task)."""
-        assert len(ALL_TOOL_DEFINITIONS) == 20
+        """The baseline is 22 distinct built-ins (14 audited + arxiv_search + 2 corpus tools + ocr_parser + image_generator + create_scheduled_task + git_clone + code_search)."""
+        assert len(ALL_TOOL_DEFINITIONS) == 22
 
     @pytest.mark.parametrize("definition", ALL_TOOL_DEFINITIONS)
     def test_each_definition_has_required_fields(self, definition: dict[str, Any]) -> None:

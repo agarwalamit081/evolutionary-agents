@@ -1,4 +1,4 @@
-"""Built-in tools package — 17 distinct tools for the agent.
+"""Built-in tools package — 18 distinct tools for the agent.
 
 The original 14 tools were audited for true duplicates (M7b); the 2 corpus
 tools (Phase 1 search stack) are additive — `index_corpus` (write) and
@@ -23,6 +23,7 @@ from src.tools.builtin.get_current_time import TOOL_DEFINITION as GET_CURRENT_TI
 from src.tools.builtin.http_request import TOOL_DEFINITION as HTTP_REQUEST_DEF
 from src.tools.builtin.list_directory import TOOL_DEFINITION as LIST_DIRECTORY_DEF
 from src.tools.builtin.memory_search import TOOL_DEFINITION as MEMORY_SEARCH_DEF
+from src.tools.builtin.ocr_parser import TOOL_DEFINITION as OCR_PARSER_DEF
 from src.tools.builtin.self_inspect import TOOL_DEFINITION as SELF_INSPECT_DEF
 from src.tools.builtin.terminal_command import TOOL_DEFINITION as TERMINAL_COMMAND_DEF
 from src.tools.builtin.web_scraper import TOOL_DEFINITION as WEB_SCRAPER_DEF
@@ -42,6 +43,7 @@ ALL_TOOL_DEFINITIONS = [
     HTTP_REQUEST_DEF,
     LIST_DIRECTORY_DEF,
     MEMORY_SEARCH_DEF,
+    OCR_PARSER_DEF,
     SELF_INSPECT_DEF,
     TERMINAL_COMMAND_DEF,
     WEB_SCRAPER_DEF,
@@ -77,6 +79,7 @@ TOOL_ANNOTATIONS: dict[str, dict[str, object]] = {
     "index_corpus": {"tags": ["search", "write"], "mcp_hints": {"destructiveHint": True}},
     "list_directory": {"tags": ["read", "filesystem"], "mcp_hints": {"readOnlyHint": True}},
     "memory_search": {"tags": ["read", "memory"], "mcp_hints": {"readOnlyHint": True}},
+    "ocr_parser": {"tags": ["read", "ocr"], "mcp_hints": {"readOnlyHint": True}},
     "self_inspect": {"tags": ["read", "system"], "mcp_hints": {"readOnlyHint": True}},
     "terminal_command": {"tags": ["system", "write"], "mcp_hints": {"destructiveHint": True, "openWorldHint": True}},
     "web_scraper": {"tags": ["search", "read"], "mcp_hints": {"readOnlyHint": True, "openWorldHint": True}},

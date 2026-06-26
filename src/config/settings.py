@@ -603,6 +603,11 @@ class ToolLimitsSettings(BaseSettings):
     web_scraper_curl_cffi_enabled: bool = True  # Env: WEB_SCRAPER_CURL_CFFI_ENABLED
     web_scraper_curl_cffi_impersonate: str = "chrome"  # Env: WEB_SCRAPER_CURL_CFFI_IMPERSONATE
     code_executor_timeout: int = 30  # Env: CODE_EXECUTOR_TIMEOUT
+    # glm-ocr OCR tool (Z.AI layout_parsing): the API is a single synchronous
+    # POST that can take several seconds on a multi-page PDF; bound it like the
+    # other fetch tools. Env: OCR_PARSER_TIMEOUT / OCR_PARSER_MAX_CHARS.
+    ocr_parser_timeout: float = 30.0  # Env: OCR_PARSER_TIMEOUT
+    ocr_parser_max_chars: int = 8000  # Env: OCR_PARSER_MAX_CHARS
     web_search_max_attempts: int = 3  # Env: WEB_SEARCH_MAX_ATTEMPTS
     web_search_delay_min: float = 0.2  # Env: WEB_SEARCH_DELAY_MIN
     web_search_delay_max: float = 0.6  # Env: WEB_SEARCH_DELAY_MAX

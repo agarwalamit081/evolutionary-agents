@@ -834,6 +834,23 @@ class EvolutionSettings(BaseSettings):
     # Default lives under .turing/ (gitignored scratch), NOT in core src/. Env:
     # EVOLVED_HANDLERS_DIR.
     evolved_handlers_dir: str = ".turing/evolved"
+    # Phase 5 G2 — VCS-tracked promotion. The runtime ``evolved_handlers_dir``
+    # above is gitignored scratch (pointer + immutable versions live there for
+    # the builder to read live). This SECOND dir mirrors only the IMMUTABLE
+    # per-version artifact (``<dir>/<node>.<sha>.json``) into the VCS-tracked
+    # tree (repo-root ``prompts/evolved/``) so a promotion lands in git — the
+    # runtime ``current.json`` pointer is intentionally NOT committed (mutable
+    # runtime state → noisy churn). Env: EVOLUTION_TRACKED_PROMPTS_DIR.
+    evolution_tracked_prompts_dir: str = "prompts/evolved"
+    # Phase 5 G2 — auto-commit the tracked artifact to the main project repo on
+    # promotion (explicit-path ``git add``, never ``-A``; local-only, NEVER push).
+    # Autonomous git-history writes are sensitive, so this is a SEPARATE opt-in
+    # on top of EVOLUTION_PROMOTE_TO_LIVE: when off the tracked FILE is still
+    # written (operator commits it on review), when on the gate commits it.
+    # Best-effort + non-fatal: a failed commit (e.g. the worker container has no
+    # ``.git``) never blocks promotion — the live pointer is the source of truth.
+    # Env: EVOLUTION_PROMOTE_TO_VCS.
+    evolution_promote_to_vcs: bool = False
     # Phase 4 E — evolve→execute edge for deployed TOOL mutations (opt-in,
     # default off). When true, after a TOOL mutation deploys (it has already
     # passed the engine's safety + sandbox + post-deploy smoke gates), the

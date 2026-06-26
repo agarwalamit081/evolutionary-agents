@@ -127,6 +127,47 @@ class GitTracker:
             logger.error(f"Failed to create snapshot: {e}")
             return ""
 
+    async def commit_paths(self, paths: list[str], message: str) -> str:
+        """Stage EXPLICIT repo-relative paths and commit; return the HEAD hash.
+
+        Unlike ``snapshot`` (which ``git add -A``s the whole shadow repo), this
+        stages ONLY the named paths — the main-project-repo discipline (Phase 5
+        G2), where ``-A`` would sweep machine-specific paths (pyrightconfig /
+        alembic.ini local overrides) and scratch scripts into an automated
+        commit. ``paths`` are repo-relative (or absolute) file paths under
+        ``_repo_dir``. Used by the promotion gate to land a promoted prompt
+        artifact in the main repo's VCS trail (not the shadow repo).
+
+        Args:
+            paths: Repo-relative file paths to stage explicitly (never ``-A``).
+            message: Commit message.
+
+        Returns:
+            The new HEAD commit hash, or ``""`` on failure / nothing-to-commit.
+            Never raises — the caller treats ``""`` as a benign no-op (the live
+            pointer is the source of truth; a VCS commit is best-effort).
+        """
+        if not paths:
+            return ""
+        try:
+            rc, _, stderr = await self._git("add", "--", *paths)
+            if rc != 0:
+                logger.warning(f"commit_paths: git add failed (rc={rc}): {stderr}")
+                return ""
+            rc, _, stderr = await self._git("commit", "-m", message)
+            if rc != 0:
+                # rc 1 "nothing to commit" is the benign no-op case (already committed).
+                logger.debug(f"commit_paths: nothing committed (rc={rc}): {stderr}")
+                return ""
+            rc, stdout, _ = await self._git("rev-parse", "HEAD")
+            if rc == 0 and stdout:
+                logger.debug(f"commit_paths: committed {paths} → {stdout[:12]}")
+                return stdout
+            return ""
+        except Exception as e:
+            logger.error(f"commit_paths failed: {e}")
+            return ""
+
     async def apply_mutation(self, file_path: str, content: str) -> None:
         """Apply a mutation by writing content to a file in the shadow repo.
 

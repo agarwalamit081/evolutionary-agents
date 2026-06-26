@@ -41,6 +41,12 @@ if TYPE_CHECKING:
 # it could not produce a signal (no golden suite / eval disabled / inconclusive).
 # The gate treats None as "do not promote" (safe default).
 Canary = Callable[[str, list[str]], Awaitable[float | None]]
+# A VCS committer stages + commits the versioned artifact to a git repo, returning
+# the commit hash ("" on no-op/failure). The path is the ABSOLUTE path to the
+# written tracked artifact; the committer resolves it relative to its repo root
+# (the main project repo, NOT the shadow repo) and stages it with an explicit
+# ``git add`` (never ``-A``). Best-effort: a failed commit never blocks promotion.
+VcsCommit = Callable[[str, str], Awaitable[str]]
 
 _PROMPTS_SUBDIR = "prompts"
 _POINTER_NAME = "current.json"
@@ -170,6 +176,8 @@ class PromotionGate:
         canary: Canary | None = None,
         min_score: float | None = None,
         settings: Settings | None = None,
+        tracked_prompts_dir: str | Path | None = None,
+        vcs_commit: VcsCommit | None = None,
     ) -> None:
         from src.config.settings import get_settings
 
@@ -182,11 +190,45 @@ class PromotionGate:
         self._min_score = (
             eval_cfg.eval_canary_min_score if min_score is None else min_score
         )
+        # Phase 5 G2 — VCS-tracked promotion. The runtime ``_prompts_dir`` above
+        # is gitignored scratch (pointer + immutable versions live there for the
+        # builder to read live). ``_tracked_prompts_dir`` mirrors ONLY the
+        # immutable per-version artifact into the VCS-tracked tree so a promotion
+        # lands in git. An explicit param wins (tests); otherwise it is resolved
+        # from ``evolution_tracked_prompts_dir`` (absent on a minimal settings
+        # fake → None → no tracked write, no side effect; byte-identical legacy).
+        if tracked_prompts_dir is not None:
+            self._tracked_prompts_dir: Path | None = Path(tracked_prompts_dir)
+        else:
+            raw = getattr(evolution, "evolution_tracked_prompts_dir", None)
+            self._tracked_prompts_dir = Path(raw) if raw else None
+        # The auto-commit is a SEPARATE opt-in (``evolution_promote_to_vcs``):
+        # autonomous git-history writes are sensitive, so by default only the
+        # tracked FILE is written (operator commits it on review). An injected
+        # ``vcs_commit`` always wins (tests); otherwise the default committer is
+        # built only when the knob is on. Best-effort + non-fatal in all cases.
+        if vcs_commit is not None:
+            self._vcs_commit: VcsCommit | None = vcs_commit
+        elif getattr(evolution, "evolution_promote_to_vcs", False):
+            self._vcs_commit = self._build_default_vcs_committer()
+        else:
+            self._vcs_commit = None
 
     @property
     def prompts_dir(self) -> Path:
         """Directory holding versioned prompt artifacts + the pointer manifest."""
         return self._prompts_dir
+
+    @property
+    def tracked_prompts_dir(self) -> Path | None:
+        """VCS-tracked mirror dir for promoted artifacts (``None`` ⇒ not tracked).
+
+        Phase 5 G2 — when set, every promoted version is also written here (and,
+        if ``evolution_promote_to_vcs``/an injected ``vcs_commit`` is on,
+        committed to the main repo). ``None`` keeps promotion byte-identical to
+        the legacy behavior (no tracked mirror, no commit).
+        """
+        return self._tracked_prompts_dir
 
     def _pointer_path(self) -> Path:
         return self._prompts_dir / _POINTER_NAME
@@ -207,6 +249,44 @@ class PromotionGate:
         self._pointer_path().write_text(
             json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+
+    def _build_default_vcs_committer(self) -> VcsCommit:
+        """Build the default main-repo VCS committer (best-effort, non-fatal).
+
+        Stages the promoted artifact under an EXPLICIT path in the main project
+        repo (``Path.cwd()`` — where ``main.py`` / the worker runs) and commits
+        it via ``GitTracker.commit_paths`` (never ``-A``, so machine-specific
+        local paths are never swept in). Best-effort: a repo with no ``.git``
+        (the worker container's baked image may ``.dockerignore`` it, or the
+        tracked dir may be misconfigured outside the repo) is a benign no-op
+        (``""``). The live pointer remains the source of truth; the VCS commit
+        is an audit trail that a promotion landed in version control.
+
+        Returns an ``async`` committer ``(abs_artifact_path, message) -> sha``
+        that never raises (the gate treats ``""`` as a benign skip).
+        """
+        from src.evolution.git_tracker import GitTracker
+
+        repo_dir = Path.cwd()
+        tracker = GitTracker(source_dir=repo_dir, repo_dir=repo_dir)
+
+        async def _commit(abs_artifact_path: str, message: str) -> str:
+            try:
+                artifact = Path(abs_artifact_path)
+                try:
+                    rel_arg = str(
+                        artifact.resolve().relative_to(repo_dir.resolve())
+                    )
+                except ValueError:
+                    # Tracked dir outside the repo root — stage the absolute
+                    # path; ``git add`` still accepts it when run in the repo.
+                    rel_arg = abs_artifact_path
+                return await tracker.commit_paths([rel_arg], message)
+            except Exception as exc:  # noqa: BLE001 — VCS mirror is best-effort
+                logger.debug(f"VCS commit of promoted prompt skipped: {exc}")
+                return ""
+
+        return _commit
 
     def _read_version(self, name: str) -> dict[str, Any]:
         if not name:
@@ -292,9 +372,9 @@ class PromotionGate:
                 "canary_score": score,
             }
 
-        return self._install(node, suffixes, score, proposal)
+        return await self._install(node, suffixes, score, proposal)
 
-    def _install(
+    async def _install(
         self,
         node: str,
         suffixes: list[str],
@@ -352,17 +432,42 @@ class PromotionGate:
         pointer[node] = entry
         self._write_pointer(pointer)
 
+        # Phase 5 G2 — mirror the immutable artifact into the VCS-tracked tree
+        # and (when enabled) commit it. The live pointer above is the source of
+        # truth; this mirror is an audit trail so promotions are reviewable in
+        # git. Best-effort + non-fatal: a failed write/commit never unwinds a
+        # promotion that already passed its canary.
+        vcs_commit_hash: str | None = None
+        if self._tracked_prompts_dir is not None:
+            try:
+                self._tracked_prompts_dir.mkdir(parents=True, exist_ok=True)
+                tracked_path = self._tracked_prompts_dir / version_name
+                tracked_path.write_text(
+                    json.dumps(version_record, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                if self._vcs_commit is not None:
+                    vcs_commit_hash = await self._vcs_commit(
+                        str(tracked_path.resolve()),
+                        f"chore(evolution): promote {node} prompt {version_name}",
+                    )
+            except Exception as exc:  # noqa: BLE001 — VCS mirror is best-effort
+                logger.debug(f"VCS-tracked mirror for {version_name} skipped: {exc}")
+
         logger.info(
             f"PROMPT mutation PROMOTED to live for '{node}': {version_name} "
             f"(canary {canary_score:.2f})"
         )
-        return {
+        result: dict[str, Any] = {
             "promoted": True,
             "node": node,
             "version": version_name,
             "sha": sha,
             "canary_score": canary_score,
         }
+        if vcs_commit_hash:
+            result["vcs_commit"] = vcs_commit_hash
+        return result
 
     def rollback(self, node: str) -> dict[str, Any]:
         """Restore the prior promoted version for ``node`` (regression recovery).

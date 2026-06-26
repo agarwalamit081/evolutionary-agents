@@ -431,3 +431,105 @@ class TestGitTracker:
             import shutil
             shutil.rmtree(source_dir, ignore_errors=True)
             shutil.rmtree(repo_dir, ignore_errors=True)
+
+
+class TestCommitPaths:
+    """Phase 5 G2 — explicit-path commit primitive for the MAIN repo (never ``-A``).
+
+    ``commit_paths`` stages ONLY the named paths (unlike ``snapshot``'s ``git add
+    -A``), so an automated promotion commit never sweeps machine-specific local
+    overrides (pyrightconfig / alembic.ini / scratch scripts) into git history.
+    """
+
+    def _create_source_dir(self) -> Path:
+        """A minimal source dir (commit_paths needs an initialized repo, not
+        rich content)."""
+        source = Path(tempfile.mkdtemp(prefix="turing_test_src_"))
+        (source / "main.py").write_text("print('hello')", encoding="utf-8")
+        return source
+
+    def _create_repo_dir(self) -> Path:
+        return Path(tempfile.mkdtemp(prefix="turing_test_repo_"))
+
+    def _tracked(self, repo_dir: Path, path: str) -> str:
+        """``git ls-files`` for one path (empty string ⇒ not tracked)."""
+        import subprocess
+
+        return subprocess.run(
+            ["git", "-C", str(repo_dir), "ls-files", "--", path],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    @pytest.mark.asyncio
+    async def test_commits_named_file_and_leaves_others_untracked(self) -> None:
+        """The named artifact is committed; a co-resident scratch file is NOT."""
+        import shutil
+
+        source_dir = self._create_source_dir()
+        repo_dir = self._create_repo_dir()
+        try:
+            tracker = GitTracker(source_dir, repo_dir)
+            await tracker.initialize()
+            before = await tracker.get_current_hash()
+
+            # The named tracked artifact + an unrelated machine-local scratch file.
+            (repo_dir / "prompts_evolved").mkdir(parents=True, exist_ok=True)
+            artifact = repo_dir / "prompts_evolved" / "execute.deadbeef.json"
+            artifact.write_text('{"node": "execute"}', encoding="utf-8")
+            (repo_dir / "scratch_local.txt").write_text("machine-specific", encoding="utf-8")
+
+            sha = await tracker.commit_paths(
+                ["prompts_evolved/execute.deadbeef.json"],
+                "chore(evolution): promote execute prompt",
+            )
+
+            assert isinstance(sha, str)
+            assert len(sha) == 40
+            # A new commit was created.
+            assert await tracker.get_current_hash() != before
+            # The named artifact is tracked...
+            assert self._tracked(repo_dir, "prompts_evolved/execute.deadbeef.json") != ""
+            # ...but the scratch file was NOT swept in (explicit path, never -A).
+            assert self._tracked(repo_dir, "scratch_local.txt") == ""
+        finally:
+            shutil.rmtree(source_dir, ignore_errors=True)
+            shutil.rmtree(repo_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_empty_paths_returns_empty(self) -> None:
+        """An empty path list is a benign no-op (returns ``""``, no git call)."""
+        import shutil
+
+        source_dir = self._create_source_dir()
+        repo_dir = self._create_repo_dir()
+        try:
+            tracker = GitTracker(source_dir, repo_dir)
+            await tracker.initialize()
+
+            assert await tracker.commit_paths([], "nothing") == ""
+        finally:
+            shutil.rmtree(source_dir, ignore_errors=True)
+            shutil.rmtree(repo_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_commit_returns_empty(self) -> None:
+        """Re-committing an unchanged file is a benign no-op (rc 1 → ``""``)."""
+        import shutil
+
+        source_dir = self._create_source_dir()
+        repo_dir = self._create_repo_dir()
+        try:
+            tracker = GitTracker(source_dir, repo_dir)
+            await tracker.initialize()
+            artifact = repo_dir / "execute.abc123.json"
+            artifact.write_text('{"node": "execute"}', encoding="utf-8")
+
+            first = await tracker.commit_paths(["execute.abc123.json"], "first")
+            assert first != ""
+            # Second commit with no change → nothing to commit → "".
+            assert await tracker.commit_paths(["execute.abc123.json"], "second") == ""
+        finally:
+            shutil.rmtree(source_dir, ignore_errors=True)
+            shutil.rmtree(repo_dir, ignore_errors=True)

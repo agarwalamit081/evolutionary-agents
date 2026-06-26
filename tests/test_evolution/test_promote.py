@@ -332,6 +332,132 @@ class TestPromote:
 
 
 # ---------------------------------------------------------------------------
+# VCS-tracked promotion mirror (Phase 5 G2)
+# ---------------------------------------------------------------------------
+
+
+class TestPromoteVcsTracked:
+    """G2 — a passing promotion mirrors its artifact into a VCS-tracked tree and
+    (when wired) commits it; a FAILING canary mirrors nothing and commits nothing.
+    All behavior is opt-in: an absent ``tracked_prompts_dir`` ⇒ byte-identical
+    legacy promotion."""
+
+    @pytest.mark.asyncio
+    async def test_tracked_dir_mirrors_artifact_on_promote(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """A passing promotion mirrors the versioned artifact into the tracked dir
+        (no auto-commit unless a ``vcs_commit`` is wired)."""
+        _fake_settings(monkeypatch, tmp_path)
+        tracked = tmp_path / "tracked"
+        gate = PromotionGate(canary=_canary(0.9), tracked_prompts_dir=tracked)
+
+        result = await gate.promote(_prompt_proposal(["be strict"]))
+
+        assert result["promoted"] is True
+        assert tracked.exists()
+        tracked_file = tracked / result["version"]
+        assert tracked_file.exists()
+        # The mirror matches the immutable versioned artifact byte-for-byte.
+        versioned = gate.prompts_dir / result["version"]
+        assert tracked_file.read_text("utf-8") == versioned.read_text("utf-8")
+        # No vcs_commit wired ⇒ no commit hash in the result.
+        assert "vcs_commit" not in result
+
+    @pytest.mark.asyncio
+    async def test_vcs_commit_invoked_on_promote(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """An injected ``vcs_commit`` is called with the tracked artifact path and
+        its returned hash lands in the result."""
+        _fake_settings(monkeypatch, tmp_path)
+        tracked = tmp_path / "tracked"
+        calls: list[tuple[str, str]] = []
+
+        async def _commit(path: str, message: str) -> str:
+            calls.append((path, message))
+            return "deadbeef"
+
+        gate = PromotionGate(
+            canary=_canary(0.9), tracked_prompts_dir=tracked, vcs_commit=_commit
+        )
+
+        result = await gate.promote(_prompt_proposal(["be strict"]))
+
+        assert result["promoted"] is True
+        assert result["vcs_commit"] == "deadbeef"
+        assert len(calls) == 1
+        assert calls[0][0].endswith(result["version"])
+        assert "promote execute" in calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_gate_fail_writes_no_mirror_and_never_commits(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """DoD: a FAILING canary flips no pointer, writes no tracked mirror, and
+        never invokes the ``vcs_commit`` (a regression stays un-promoted AND
+        un-committed)."""
+        _fake_settings(monkeypatch, tmp_path)
+        tracked = tmp_path / "tracked"
+        called: list[tuple[str, str]] = []
+
+        async def _commit(path: str, message: str) -> str:
+            called.append((path, message))
+            return "should-not-happen"
+
+        gate = PromotionGate(
+            canary=_canary(0.5), tracked_prompts_dir=tracked, vcs_commit=_commit
+        )
+
+        result = await gate.promote(_prompt_proposal(["x"]))
+
+        assert result["promoted"] is False
+        assert result["reason"] == "canary below threshold"
+        assert not tracked.exists()
+        assert called == []
+
+    @pytest.mark.asyncio
+    async def test_default_off_no_tracked_mirror(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """Default-off: the minimal settings fake lacks the G2 knobs, so with no
+        explicit params promotion is byte-identical to legacy — no mirror, no
+        commit key."""
+        _fake_settings(monkeypatch, tmp_path)
+        gate = PromotionGate(canary=_canary(0.9))
+
+        result = await gate.promote(_prompt_proposal(["be strict"]))
+
+        assert result["promoted"] is True
+        assert gate.tracked_prompts_dir is None
+        assert "vcs_commit" not in result
+
+    @pytest.mark.asyncio
+    async def test_vcs_commit_failure_does_not_block_promotion(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """A best-effort commit that raises must never unwind a promotion that
+        already passed its canary (the live pointer is the source of truth)."""
+        _fake_settings(monkeypatch, tmp_path)
+        tracked = tmp_path / "tracked"
+
+        async def _boom(_path: str, _message: str) -> str:
+            raise RuntimeError("git not available")
+
+        gate = PromotionGate(
+            canary=_canary(0.9), tracked_prompts_dir=tracked, vcs_commit=_boom
+        )
+
+        result = await gate.promote(_prompt_proposal(["be strict"]))
+
+        assert result["promoted"] is True
+        assert gate.current_suffixes("execute") == ["be strict"]
+        # Commit failed ⇒ no hash; the tracked FILE was still written before the call.
+        assert "vcs_commit" not in result
+        assert (tracked / result["version"]).exists()
+
+
+# ---------------------------------------------------------------------------
 # rollback
 # ---------------------------------------------------------------------------
 

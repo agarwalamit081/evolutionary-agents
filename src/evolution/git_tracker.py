@@ -33,6 +33,18 @@ class GitTracker:
         self._source_dir = source_dir.resolve()
         self._repo_dir = repo_dir.resolve()
 
+    @property
+    def repo_dir(self) -> Path:
+        """The shadow-repo root the engine applies mutations to (resolved).
+
+        Exposed so stage-1 graph-invariant checks (``evolution.invariants``)
+        can inspect the deployed snapshot in place — they read
+        ``repo_dir/src/graph/{state,routers,task_graph}.py`` after a CODE
+        mutation is applied, before the post-deploy sandbox smoke. Read-only
+        consumers only; mutations go through ``apply_mutation`` / ``rollback``.
+        """
+        return self._repo_dir
+
     async def _git(self, *args: str) -> tuple[int, str, str]:
         """Run a git command in the shadow repo directory.
 

@@ -5,6 +5,7 @@ Phases: analyze → generate → validate → sandbox_test → ab_test → deplo
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -839,6 +840,81 @@ class SelfEvolutionEngine:
             "reverted_diff": reverted_diff,
         }
 
+    async def _verify_invariants(
+        self, git_tracker: Any
+    ) -> tuple[dict[str, Any], bool]:
+        """Phase 6.4 (G1): static graph-invariant verify over the deployed shadow repo.
+
+        Runs the stage-1 AST checks (``evolution.invariants``) against the
+        shadow-repo snapshot the CODE mutation was just applied to: every
+        ``.py`` compiles, the mutated ``AgentState`` is a superset of the live
+        baseline, every ``route_*`` return-literal is a registered node, and no
+        literal ``add_edge(X, X)`` self-loop was introduced. A failure trips
+        the same ``rollback_deployment`` path as the post-deploy sandbox smoke.
+
+        Fails OPEN: a missing ``git_tracker``/``repo_dir`` skips the check
+        (``passed``), and any unexpected error is swallowed and reported
+        ``passed`` — a verifier bug must never abort an evolution cycle (the
+        post-deploy sandbox smoke remains as the second barrier, mirroring the
+        CostTracker-resilience pattern).
+
+        Args:
+            git_tracker: The ``GitTracker`` whose shadow repo holds the deployed
+                mutation. ``None``/no ``repo_dir`` ⇒ skipped.
+
+        Returns:
+            ``(result, failed)`` where ``failed`` is ``True`` iff an invariant
+            actually failed (skips and errors are ``failed=False``).
+        """
+        repo_dir = getattr(git_tracker, "repo_dir", None)
+        if repo_dir is None:
+            return (
+                {"passed": True, "reason": "no shadow repo (invariants skipped)"},
+                False,
+            )
+        try:
+            from src.evolution.invariants import (
+                extract_state_keys,
+                verify_graph_invariants,
+            )
+
+            # Baseline = the LIVE (unmutated) AgentState field set, parsed from
+            # the running agent's state.py (parents[1] of engine.py == src/),
+            # NOT the shadow repo's mutated copy. Adding fields is allowed;
+            # removing one a live node reads is the breaking change the check
+            # must flag.
+            live_state = Path(__file__).resolve().parents[1] / "graph" / "state.py"
+            baseline = extract_state_keys(live_state) or set()
+            report = verify_graph_invariants(
+                Path(repo_dir), baseline_state_keys=baseline
+            )
+            failed = not report.passed
+            return (
+                {
+                    "passed": not failed,
+                    "reason": (
+                        "; ".join(check.detail for check in report.failures)
+                        if failed
+                        else "invariants hold"
+                    ),
+                    "checks": [
+                        {
+                            "name": check.name,
+                            "passed": check.passed,
+                            "detail": check.detail,
+                        }
+                        for check in report.checks
+                    ],
+                },
+                failed,
+            )
+        except Exception as exc:  # noqa: BLE001 — verifier must fail open
+            logger.warning(f"Graph-invariant verify errored (failing open): {exc}")
+            return (
+                {"passed": True, "reason": f"verifier error (open): {exc}"},
+                False,
+            )
+
     async def run_cycle(
         self,
         execution_history: list[dict[str, Any]],
@@ -1006,18 +1082,53 @@ class SelfEvolutionEngine:
         smoke_result: dict[str, Any] = {}
         rollback_info: dict[str, Any] = {}
         if deployed:
-            smoke_result = await self.post_deploy_verify(proposal, sandbox)
-            smoke_failed = not smoke_result.get("passed", True)
-            if smoke_failed:
-                if git_tracker is not None and deployment.get("pre_deploy_hash"):
-                    rollback_info = await self.rollback_deployment(
-                        deployment, git_tracker
-                    )
-                    rolled_back = bool(rollback_info.get("rolled_back"))
-                logger.warning(
-                    f"Post-deploy verify failed; rolled_back={rolled_back}: "
-                    f"{smoke_result.get('reason')}"
+            # Phase 6.4 (G1): static graph-invariant verify for CODE mutations
+            # — runs BEFORE the dynamic sandbox smoke over the deployed shadow
+            # repo. A mutation that breaks compilation, removes an AgentState
+            # key a live node reads, rewires a router to an unregistered node,
+            # or adds a self-loop is caught here and rolled back. Non-CODE
+            # mutations skip it (nothing graph-structural to check). The check
+            # fails OPEN (verifier error / missing shadow repo ⇒ pass), so the
+            # post-deploy sandbox smoke stays the second barrier.
+            invariant_failed = False
+            if proposal.get("mutation_type") == MutationType.CODE:
+                invariant_result, invariant_failed = (
+                    await self._verify_invariants(git_tracker)
                 )
+                if invariant_failed:
+                    smoke_failed = True
+                    smoke_result = {
+                        "passed": False,
+                        "reason": (
+                            f"graph-invariant failed: "
+                            f"{invariant_result.get('reason')}"
+                        ),
+                    }
+                    if git_tracker is not None and deployment.get("pre_deploy_hash"):
+                        rollback_info = await self.rollback_deployment(
+                            deployment, git_tracker
+                        )
+                        rolled_back = bool(rollback_info.get("rolled_back"))
+                    logger.warning(
+                        f"Graph-invariant verify failed; rolled_back="
+                        f"{rolled_back}: {invariant_result.get('reason')}"
+                    )
+
+            # Phase 6.5: post-deploy sandbox smoke. Skipped when invariants
+            # already failed and the shadow repo was rolled back above.
+            if not invariant_failed:
+                smoke_result = await self.post_deploy_verify(proposal, sandbox)
+                smoke_failed = not smoke_result.get("passed", True)
+                if smoke_failed:
+                    if git_tracker is not None and deployment.get("pre_deploy_hash"):
+                        rollback_info = await self.rollback_deployment(
+                            deployment, git_tracker
+                        )
+                        rolled_back = bool(rollback_info.get("rolled_back"))
+                    logger.warning(
+                        f"Post-deploy verify failed; rolled_back={rolled_back}: "
+                        f"{smoke_result.get('reason')}"
+                    )
 
         # Terminal status — rolled_back / verify_failed take precedence over
         # deployed so a regressing mutation is never reported as a success.

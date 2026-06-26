@@ -1001,6 +1001,18 @@ class AgentSettings(BaseSettings):
     tool_retrieval_blend_success: bool = False
     tool_retrieval_blend_pool: int = 2
     tool_retrieval_blend_weight: float = 0.5
+    # F1 — semantic sub-agent selection before the delegation fan-out. When on,
+    # the SPAWNED agents are ranked by their stored capability embedding against
+    # the subtask and only the top ``agent_selection_top_k`` actually run — the
+    # rest are deselected (membership decided by ranking; survivors keep spawn
+    # order so tier-grouping / provider-spread is preserved). ``agent_spawn``
+    # already decided membership; this prunes the fan-out. Reuses the
+    # sub_agent_definitions.capability_embedding index (RECALL — before this,
+    # ``find_similar`` was its only consumer and it gated dedup, never ranked
+    # recall). Defaults preserve the all-spawn fan-out until toggled on. Env:
+    # AGENT_SELECTION_*.
+    agent_selection_enabled: bool = False
+    agent_selection_top_k: int = 3
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"

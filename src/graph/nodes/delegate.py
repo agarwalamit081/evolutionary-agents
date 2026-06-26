@@ -8,13 +8,16 @@ results, and records metrics.
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from langchain_core.messages import HumanMessage
 from loguru import logger
 
+from src.agents.selection import select_subagents_for_subtask
+from src.config import get_settings
 from src.graph.enums import Phase
 from src.graph.models import ToolResult
+from src.graph.state import AgentState, objective_goal_text
 
 if TYPE_CHECKING:
     from src.agents.registry import SubAgentRegistry
@@ -53,6 +56,16 @@ async def delegate_node(
             "phase": Phase.EXECUTE,
             "delegation_results": [],
         }
+
+    # F1 — semantic sub-agent selection (default-off). Prune the spawned fan-out
+    # to the top-k most-relevant specialists before spawn/execute so an
+    # over-spawned round doesn't fan out to irrelevant agents. ``agent_spawn``
+    # already decided membership; this only prunes. Fail-safe ⇒ full spawned set
+    # on any error (selection can never drop a needed agent). No-op until
+    # ``AGENT_SELECTION_ENABLED`` and the spawned set exceeds the cap.
+    spawned = await select_subagents_for_subtask(
+        spawned, objective_goal_text(cast(AgentState, state)), get_settings()
+    )
 
     if gateway is None or sub_agent_registry is None:
         logger.warning(

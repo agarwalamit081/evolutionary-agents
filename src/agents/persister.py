@@ -159,6 +159,53 @@ class SubAgentPersister:
             logger.debug(f"Sub-agent capability find_similar failed: {e}")
             return []
 
+    async def retrieve_agents_with_scores(
+        self,
+        names: list[str],
+        embedding: list[float],
+        limit: int = 8,
+    ) -> list[tuple[str, float]]:
+        """RECALL similarities over a NAMED subset (F1): top-limit ``(name, cosine)``.
+
+        Unlike :meth:`find_similar` (dedup gate: threshold ≥ 0.85, over ALL
+        active agents), this RANKS only the named spawned agents by cosine to a
+        subtask embedding, at threshold 0.0 (recall, not dedup) — so the F1
+        selection layer can keep the most-relevant spawned agents and prune the
+        fan-out. Best-effort: ``[]`` on any DB error (the caller falls back to
+        all-spawned). ``names`` may include unknown/retired entries — they are
+        simply absent from the result (``name.in_(names)`` + active filter).
+        """
+        if not names:
+            return []
+        try:
+            from sqlalchemy import select
+
+            from src.db.models import SubAgentModel
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                distance = SubAgentModel.capability_embedding.cosine_distance(
+                    embedding
+                )
+                stmt = (
+                    select(
+                        SubAgentModel.name,
+                        distance.label("distance"),
+                    )
+                    .where(
+                        SubAgentModel.capability_embedding.isnot(None),
+                        SubAgentModel.is_active.is_(True),
+                        SubAgentModel.name.in_(names),
+                    )
+                    .order_by(distance)
+                    .limit(limit)
+                )
+                result = await session.execute(stmt)
+                return [(name, 1.0 - float(dist)) for name, dist in result.all()]
+        except Exception as e:
+            logger.debug(f"retrieve_agents_with_scores failed: {e}")
+            return []
+
     async def retire(self, names: list[str]) -> int:
         """Mark named sub-agents ``is_active=False`` in the DB.
 

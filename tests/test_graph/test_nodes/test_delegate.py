@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.config.settings import Settings
 from src.graph.enums import Phase
 from src.graph.models import SubAgentSpec
 from src.graph.nodes.delegate import delegate_node
@@ -971,3 +972,127 @@ class TestTierRouting:
 
         assert mock_runner._model_affinity == ""
         assert result["phase"] == Phase.VERIFY
+
+
+class TestSubAgentSelection:
+    """F1 — delegate prunes the spawned fan-out via select_subagents_for_subtask.
+
+    The selection logic itself is unit-tested in tests/test_agents/test_selection.py;
+    here we prove the WIRING: the subset returned by ``select_subagents_for_subtask``
+    drives the spawn/execute fan-out (only survivors run), and the default-off path
+    fans out to everyone (regression).
+    """
+
+    @staticmethod
+    def _success(name: str) -> dict[str, Any]:
+        return {
+            "success": True,
+            "result": "done",
+            "tokens_used": 10,
+            "cost_usd": 0.0,
+            "latency_ms": 5,
+            "iterations": 1,
+            "errors": [],
+            "goal": "subtask",
+            "sub_agent_name": name,
+            "sub_agent_id": "id",
+        }
+
+    @pytest.mark.asyncio
+    async def test_selection_on_prunes_fanout_to_subset(
+        self,
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+        sample_spec: SubAgentSpec,
+    ) -> None:
+        """DoD: when selection prunes 3 spawned to 2 survivors, only 2 run."""
+        mock_registry.get.return_value = sample_spec
+        runners = []
+        for n in ("a", "b"):
+            runner = MagicMock()
+            runner.run = AsyncMock(return_value=self._success(n))
+            runners.append(runner)
+        mock_registry.spawn.side_effect = runners
+
+        state = {
+            "sub_agents_spawned": [
+                {"name": "a", "id": "1"},
+                {"name": "b", "id": "2"},
+                {"name": "c", "id": "3"},
+            ],
+            "thread_id": "t",
+            "current_goal": MagicMock(text="g"),
+            "submitted_goal": "g",
+        }
+
+        # Selection prunes to the top-2 survivors (a, b); c is deselected.
+        async def fake_select(spawned: Any, subtask: str, settings: Any, persister: Any = None) -> Any:
+            del subtask, settings, persister
+            return [info for info in spawned if info["name"] in {"a", "b"}]
+
+        with patch(
+            "src.graph.nodes.delegate.select_subagents_for_subtask",
+            new=fake_select,
+        ):
+            result = await delegate_node(
+                state,
+                gateway=mock_gateway,
+                tools=mock_tools,
+                sub_agent_registry=mock_registry,
+            )
+
+        # Only the 2 survivors were spawned/executed; c never ran.
+        assert mock_registry.spawn.call_count == 2
+        assert len(result["delegation_results"]) == 2
+        assert result["phase"] == Phase.VERIFY
+
+    @pytest.mark.asyncio
+    async def test_default_off_all_spawn_regression(
+        self,
+        mock_gateway: MagicMock,
+        mock_tools: MagicMock,
+        mock_registry: MagicMock,
+        sample_spec: SubAgentSpec,
+    ) -> None:
+        """Regression: default-off fans out to every spawned agent.
+
+        Patches ``get_settings`` to a known default-off ``Settings`` so the REAL
+        ``select_subagents_for_subtask`` runs and short-circuits (no embed/DB),
+        deterministically — independent of the ambient .env value — proving the
+        wiring passes the full spawned set through when selection is off.
+        """
+        mock_registry.get.return_value = sample_spec
+        runners = []
+        for n in ("a", "b", "c"):
+            runner = MagicMock()
+            runner.run = AsyncMock(return_value=self._success(n))
+            runners.append(runner)
+        mock_registry.spawn.side_effect = runners
+
+        state = {
+            "sub_agents_spawned": [
+                {"name": "a", "id": "1"},
+                {"name": "b", "id": "2"},
+                {"name": "c", "id": "3"},
+            ],
+            "thread_id": "t",
+            "current_goal": MagicMock(text="g"),
+            "submitted_goal": "g",
+        }
+
+        default_off = Settings()
+        assert default_off.agent.agent_selection_enabled is False
+        with patch(
+            "src.graph.nodes.delegate.get_settings", return_value=default_off
+        ):
+            result = await delegate_node(
+                state,
+                gateway=mock_gateway,
+                tools=mock_tools,
+                sub_agent_registry=mock_registry,
+            )
+
+        # Default-off → no pruning → all 3 spawn/run.
+        assert mock_registry.spawn.call_count == 3
+        assert len(result["delegation_results"]) == 3

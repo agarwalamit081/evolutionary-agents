@@ -300,6 +300,40 @@ class RateLimiterSettings(BaseSettings):
         return v
 
 
+# ─── Routing Settings (findings F2 — operator-tunable tier maps) ────
+
+
+class RoutingSettings(BaseSettings):
+    """Operator overrides for the curated complexity/node model tier maps.
+
+    ``model_router.py`` ships curated ``COMPLEXITY_TIER_MAP`` /
+    ``NODE_TIER_MAP`` as the production defaults. These JSON knobs let a
+    deployment retune a single (complexity, node) or (complexity) routing
+    decision without a code change — read at ``route()`` call-time by
+    ``ModelRouter._apply_routing_overrides``.
+
+    Keys:
+      • node-tier: ``"<COMPLEXITY>:<node>"`` (e.g. ``"COMPLEX:execute"``)
+      • complexity-tier: a bare ``"<COMPLEXITY>"`` (e.g. ``"COMPLEX"``)
+    Values: a litellm model_id present in MODEL_REGISTRY. Empty (default) →
+    the curated tables are used unchanged; invalid JSON / unknown model_id is
+    ignored so a bad env can never break routing. A node-tier override wins
+    over a complexity-tier override for the same decision.
+
+    Env: ``ROUTING_NODE_TIER_OVERRIDES_JSON`` / ``ROUTING_COMPLEXITY_TIER_OVERRIDES_JSON``.
+    """
+
+    routing_node_tier_overrides_json: str = "{}"
+    routing_complexity_tier_overrides_json: str = "{}"
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 # ─── Prompt Cache Control Settings (provider-native caching) ────────
 
 
@@ -1778,6 +1812,7 @@ class Settings(BaseSettings):
     resilience: ResilienceSettings = ResilienceSettings()  # type: ignore[assignment]
     circuit_breaker: CircuitBreakerSettings = CircuitBreakerSettings()  # type: ignore[assignment]
     rate_limiter: RateLimiterSettings = RateLimiterSettings()  # type: ignore[assignment]
+    routing: RoutingSettings = RoutingSettings()  # type: ignore[assignment]
     prompt_cache: PromptCacheControlSettings = PromptCacheControlSettings()  # type: ignore[assignment]
     batching: BatchingSettings = BatchingSettings()  # type: ignore[assignment]
     reasoning: ReasoningControlSettings = ReasoningControlSettings()  # type: ignore[assignment]

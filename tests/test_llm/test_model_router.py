@@ -449,6 +449,114 @@ class TestModelRouterPerNodeRouting:
             assert chain_key in FALLBACK_CHAINS, f"{chain_key} not in FALLBACK_CHAINS"
 
 
+class TestRoutingEnvOverrides:
+    """Tests for the F2 operator env-knob tier overrides (RoutingSettings).
+
+    ``_apply_routing_overrides`` layers JSON ``{routing_key: model_id}`` overrides
+    over the curated COMPLEXITY_TIER_MAP / NODE_TIER_MAP at ``route()`` call-time.
+    A node-tier key (``"COMPLEXITY:node"``) wins over a complexity-tier key (bare
+    ``"COMPLEXITY"``); empty / invalid JSON or an unknown model_id leaves the
+    curated tier unchanged so a bad env can never break routing. When an override
+    applies, the tier is re-derived from the override model's ModelSpec.
+    """
+
+    @staticmethod
+    def _all_keyed_router(
+        node_json: str = "{}", cpx_json: str = "{}"
+    ) -> ModelRouter:
+        """Router with every provider key set + the given routing override JSON.
+
+        Keying all providers means each override's named primary resolves to
+        itself (its provider has a key) instead of being masked by a fallback —
+        so the assertion tracks the override choice, not the fallback path.
+        """
+        settings = Settings()
+        for field in _PROVIDER_KEY_FIELDS.values():
+            setattr(settings.llm, field, "test-key")
+        settings.routing.routing_node_tier_overrides_json = node_json
+        settings.routing.routing_complexity_tier_overrides_json = cpx_json
+        return ModelRouter(settings)
+
+    def test_node_tier_override_flips_routing(self) -> None:
+        """A node-tier override redirects a (complexity, node) decision. With all
+        providers keyed, COMPLEX+execute normally returns the NODE_TIER_MAP
+        primary deepseek-v4-flash; overriding ``COMPLEX:execute`` →
+        deepseek-v4-pro flips it."""
+        from src.llm.model_router import NODE_TIER_MAP
+
+        router = self._all_keyed_router(
+            node_json='{"COMPLEX:execute": "deepseek-v4-pro"}'
+        )
+        # Sanity: the curated default for COMPLEX:execute is NOT the override.
+        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "deepseek-v4-flash"
+        assert router.route(TaskComplexity.COMPLEX, node="execute") == "deepseek-v4-pro"
+
+    def test_complexity_tier_override_flips_routing_no_node(self) -> None:
+        """A bare complexity-tier override redirects the node=None default. With
+        all providers keyed, route(COMPLEX) normally returns glm-4.7; overriding
+        ``COMPLEX`` → deepseek-v4-pro flips it."""
+        router = self._all_keyed_router(cpx_json='{"COMPLEX": "deepseek-v4-pro"}')
+        assert router.route(TaskComplexity.COMPLEX) == "deepseek-v4-pro"
+
+    def test_node_tier_override_wins_over_complexity_tier(self) -> None:
+        """When a node-tier and a complexity-tier override name different models
+        for the same decision, the more-specific node-tier wins. Here
+        ``COMPLEX:execute`` → glm-4.7 beats ``COMPLEX`` → deepseek-v4-pro."""
+        router = self._all_keyed_router(
+            node_json='{"COMPLEX:execute": "glm-4.7"}',
+            cpx_json='{"COMPLEX": "deepseek-v4-pro"}',
+        )
+        assert router.route(TaskComplexity.COMPLEX, node="execute") == "glm-4.7"
+
+    def test_invalid_json_override_is_ignored(self) -> None:
+        """Malformed override JSON is logged at DEBUG and treated as no override
+        — routing falls through to the curated tier (cannot break routing)."""
+        from src.llm.model_router import NODE_TIER_MAP
+
+        curated = NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1]
+        router = self._all_keyed_router(node_json="{not valid json}")
+        assert router.route(TaskComplexity.COMPLEX, node="execute") == curated
+
+    def test_empty_override_is_noop(self) -> None:
+        """The default empty JSON leaves behavior identical to no overrides —
+        regression guard that the default-off path is byte-identical to the
+        curated tier maps."""
+        from src.llm.model_router import NODE_TIER_MAP
+
+        curated = NODE_TIER_MAP[(TaskComplexity.COMPLEX, "plan")][1]
+        router = self._all_keyed_router()  # default "{}" / "{}"
+        assert router.route(TaskComplexity.COMPLEX, node="plan") == curated
+
+    def test_unknown_model_id_override_is_ignored(self) -> None:
+        """An override naming a model absent from MODEL_REGISTRY is ignored
+        (logged WARNING) so a typo can never select an unroutable model."""
+        from src.llm.model_router import NODE_TIER_MAP
+
+        curated = NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1]
+        router = self._all_keyed_router(
+            node_json='{"COMPLEX:execute": "does-not-exist-9000"}'
+        )
+        assert router.route(TaskComplexity.COMPLEX, node="execute") == curated
+
+    def test_override_rederives_tier_from_override_model(self) -> None:
+        """When an override applies, the tier is re-derived from the override
+        model's ModelSpec so the absolute-fallback loop stays coherent. Curated
+        COMPLEX is glm-4.7 (MODERATE); overriding ``COMPLEX`` → gemini-2.5-flash
+        (CHEAP) must report CHEAP, not the curated MODERATE."""
+        from src.config.model_registry import MODEL_REGISTRY
+
+        override_model = "gemini-2.5-flash"
+        override_tier = MODEL_REGISTRY[override_model].tier
+        curated_tier = MODEL_REGISTRY["glm-4.7"].tier
+        assert override_tier != curated_tier  # genuinely crosses tiers
+        router = self._all_keyed_router(cpx_json=f'{{"COMPLEX": "{override_model}"}}')
+        tier, chain_key = router._apply_routing_overrides(
+            TaskComplexity.COMPLEX, None, curated_tier, "glm-4.7"
+        )
+        assert chain_key == override_model
+        assert tier == override_tier
+
+
 class TestCrossProviderFallbackInvariant:
     """Lock requirement 2 (#311): every routing primary has at least one
     *registered* fallback on a *different provider* in its FALLBACK_CHAINS.

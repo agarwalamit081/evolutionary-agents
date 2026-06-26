@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from loguru import logger
 
 from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY, ModelTier
@@ -144,6 +146,10 @@ class ModelRouter:
             tier, chain_key = COMPLEXITY_TIER_MAP.get(
                 complexity, DEFAULT_COMPLEXITY_TIER
             )
+        # Layer operator env-knob overrides (F2) over the curated tier maps.
+        # Reads get_settings().routing.* at call-time; empty/unparseable JSON
+        # leaves (tier, chain_key) unchanged. See _apply_routing_overrides.
+        tier, chain_key = self._apply_routing_overrides(complexity, node, tier, chain_key)
         excluded = (exclude_providers or set()) | self._exclude_providers
 
         # The complexity's primary model (the chain_key itself) is the intended
@@ -173,6 +179,77 @@ class ModelRouter:
         first = next(iter(MODEL_REGISTRY))
         logger.error(f"All models exhausted for complexity {complexity}, using {first}")
         return first
+
+    def _apply_routing_overrides(
+        self,
+        complexity: TaskComplexity,
+        node: str | None,
+        tier: ModelTier,
+        chain_key: str,
+    ) -> tuple[ModelTier, str]:
+        """Layer operator env-knob overrides over the curated tier maps (F2).
+
+        Reads ``settings.routing.routing_node_tier_overrides_json`` /
+        ``routing_complexity_tier_overrides_json`` at CALL time. Keys are
+        ``"<COMPLEXITY>:<node>"`` (node tier, e.g. ``"COMPLEX:execute"``) or a
+        bare ``"<COMPLEXITY>"`` (complexity tier); values are a litellm
+        model_id. A node-tier override wins over a complexity-tier override.
+        Empty / unparseable JSON, or a model_id absent from MODEL_REGISTRY, →
+        the curated ``(tier, chain_key)`` unchanged (routing never breaks on a
+        bad env). When an override applies, the tier is re-derived from the
+        override model's ModelSpec so the absolute-fallback loop stays coherent.
+        """
+        override = self._routing_override_for(complexity, node)
+        if not override:
+            return tier, chain_key
+        spec = MODEL_REGISTRY.get(override)
+        if spec is None:
+            logger.warning(
+                f"Routing override '{override}' for {complexity.name}:{node} is "
+                f"not in MODEL_REGISTRY; ignoring override"
+            )
+            return tier, chain_key
+        logger.debug(
+            f"Routing override applied for {complexity.name}:{node}: "
+            f"{chain_key} -> {override} (tier {spec.tier.name})"
+        )
+        return spec.tier, override
+
+    def _routing_override_for(
+        self, complexity: TaskComplexity, node: str | None
+    ) -> str | None:
+        """Resolve the override model_id for (complexity, node), or None.
+
+        Node-tier (``"COMPLEXITY:node"``) takes precedence over complexity-tier
+        (bare ``"COMPLEXITY"``). Malformed JSON is logged at DEBUG and treated
+        as no override.
+        """
+        cpx = complexity.name
+        node_overrides = self._parse_json_overrides(
+            self._settings.routing.routing_node_tier_overrides_json
+        )
+        if node is not None:
+            hit = node_overrides.get(f"{cpx}:{node}")
+            if hit:
+                return hit
+        cpx_overrides = self._parse_json_overrides(
+            self._settings.routing.routing_complexity_tier_overrides_json
+        )
+        return cpx_overrides.get(cpx)
+
+    @staticmethod
+    def _parse_json_overrides(raw: str | None) -> dict[str, str]:
+        """Parse a JSON ``{routing_key: model_id}`` override map, tolerantly."""
+        if not raw or not raw.strip():
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.debug(f"Routing override JSON unparseable, ignored: {exc}")
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {str(k): str(v) for k, v in parsed.items() if v}
 
     def get_fallback_chain(self, model: str) -> list[str]:
         """Get the fallback chain for a specific model.

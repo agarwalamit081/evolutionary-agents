@@ -1,4 +1,4 @@
-"""Built-in tools package — 18 distinct tools for the agent.
+"""Built-in tools package — 19 distinct tools for the agent.
 
 The original 14 tools were audited for true duplicates (M7b); the 2 corpus
 tools (Phase 1 search stack) are additive — `index_corpus` (write) and
@@ -21,6 +21,7 @@ from src.tools.builtin.file_reader import TOOL_DEFINITION as FILE_READER_DEF
 from src.tools.builtin.file_writer import TOOL_DEFINITION as FILE_WRITER_DEF
 from src.tools.builtin.get_current_time import TOOL_DEFINITION as GET_CURRENT_TIME_DEF
 from src.tools.builtin.http_request import TOOL_DEFINITION as HTTP_REQUEST_DEF
+from src.tools.builtin.image_generator import TOOL_DEFINITION as IMAGE_GENERATOR_DEF
 from src.tools.builtin.list_directory import TOOL_DEFINITION as LIST_DIRECTORY_DEF
 from src.tools.builtin.memory_search import TOOL_DEFINITION as MEMORY_SEARCH_DEF
 from src.tools.builtin.ocr_parser import TOOL_DEFINITION as OCR_PARSER_DEF
@@ -41,6 +42,7 @@ ALL_TOOL_DEFINITIONS = [
     FILE_WRITER_DEF,
     GET_CURRENT_TIME_DEF,
     HTTP_REQUEST_DEF,
+    IMAGE_GENERATOR_DEF,
     LIST_DIRECTORY_DEF,
     MEMORY_SEARCH_DEF,
     OCR_PARSER_DEF,
@@ -76,6 +78,7 @@ TOOL_ANNOTATIONS: dict[str, dict[str, object]] = {
     "file_writer": {"tags": ["write", "filesystem"], "mcp_hints": {}},
     "get_current_time": {"tags": ["read", "system"], "mcp_hints": {"readOnlyHint": True, "idempotentHint": True}},
     "http_request": {"tags": ["network"], "mcp_hints": {"destructiveHint": True, "openWorldHint": True}},
+    "image_generator": {"tags": ["generate", "write"], "mcp_hints": {"openWorldHint": True}},
     "index_corpus": {"tags": ["search", "write"], "mcp_hints": {"destructiveHint": True}},
     "list_directory": {"tags": ["read", "filesystem"], "mcp_hints": {"readOnlyHint": True}},
     "memory_search": {"tags": ["read", "memory"], "mcp_hints": {"readOnlyHint": True}},

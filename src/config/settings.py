@@ -608,6 +608,17 @@ class ToolLimitsSettings(BaseSettings):
     # other fetch tools. Env: OCR_PARSER_TIMEOUT / OCR_PARSER_MAX_CHARS.
     ocr_parser_timeout: float = 30.0  # Env: OCR_PARSER_TIMEOUT
     ocr_parser_max_chars: int = 8000  # Env: OCR_PARSER_MAX_CHARS
+    # image_generator tool (litellm aimage_generation). The model is a separate
+    # API surface from chat completions; the default ``gpt-image-1`` is a real
+    # litellm image-gen model (mode=image_generation, ~$0.011/image at low/1024²).
+    # Swap for e.g. ``dashscope/qwen-image-2.0`` to reuse the DASHSCOPE key.
+    # Env: IMAGE_GEN_* (IMAGE_GEN_MODEL / IMAGE_GEN_DEFAULT_SIZE /
+    # IMAGE_GEN_DEFAULT_QUALITY / IMAGE_GEN_TIMEOUT / IMAGE_GEN_API_BASE).
+    image_gen_model: str = "gpt-image-1"  # Env: IMAGE_GEN_MODEL
+    image_gen_default_size: str = "1024x1024"  # Env: IMAGE_GEN_DEFAULT_SIZE
+    image_gen_default_quality: str = "low"  # Env: IMAGE_GEN_DEFAULT_QUALITY
+    image_gen_timeout: float = 60.0  # Env: IMAGE_GEN_TIMEOUT
+    image_gen_api_base: str = ""  # Env: IMAGE_GEN_API_BASE (empty = provider default)
     web_search_max_attempts: int = 3  # Env: WEB_SEARCH_MAX_ATTEMPTS
     web_search_delay_min: float = 0.2  # Env: WEB_SEARCH_DELAY_MIN
     web_search_delay_max: float = 0.6  # Env: WEB_SEARCH_DELAY_MAX

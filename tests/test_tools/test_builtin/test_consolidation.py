@@ -17,7 +17,7 @@ hypothesised overlap serves a genuinely distinct purpose by design:
 These tests lock that conclusion in: they fail if a future change adds a
 builtin whose name or description collides with an existing one, or collapses a
 cluster into a single tool that loses capability. ``test_tool_count_matches_baseline``
-(18 today: 14 audited + arxiv_search + 2 corpus + ocr_parser) documents the consolidation
+(19 today: 14 audited + arxiv_search + 2 corpus + ocr_parser + image_generator) documents the consolidation
 baseline; a legitimate new tool updates this number deliberately.
 """
 
@@ -57,8 +57,8 @@ class TestBuiltinConsolidation:
         assert len(descriptions) == len(set(descriptions))
 
     def test_tool_count_matches_baseline(self) -> None:
-        """The baseline is 18 distinct built-ins (14 audited + arxiv_search + 2 corpus tools + ocr_parser)."""
-        assert len(ALL_TOOL_DEFINITIONS) == 18
+        """The baseline is 19 distinct built-ins (14 audited + arxiv_search + 2 corpus tools + ocr_parser + image_generator)."""
+        assert len(ALL_TOOL_DEFINITIONS) == 19
 
     @pytest.mark.parametrize("definition", ALL_TOOL_DEFINITIONS)
     def test_each_definition_has_required_fields(self, definition: dict[str, Any]) -> None:

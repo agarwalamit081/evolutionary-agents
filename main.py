@@ -68,6 +68,19 @@ from src.runner import _create_gateway, execute_run
 @click.option("--until", "curve_until", default=None, help="With --capability-curve: window end (ISO date/datetime; date-only is end-of-day inclusive)")
 @click.option("--export", "curve_export", default=None, help="With --capability-curve: write JSON/CSV (.json/.csv by suffix) and exit")
 @click.option("--plot", "curve_plot", default=None, help="With --capability-curve: write a PNG of the battery trend (matplotlib optional)")
+@click.option(
+    "--retrieval-eval",
+    "run_retrieval_eval",
+    is_flag=True,
+    help="Measure memory recall quality (precision@k + MRR) over a seeded capability fixture (E1)",
+)
+@click.option(
+    "--retrieval-k",
+    "retrieval_k",
+    default=None,
+    type=int,
+    help="With --retrieval-eval: top-k cutoff for precision@k (default 3)",
+)
 def main(
     goal_text: str | None,
     interactive: bool,
@@ -87,6 +100,8 @@ def main(
     curve_until: str | None,
     curve_export: str | None,
     curve_plot: str | None,
+    run_retrieval_eval: bool,
+    retrieval_k: int | None,
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -115,6 +130,16 @@ def main(
                 plot=curve_plot,
             )
         )
+        return
+
+    # --retrieval-eval: measure memory recall quality (precision@k + MRR) over a
+    # seeded capability fixture — the measurement backbone for the recall pillar
+    # (findings-05). Seeds the fixture into warm memory, runs skill recall, and
+    # reports + persists metrics. No agent run, no LLM.
+    if run_retrieval_eval:
+        from src.eval.retrieval import DEFAULT_K
+
+        asyncio.run(_run_retrieval_eval(k=retrieval_k or DEFAULT_K))
         return
 
     # --resume: continue a prior run from its last checkpoint. The goal lives in
@@ -382,6 +407,94 @@ async def _run_capability_curve(
             click.echo(f"\nExported PNG → {plot}")
         else:
             click.echo("\nPNG skipped (matplotlib unavailable; install it or use --export .json/.csv).")
+
+
+async def _run_retrieval_eval(k: int) -> None:
+    """Measure memory recall quality (precision@k + MRR) over a seeded fixture (E1).
+
+    Seeds ``DEFAULT_FIXTURE`` into warm memory, runs skill recall per
+    ``DEFAULT_QUERIES``, and prints + persists the IR metrics. The fixture rows
+    are tagged ``retrieval-eval`` so they are identifiable in warm memory; re-runs
+    re-seed (duplicates are deduped at recall, so metrics stay sound). No agent
+    run, no LLM. Persistence is best-effort (EvalStore is observability-only).
+    """
+    from src.eval.retrieval import (
+        DEFAULT_FIXTURE,
+        DEFAULT_QUERIES,
+        memory_retriever,
+        run_retrieval_eval,
+        seed_fixture,
+    )
+    from src.runner import _async_create_memory_manager
+
+    settings = get_settings()
+    # Force the eval store on so the summary row persists (mirrors --eval).
+    settings.eval.eval_store_enabled = True
+
+    click.echo("=" * 60)
+    click.echo(f"🔍 Retrieval-quality eval — k={k} ({len(DEFAULT_QUERIES)} queries)")
+    click.echo("=" * 60)
+
+    memory = await _async_create_memory_manager(settings)
+    if memory is None:
+        click.echo(
+            "Memory unavailable (DB/Redis not wired). The metric engine is "
+            "unit-tested in tests/test_eval/test_retrieval.py; run against a "
+            "live stack to measure the real recall surface."
+        )
+        return
+
+    seeded = await seed_fixture(memory, DEFAULT_FIXTURE)
+    click.echo(f"Seeded {seeded}/{len(DEFAULT_FIXTURE)} fixture capabilities into warm memory.")
+    retriever = memory_retriever(memory, tier="skill", recall_limit=max(k, 10))
+    report = await run_retrieval_eval(DEFAULT_QUERIES, retriever, k)
+
+    click.echo(f"\n{'Query':<42} {'P@k':<8} {'RR':<8} {'Hit'}")
+    click.echo("-" * 60)
+    for q in report.queries:
+        click.echo(
+            f"{q.query[:42]:<42} {q.precision_at_k:<8.3f} "
+            f"{q.reciprocal_rank:<8.3f} {'yes' if q.hit else 'no'}"
+        )
+    click.echo("\n" + "-" * 60)
+    click.echo(
+        f"Mean precision@k={report.precision_at_k:.3f} | "
+        f"MRR={report.mrr:.3f} | hit_rate={report.hit_rate:.3f}"
+    )
+
+    # Best-effort persistence: encode the two metrics as eval_results check rows
+    # under goal_id "retrieval-eval" (distinct from the battery goals, so the
+    # capability curve is unperturbed). Non-fatal on any write error.
+    try:
+        from src.eval.models import CheckResult, CorrectnessResult
+        from src.eval.store import EvalStore
+
+        correctness = CorrectnessResult(
+            spec_id="retrieval-eval",
+            overall_score=report.mrr,
+            passed=report.mrr > 0.0,
+            checks=[
+                CheckResult(
+                    check_name="retrieval_precision_at_k",
+                    check_type="retrieval",
+                    passed=report.precision_at_k > 0.0,
+                    score=report.precision_at_k,
+                    evidence={"k": k, "n_queries": len(report.queries)},
+                ),
+                CheckResult(
+                    check_name="retrieval_mrr",
+                    check_type="retrieval",
+                    passed=report.mrr > 0.0,
+                    score=report.mrr,
+                    evidence={"hit_rate": report.hit_rate},
+                ),
+            ],
+        )
+        await EvalStore().record_correctness(
+            correctness, goal_id="retrieval-eval", run_id="retrieval-eval"
+        )
+    except Exception as exc:  # noqa: BLE001 — observability-only
+        logger.debug("Retrieval-eval metric persistence skipped: {}", exc)
 
 
 async def _stream_final_answer(

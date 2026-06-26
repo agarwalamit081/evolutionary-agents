@@ -34,6 +34,15 @@ _ZAI_LAYOUT_PARSING_URL = "https://api.z.ai/api/paas/v4/layout_parsing"
 # so a base64 payload never balloons an already-large file through the gateway.
 _MAX_INPUT_BYTES = 10_000_000
 _ALLOWED_EXT = frozenset({".png", ".jpg", ".jpeg", ".pdf"})
+# Z.AI layout_parsing needs a data-URI to detect an inline file's format — raw
+# base64 is rejected with HTTP 400 ("OCR only supports PDF, JPG, PNG, JPEG
+# formats"). Map each allowed extension to its MIME for the prefix.
+_MIME_BY_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".pdf": "application/pdf",
+}
 
 
 def _tool_limits():
@@ -56,8 +65,11 @@ def _resolve_file(file_path: str, sandbox_root: str) -> tuple[Path, str]:
     if target.stat().st_size > _MAX_INPUT_BYTES:
         raise ValueError(f"file too large ({target.stat().st_size} bytes, max {_MAX_INPUT_BYTES})")
     raw = target.read_bytes()
-    # Z.AI ``file`` accepts a URL or raw base64; use raw base64 for local inputs.
-    return target, base64.b64encode(raw).decode()
+    # Z.AI layout_parsing rejects raw base64 (HTTP 400 "OCR only supports PDF,
+    # JPG, PNG, JPEG formats") — it needs a data-URI to detect inline format.
+    mime = _MIME_BY_EXT.get(target.suffix.lower(), "application/octet-stream")
+    payload = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+    return target, payload
 
 
 async def ocr_parser(

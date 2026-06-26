@@ -147,6 +147,50 @@ class TestImageGeneratorHappyPath:
         # being a tmp dir that need not contain the literal "results").
         assert str(pngs[0]) in result
 
+    @pytest.mark.asyncio
+    async def test_unsupported_params_retry_strips_and_succeeds(
+        self, results_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """gpt-image-1 rejects ``response_format`` (UnsupportedParamsError).
+
+        The tool must strip the flagged param and retry once — gpt-image-1 returns
+        base64 by default, so the b64 happy path still fires. Regression for the
+        live-smoke wire bug (raw response_format hard-failed gpt-image-1).
+        """
+        png_bytes = b"\x89PNG\r\n\x1a\nretry-png"
+        resp = _Response([_Image(b64_json=base64.b64encode(png_bytes).decode())])
+        calls: list[dict[str, Any]] = []
+
+        # A stand-in exception whose type name is UnsupportedParamsError (litellm
+        # raises its own; we duck-type by name to avoid stub noise in the tool).
+        class _UnsupportedParamsError(Exception):
+            pass
+
+        _UnsupportedParamsError.__name__ = "UnsupportedParamsError"
+
+        async def _fake(**kwargs: Any) -> _Response:
+            calls.append(dict(kwargs))
+            if len(calls) == 1:
+                # litellm names the offending param in backticks.
+                raise _UnsupportedParamsError(
+                    "Setting `response_format` is not supported by openai, gpt-image-1"
+                )
+            return resp
+
+        monkeypatch.setattr(image_gen.litellm, "aimage_generation", _fake)
+
+        result = await image_generator("a red square")
+
+        assert result.startswith("Wrote generated image")
+        assert len(calls) == 2  # one failed, one retry
+        # First call carried response_format; the retry dropped it.
+        assert "response_format" in calls[0]
+        assert "response_format" not in calls[1]
+        # gpt-image-1 returns base64 by default → the PNG was still written.
+        pngs = list(results_root.glob("*.png"))
+        assert len(pngs) == 1
+        assert pngs[0].read_bytes() == png_bytes
+
 
 class TestImageGeneratorFilenameSafety:
     @pytest.mark.asyncio

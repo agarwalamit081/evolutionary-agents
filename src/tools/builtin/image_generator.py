@@ -19,6 +19,7 @@ second network hop and SSRF nuance.
 from __future__ import annotations
 
 import base64
+import re
 import secrets
 from pathlib import Path
 from typing import Any
@@ -102,11 +103,36 @@ async def image_generator(
     if tools.image_gen_api_base.strip():
         kwargs["api_base"] = tools.image_gen_api_base.strip()
 
+    response: Any = None
+    error_msg: str | None = None
     try:
         response = await litellm.aimage_generation(**kwargs)
-    except Exception as exc:  # noqa: BLE001 — sanitize every provider failure
-        logger.warning("image_generator call failed for model={}: {}", model, type(exc).__name__)
-        return f"ERROR: image generation failed ({type(exc).__name__})"
+    except Exception as exc:  # noqa: BLE001 — image models vary; handle + sanitize
+        # litellm raises ``UnsupportedParamsError`` when a model rejects a param
+        # it otherwise accepts (gpt-image-1 rejects ``response_format`` — though
+        # it returns base64 by default — while dall-e-3 accepts it). Duck-typed by
+        # name to sidestep litellm's unreliable type stubs; strip the flagged
+        # params (backtick-quoted in the message) and retry once before giving up.
+        if type(exc).__name__ == "UnsupportedParamsError":
+            bad = re.findall(r"`(\w+)`", str(exc))
+            if bad:
+                logger.info("image_generator retrying without {} for model={}", bad, model)
+                for param in bad:
+                    kwargs.pop(param, None)
+                try:
+                    response = await litellm.aimage_generation(**kwargs)
+                except Exception as exc2:  # noqa: BLE001 — sanitize every provider failure
+                    logger.warning("image_generator call failed for model={}: {}", model, type(exc2).__name__)
+                    error_msg = f"ERROR: image generation failed ({type(exc2).__name__})"
+            else:
+                logger.warning("image_generator unrecoverable UnsupportedParamsError model={}", model)
+                error_msg = "ERROR: image generation failed (UnsupportedParamsError)"
+        else:
+            logger.warning("image_generator call failed for model={}: {}", model, type(exc).__name__)
+            error_msg = f"ERROR: image generation failed ({type(exc).__name__})"
+    if error_msg is not None:
+        return error_msg
+    assert response is not None  # set on every non-error path above
 
     data = getattr(response, "data", None) or []
     if not data:

@@ -2,7 +2,7 @@
 
 Covers the safety guards (missing key, exactly-one-input, path traversal,
 missing file, unsupported extension) and the happy paths for both input
-shapes (sandboxed file_path → base64, public url → passthrough), plus the
+shapes (sandboxed file_path → data-URI, public url → passthrough), plus the
 HTTP-failure and payload-edge cases. No real network: httpx.AsyncClient is
 replaced with an in-test stand-in, and assert_public_host is stubbed for the
 url path. Uses tmp_path as an isolated sandbox root.
@@ -136,11 +136,14 @@ class TestOcrParserHappyPath:
         result = await ocr_parser(file_path="page.png")
 
         assert result == "# Heading\n\nOCR text"
-        # The file input was base64-encoded into the API body, not passed as-is.
+        # The file input is sent as a data-URI (Z.AI needs the MIME prefix to
+        # detect inline format; raw base64 is rejected with HTTP 400 — locked
+        # here after the live smoke caught the raw-base64 wire bug).
         import base64
 
+        expected_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\nfake-png-bytes").decode()
         assert captured["json"]["model"] == "glm-ocr"
-        assert captured["json"]["file"] == base64.b64encode(b"\x89PNG\r\n\x1a\nfake-png-bytes").decode()
+        assert captured["json"]["file"] == f"data:image/png;base64,{expected_b64}"
         assert captured["headers"]["Authorization"] == "Bearer test-zai-key"
         assert captured["url"] == ocr_mod._ZAI_LAYOUT_PARSING_URL
 

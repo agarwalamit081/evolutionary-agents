@@ -1013,6 +1013,16 @@ class AgentSettings(BaseSettings):
     # AGENT_SELECTION_*.
     agent_selection_enabled: bool = False
     agent_selection_top_k: int = 3
+    # F3 — destructive-tool human-in-the-loop gate. When on, the execute node
+    # routes any tool flagged ``destructiveHint=True`` (terminal_command,
+    # http_request, index_corpus) through a LangGraph ``interrupt()`` approval
+    # checkpoint before invoking it; approval resumes, rejection/no-human-blocks
+    # returns a blocked ToolResult (safe default — the tool does NOT run). Tools
+    # whose blast radius is already bounded (file_writer path-confined,
+    # code_executor sandboxed in the no-DinD runner) are intentionally NOT
+    # flagged destructive, so they never gate. Default off ⇒ no behavior change
+    # for any tool. Env: DESTRUCTIVE_TOOL_HITL_ENABLED.
+    destructive_tool_hitl_enabled: bool = False
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"

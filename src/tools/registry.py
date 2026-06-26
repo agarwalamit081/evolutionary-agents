@@ -26,6 +26,8 @@ class ToolRegistry:
         cacheable: bool = False,
         generated: bool = False,
         handler_code: str | None = None,
+        tags: list[str] | None = None,
+        mcp_hints: dict[str, bool] | None = None,
     ) -> None:
         """Register a tool in the registry.
 
@@ -51,6 +53,17 @@ class ToolRegistry:
             handler_code: The Python source the handler was materialized from.
                 Required when ``generated=True`` (the dispatch needs it to build
                 the sandboxed driver); ignored otherwise.
+            tags: Optional category tags (F3, findings-05) — coarse-grained
+                capability buckets (e.g. ``"read"``, ``"write"``, ``"search"``,
+                ``"compute"``, ``"network"``) for future scope-injection /
+                functional-dependency recall. In-memory only, like ``cacheable``/
+                ``generated`` (not persisted to ``tool_registrations``).
+            mcp_hints: Optional MCP-style annotations (F3): the four MCP boolean
+                hints ``readOnlyHint`` / ``destructiveHint`` / ``idempotentHint``
+                / ``openWorldHint``. When ``destructiveHint`` is True the execute
+                node routes the invocation through a human-in-the-loop gate
+                (``DESTRUCTIVE_TOOL_HITL_ENABLED``, default off). Unknown/omitted
+                keys are treated as False.
         """
         if name in self._tools:
             logger.warning(f"Tool '{name}' already registered, overwriting")
@@ -63,6 +76,8 @@ class ToolRegistry:
             "cacheable": cacheable,
             "generated": generated,
             "handler_code": handler_code if generated else None,
+            "tags": list(tags) if tags else [],
+            "mcp_hints": dict(mcp_hints) if mcp_hints else {},
         }
         logger.debug(f"Tool registered: {name}")
 
@@ -140,6 +155,31 @@ class ToolRegistry:
         if not tool or not tool.get("generated"):
             return None
         return tool.get("handler_code")
+
+    def get_tags(self, name: str) -> list[str]:
+        """Return a tool's category tags (F3); ``[]`` for unknown/untagged tools."""
+        tool = self._tools.get(name)
+        tags = tool.get("tags") if tool else None
+        return list(tags) if isinstance(tags, list) else []
+
+    def get_mcp_hints(self, name: str) -> dict[str, bool]:
+        """Return a tool's MCP hint map (F3); ``{}`` for unknown/un-annotated tools."""
+        tool = self._tools.get(name)
+        hints = tool.get("mcp_hints") if tool else None
+        return dict(hints) if isinstance(hints, dict) else {}
+
+    def is_destructive(self, name: str) -> bool:
+        """Return whether a tool is flagged destructive via MCP hint (F3).
+
+        ``destructiveHint=True`` marks a tool whose invocation has side effects
+        that cannot be undone (writes, shell exec, network mutations). The
+        execute node routes destructive tools through a human-in-the-loop gate
+        when ``DESTRUCTIVE_TOOL_HITL_ENABLED`` is on. Unknown tools and tools
+        without the hint return False (default safe — only explicitly-flagged
+        tools are gated).
+        """
+        tool = self._tools.get(name)
+        return bool(tool and tool.get("mcp_hints", {}).get("destructiveHint", False))
 
     def list_tools(self, names: list[str] | None = None) -> list[dict[str, Any]]:
         """List registered tools (without handlers, for LLM consumption).

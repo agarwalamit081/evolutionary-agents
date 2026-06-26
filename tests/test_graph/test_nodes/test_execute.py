@@ -691,7 +691,23 @@ class TestCodeExecutorWriteSatisfiesWriteStep:
                 # select_tools_for_query (findings-05) reads these off settings.agent.
                 tool_retrieval_enabled=False,
                 tool_retrieval_top_k=8,
-            )
+                # F3: _execute_tool_call reads the destructive-HITL knob off
+                # settings.agent — SimpleNamespace does NOT auto-vivify missing
+                # attributes (unlike MagicMock), so every read site must be
+                # listed here or the gate's access raises AttributeError.
+                destructive_tool_hitl_enabled=False,
+            ),
+            # execute dispatches EVERY tool call through sandbox_dispatch
+            # (``invoke_generated_tool``), which reads
+            # ``settings.tool_sandbox.code_executor_mode``. The dev default
+            # ``subprocess`` is NOT a sandboxed mode, so it returns None and
+            # the in-process mock handler runs — without this the dispatch
+            # raises AttributeError and the whole turn collapses into the
+            # simulated fallback (masking the nudge-loop behavior under test).
+            tool_sandbox=SimpleNamespace(
+                code_executor_mode="subprocess",
+                code_executor_sandbox_timeout=30,
+            ),
         )
 
     @pytest.mark.asyncio

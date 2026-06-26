@@ -855,6 +855,46 @@ async def _execute_tool_call(
             error=f"Invalid arguments for {tool_name}: {exc}",
         )
 
+    # F3 — destructive-tool HITL gate (opt-in via DESTRUCTIVE_TOOL_HITL_ENABLED).
+    # When the knob is on and the tool is flagged ``destructiveHint``
+    # (terminal_command / http_request / index_corpus), pause for human approval
+    # BEFORE invocation. A real compiled-graph ``interrupt()`` raises
+    # ``GraphInterrupt`` (a ``GraphBubbleUp``) which we deliberately do NOT
+    # catch — LangGraph catches it, checkpoints, and on resume re-invokes this
+    # call so the same ``interrupt()`` returns the approval payload. Outside a
+    # graph (headless worker with no resumer, or a direct unit call)
+    # ``interrupt()`` raises ``RuntimeError``, which we DO catch → the safe
+    # default is to BLOCK the destructive tool (an irreversible op never runs
+    # without explicit approval). Knob off ⇒ the whole gate is skipped.
+    from src.safety.pipeline import should_gate_destructive
+
+    if get_settings().agent.destructive_tool_hitl_enabled and should_gate_destructive(tool_name, tools):
+        try:
+            from langgraph.types import interrupt
+
+            decision = interrupt({
+                "type": "destructive_tool_approval",
+                "tool": tool_name,
+                "args": args,
+            })
+        except (ImportError, TypeError, RuntimeError):
+            decision = None  # no graph context / no resumer → blocked below
+
+        approved = (
+            bool(decision.get("approved", False))
+            if isinstance(decision, dict)
+            else bool(decision)
+        )
+        if not approved:
+            # A policy block is not a tool-execution failure — don't pollute
+            # tool_call_metrics (it feeds governance retirement + the E2 blend).
+            return ToolResult(
+                tool_name=tool_name,
+                success=False,
+                output="",
+                error=f"Destructive tool '{tool_name}' blocked by HITL gate (not approved).",
+            )
+
     # Cache lookup — only for opt-in cacheable tools.
     if cache is not None and tools.is_cacheable(tool_name):
         cached = await cache.get(tool_name, args)

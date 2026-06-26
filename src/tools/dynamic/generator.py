@@ -234,6 +234,10 @@ class ToolGenerator:
             parameters=tool.input_schema,
             generated=True,
             handler_code=tool.handler_code,
+            # F3 — tag as a runtime-generated tool (distinct from hand-written
+            # builtins) for scope-injection / recall. Generated tools are never
+            # flagged destructive (they run through the sandbox already).
+            tags=["generated"],
         )
 
         self._tools_created += 1

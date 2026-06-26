@@ -48,6 +48,42 @@ ALL_TOOL_DEFINITIONS = [
     WEB_SEARCH_DEF,
 ]
 
+#: Coarse-grained capability tags (F3, findings-05) for scope-injection /
+#: functional-dependency recall, plus MCP-style annotations. Keys are the four
+#: MCP boolean hints — ``readOnlyHint`` / ``destructiveHint`` / ``idempotentHint``
+#: / ``openWorldHint`` (omitted ⇒ False). The execute node routes any tool with
+#: ``destructiveHint=True`` through a HITL gate (``DESTRUCTIVE_TOOL_HITL_ENABLED``,
+#: default off). Annotations are applied by ``create_default_registry`` as a
+#: fallback when a tool definition carries none of its own, so this stays a
+#: single source of truth rather than 16 per-file edits.
+#:
+#: Destructive (gated): ``index_corpus`` (writes the corpus index), ``http_request``
+#: (arbitrary network mutation), ``terminal_command`` (shell exec). ``file_writer``
+#: and ``code_executor`` are intentionally NOT flagged destructive: the former is
+#: path-confined + size-limited under ``RESULTS_PER_RUN_SUBDIR``, the latter runs
+#: in the no-DinD runner sandbox — both already have their blast radius bounded,
+#: so flagging them would gate safe compute behind a human prompt.
+TOOL_ANNOTATIONS: dict[str, dict[str, object]] = {
+    "arxiv_search": {"tags": ["search", "read"], "mcp_hints": {"readOnlyHint": True, "openWorldHint": True}},
+    "code_executor": {"tags": ["compute"], "mcp_hints": {"openWorldHint": True}},
+    "code_validator": {"tags": ["compute", "read"], "mcp_hints": {"readOnlyHint": True}},
+    "corpus_search": {"tags": ["search", "read"], "mcp_hints": {"readOnlyHint": True}},
+    "document_parser": {"tags": ["read", "compute"], "mcp_hints": {"readOnlyHint": True}},
+    "environment_inspect": {"tags": ["read", "system"], "mcp_hints": {"readOnlyHint": True}},
+    "file_reader": {"tags": ["read", "filesystem"], "mcp_hints": {"readOnlyHint": True}},
+    "file_writer": {"tags": ["write", "filesystem"], "mcp_hints": {}},
+    "get_current_time": {"tags": ["read", "system"], "mcp_hints": {"readOnlyHint": True, "idempotentHint": True}},
+    "http_request": {"tags": ["network"], "mcp_hints": {"destructiveHint": True, "openWorldHint": True}},
+    "index_corpus": {"tags": ["search", "write"], "mcp_hints": {"destructiveHint": True}},
+    "list_directory": {"tags": ["read", "filesystem"], "mcp_hints": {"readOnlyHint": True}},
+    "memory_search": {"tags": ["read", "memory"], "mcp_hints": {"readOnlyHint": True}},
+    "self_inspect": {"tags": ["read", "system"], "mcp_hints": {"readOnlyHint": True}},
+    "terminal_command": {"tags": ["system", "write"], "mcp_hints": {"destructiveHint": True, "openWorldHint": True}},
+    "web_scraper": {"tags": ["search", "read"], "mcp_hints": {"readOnlyHint": True, "openWorldHint": True}},
+    "web_search": {"tags": ["search", "read"], "mcp_hints": {"readOnlyHint": True, "openWorldHint": True}},
+}
+
 __all__ = [
     "ALL_TOOL_DEFINITIONS",
+    "TOOL_ANNOTATIONS",
 ]

@@ -41,6 +41,26 @@ _CODE_MUTATIONS: frozenset[MutationType] = frozenset({
 })
 
 
+def should_gate_destructive(tool_name: str, registry: Any) -> bool:
+    """Decide whether ``tool_name``'s invocation routes through the HITL gate (F3).
+
+    A tool gates when its MCP ``destructiveHint`` is True. The registry is
+    duck-typed (``is_destructive(name) -> bool``) so this module does NOT import
+    ``src.tools`` — avoiding a safety→tools import cycle. This helper only
+    answers "is this tool destructive"; the execute node combines it with the
+    ``DESTRUCTIVE_TOOL_HITL_ENABLED`` opt-in knob to decide whether to actually
+    interrupt. Any error (unknown tool, missing method, ``registry is None``)
+    returns False — the safe default is to RUN the tool (HITL is opt-in, and
+    mis-annotation must never block a legitimate invocation indefinitely).
+    """
+    if registry is None:
+        return False
+    try:
+        return bool(registry.is_destructive(tool_name))
+    except Exception:
+        return False
+
+
 class SafetyPipeline:
     """7-layer sequential safety gate for evolution mutations.
 

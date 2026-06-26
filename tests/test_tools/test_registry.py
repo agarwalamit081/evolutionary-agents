@@ -98,3 +98,65 @@ class TestCreateDefaultRegistry:
         assert "document_parser" in names
         assert "http_request" in names
         assert "terminal_command" in names
+
+
+# ─── F3: tags / MCP hints / destructive accessors ────────────────────
+
+
+class TestToolAnnotations:
+    """F3 — category tags + MCP hints + destructive accessor behavior."""
+
+    def test_get_tags_and_hints_round_trip(self) -> None:
+        """Registered tags/hints are returned verbatim by the accessors."""
+        registry = ToolRegistry()
+        registry.register(
+            name="my_tool",
+            handler=_dummy_handler,
+            tags=["read", "network"],
+            mcp_hints={"readOnlyHint": True, "openWorldHint": True},
+        )
+        assert registry.get_tags("my_tool") == ["read", "network"]
+        assert registry.get_mcp_hints("my_tool") == {
+            "readOnlyHint": True,
+            "openWorldHint": True,
+        }
+        assert registry.is_destructive("my_tool") is False
+
+    def test_destructive_flag_from_hint(self) -> None:
+        """is_destructive reflects the destructiveHint MCP annotation."""
+        registry = ToolRegistry()
+        registry.register(
+            name="rmrf",
+            handler=_dummy_handler,
+            mcp_hints={"destructiveHint": True, "openWorldHint": True},
+        )
+        assert registry.is_destructive("rmrf") is True
+
+    def test_unknown_tool_accessors_are_safe_defaults(self) -> None:
+        """Unknown / un-annotated tools return empty tags + hints + non-destructive."""
+        registry = ToolRegistry()
+        registry.register(name="plain", handler=_dummy_handler)
+        assert registry.get_tags("plain") == []
+        assert registry.get_mcp_hints("plain") == {}
+        assert registry.is_destructive("plain") is False
+        # And for a name that isn't registered at all:
+        assert registry.get_tags("nope") == []
+        assert registry.get_mcp_hints("nope") == {}
+        assert registry.is_destructive("nope") is False
+
+    def test_create_default_registry_applies_annotations(self) -> None:
+        """The central TOOL_ANNOTATIONS map is threaded into the default registry."""
+        registry = create_default_registry()
+        # terminal_command is flagged destructive in the central map.
+        assert registry.is_destructive("terminal_command") is True
+        assert registry.is_destructive("http_request") is True
+        assert registry.is_destructive("index_corpus") is True
+        # file_writer is path-confined and intentionally NOT destructive.
+        assert registry.is_destructive("file_writer") is False
+        assert registry.is_destructive("code_executor") is False
+        # Tags are populated from the map.
+        assert "search" in registry.get_tags("web_search")
+        assert "read" in registry.get_tags("file_reader")
+        assert "write" in registry.get_tags("file_writer")
+        # Read-only hint present on a pure read tool.
+        assert registry.get_mcp_hints("file_reader").get("readOnlyHint") is True

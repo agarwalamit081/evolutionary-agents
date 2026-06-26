@@ -1023,6 +1023,13 @@ class AgentSettings(BaseSettings):
     # flagged destructive, so they never gate. Default off ⇒ no behavior change
     # for any tool. Env: DESTRUCTIVE_TOOL_HITL_ENABLED.
     destructive_tool_hitl_enabled: bool = False
+    # D2: opt-in gateway multimodal/vision. When on, a caller may pass ``images``
+    # to ``LLMGateway.acompletion``; the gateway folds them into the last user
+    # message as OpenAI-format content blocks (text + image_url) and restricts
+    # the fallback chain to image-capable models (ModelSpec.supports_images).
+    # Default off ⇒ behavior is byte-identical to text-only (no message
+    # mutation, no chain filtering). Env: VISION_ENABLED.
+    vision_enabled: bool = False
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"

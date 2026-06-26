@@ -1193,3 +1193,239 @@ class TestConfigureLitellm:
 
         assert mock_litellm.success_callback == ["langsmith"]
         assert mock_litellm.failure_callback == ["langsmith"]
+
+
+# ─── Test D2: multimodal/vision ──────────────────────────────────────
+
+
+class TestGatewayVision:
+    """Tests for the opt-in gateway vision path (D2).
+
+    Default-off ⇒ every call is byte-identical to text-only. With
+    ``AgentSettings.vision_enabled`` on, an ``images=`` payload is folded into
+    the last user message as OpenAI content blocks and the fallback chain is
+    restricted to image-capable models (``ModelSpec.supports_images``).
+    """
+
+    def test_build_content_blocks_returns_str_when_no_images(self) -> None:
+        """No usable images ⇒ the plain text is returned unchanged (identity)."""
+        from src.llm.gateway import build_content_blocks
+
+        assert build_content_blocks("Hello", None) == "Hello"
+        assert build_content_blocks("Hello", []) == "Hello"
+
+    def test_build_content_blocks_returns_blocks_with_images(self) -> None:
+        """Images ⇒ a text block + one image_url block per usable image; falsy
+        / non-str entries are dropped."""
+        from src.llm.gateway import build_content_blocks
+
+        images: list[Any] = ["https://x/a.png", "", 5, "data:image/png;base64,AAA"]
+        out = build_content_blocks("Describe this", images)
+        assert isinstance(out, list)
+        assert out[0] == {"type": "text", "text": "Describe this"}
+        image_blocks = [b for b in out if b.get("type") == "image_url"]
+        assert len(image_blocks) == 2  # the empty string and the int were dropped
+        assert image_blocks[0] == {"type": "image_url", "image_url": {"url": "https://x/a.png"}}
+
+    def test_content_char_len_str(self) -> None:
+        """A plain string content contributes its length."""
+        from src.llm.gateway import _content_char_len
+
+        assert _content_char_len("abcd") == 4
+        assert _content_char_len("") == 0
+
+    def test_content_char_len_block_list(self) -> None:
+        """A multimodal block list: text blocks sum their text, each image_url
+        block contributes the flat per-image constant (not base64 length)."""
+        from src.llm.gateway import _IMAGE_FLAT_CHARS, _content_char_len
+
+        content = [
+            {"type": "text", "text": "ab"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 10_000}},
+            {"type": "image_url", "image_url": {"url": "https://x/b.png"}},
+        ]
+        # 2 text chars + 2 × flat per-image allowance (the huge data-URI is NOT
+        # counted by its encoded length — the bug this fixes).
+        assert _content_char_len(content) == 2 + 2 * _IMAGE_FLAT_CHARS
+
+    def test_content_char_len_non_str_non_list_is_zero(self) -> None:
+        """Non-str / non-list content (e.g. an int or None) contributes 0 and
+        never raises — the legacy text path stays safe."""
+        from src.llm.gateway import _content_char_len
+
+        assert _content_char_len(12345) == 0
+        assert _content_char_len(None) == 0
+
+    def test_estimate_tokens_tolerates_list_content(self) -> None:
+        """Regression: ``_estimate_tokens`` must not raise (or undercount) when a
+        message's ``content`` is a multimodal block list — the shape a vision
+        payload produces. Pre-fix, ``len(list)`` counted BLOCKS not chars."""
+        from src.llm.gateway import _IMAGE_FLAT_CHARS
+
+        text_len = 400
+        list_msgs = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "a" * text_len},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+                ],
+            }
+        ]
+        # Post-fix: text counted by char length (400) + the flat per-image
+        # allowance → (400 + 256)//4 = 164. Pre-fix ``len(list)`` counted BLOCKS
+        # (2) → 2//4 = 0 → max(1,0) = 1, severely undercounting a vision payload.
+        assert LLMGateway._estimate_tokens(list_msgs) == (text_len + _IMAGE_FLAT_CHARS) // 4
+        assert LLMGateway._estimate_tokens(list_msgs) > 1
+
+    def test_attach_images_to_last_user_attaches_and_does_not_mutate_original(self) -> None:
+        """Images fold into the LAST user message only; the caller's list and the
+        prior assistant turn are untouched."""
+        from src.llm.gateway import _attach_images_to_last_user
+
+        original = [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "describe this image"},
+        ]
+        result = _attach_images_to_last_user(original, ["https://x/a.png"])
+        # Original untouched (copy semantics).
+        assert original[-1]["content"] == "describe this image"
+        assert original is not result
+        # Only the last user message became multimodal.
+        assert isinstance(result[-1]["content"], list)
+        assert result[-1]["content"][0] == {"type": "text", "text": "describe this image"}
+        assert {"type": "image_url", "image_url": {"url": "https://x/a.png"}} in result[-1]["content"]
+        # Prior turns preserved verbatim.
+        assert result[0]["content"] == "first question"
+        assert result[1]["content"] == "answer"
+
+    def test_attach_images_with_no_user_message_drops_images(self) -> None:
+        """No user turn to attach to ⇒ fail safe (return a copy unchanged) rather
+        than fabricate a prompt."""
+        from src.llm.gateway import _attach_images_to_last_user
+
+        original = [{"role": "system", "content": "be helpful"}]
+        result = _attach_images_to_last_user(original, ["https://x/a.png"])
+        assert result == original
+        assert result is not original
+
+    @pytest.mark.asyncio
+    async def test_acompletion_vision_off_drops_images(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """Default-off (vision_enabled=False): an ``images=`` payload is ignored
+        and plain text content reaches the provider — byte-identical to a
+        text-only call."""
+        mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
+        assert gateway._settings.agent.vision_enabled is False
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model="gpt-4o-mini-2024-07-18",
+                images=["https://x/a.png"],
+            )
+
+        sent_content = mock_litellm.acompletion.call_args.kwargs["messages"][-1]["content"]
+        assert sent_content == "Hello world"  # images dropped; no block list
+
+    @pytest.mark.asyncio
+    async def test_acompletion_vision_on_builds_multimodal(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """Opt-in (vision_enabled=True): the image is folded into the last user
+        message as an image_url content block that reaches the provider."""
+        mock_resp = _make_litellm_response(content="a chart", input_tokens=3, output_tokens=2)
+        gateway._settings.agent.vision_enabled = True
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            result = await gateway.acompletion(
+                messages=simple_messages,
+                model="gpt-4o-mini-2024-07-18",
+                images=["https://x/a.png"],
+            )
+
+        sent_content = mock_litellm.acompletion.call_args.kwargs["messages"][-1]["content"]
+        assert isinstance(sent_content, list)
+        assert {"type": "text", "text": "Hello world"} in sent_content
+        assert {"type": "image_url", "image_url": {"url": "https://x/a.png"}} in sent_content
+        assert isinstance(result, LLMResponse)
+
+    @pytest.mark.asyncio
+    async def test_fallback_chain_unfiltered_without_require_vision(self, gateway: LLMGateway) -> None:
+        """Regression: without require_vision the chain is NOT pruned for vision
+        capability — a non-vision primary is still attempted first."""
+        mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
+        # Force the key-check to True so it cannot mask the vision filter.
+        gateway._model_router._has_provider_key = lambda _p: True  # type: ignore[method-assign]
+
+        with patch.dict(
+            "src.llm.gateway.FALLBACK_CHAINS",
+            {"text-only-fake-model": ["gpt-4o-mini-2024-07-18"]},
+        ), patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway._execute_with_fallback(
+                messages=[{"role": "user", "content": "hi"}],
+                model="text-only-fake-model",
+                require_vision=False,
+            )
+
+        # Non-vision primary attempted first (filter did not remove it).
+        assert mock_litellm.acompletion.call_args.kwargs["model"] == "text-only-fake-model"
+
+    @pytest.mark.asyncio
+    async def test_fallback_chain_filtered_to_vision_when_require_vision(self, gateway: LLMGateway) -> None:
+        """With require_vision the non-vision primary is skipped in favor of the
+        first vision-capable entry in the fallback chain
+        (gpt-4o-mini-2024-07-18 supports images in the registry)."""
+        mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
+        gateway._model_router._has_provider_key = lambda _p: True  # type: ignore[method-assign]
+
+        with patch.dict(
+            "src.llm.gateway.FALLBACK_CHAINS",
+            {"text-only-fake-model": ["gpt-4o-mini-2024-07-18"]},
+        ), patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway._execute_with_fallback(
+                messages=[{"role": "user", "content": "hi"}],
+                model="text-only-fake-model",
+                require_vision=True,
+            )
+
+        # Non-vision primary skipped; the vision-capable fallback was attempted.
+        assert mock_litellm.acompletion.call_args.kwargs["model"] == "gpt-4o-mini-2024-07-18"

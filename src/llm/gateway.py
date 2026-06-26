@@ -62,6 +62,101 @@ _TIER_ORDER: dict[ModelTier, int] = {
     ModelTier.MODERATE: 2,
 }
 
+# Multimodal (D2): flat per-image character allowance used when estimating
+# tokens for a vision payload. Image token cost depends on tiling/detail, NOT on
+# the (huge) base64 length of a data-URI, so a literal char count would blow up
+# the estimate and over-reserve the rate-limiter budget. 256 chars ≈ a small
+# reserve that keeps ``_estimate_tokens`` sane for image_url blocks.
+_IMAGE_FLAT_CHARS = 256
+
+
+def build_content_blocks(
+    text: str, images: list[str] | None
+) -> str | list[dict[str, Any]]:
+    """Build OpenAI-format message ``content`` for an optional image payload.
+
+    With no usable images this returns the plain ``text`` unchanged
+    (byte-identical to the text-only path), so non-vision calls are untouched.
+    With one or more images it returns the multimodal block list OpenAI/litellm
+    expect: a leading text block followed by an ``image_url`` block per image.
+
+    Args:
+        text: The textual prompt for the message.
+        images: Optional image references — ``https://``/``http://`` URLs or
+            ``data:image/...;base64,...`` data-URIs. Falsy or non-str entries
+            are dropped.
+
+    Returns:
+        The original ``str`` when there are no usable images, else a content
+        block list (text block + one ``image_url`` block per image).
+    """
+    usable = [img for img in (images or []) if isinstance(img, str) and img]
+    if not usable:
+        return text
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for img in usable:
+        blocks.append({"type": "image_url", "image_url": {"url": img}})
+    return blocks
+
+
+def _content_char_len(content: Any) -> int:
+    """Approximate character length of a message ``content`` field.
+
+    Tolerates the multimodal block-list shape (``[{"type":"text",...},
+    {"type":"image_url",...}]``) that text-only code assumed was always a
+    string. For a block list, text blocks contribute their ``text`` length and
+    each ``image_url`` block contributes a flat constant (see
+    ``_IMAGE_FLAT_CHARS``). Non-str / non-list content contributes 0, so this
+    never raises on the legacy text path.
+    """
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                total += len(block.get("text", "") or "")
+            elif btype == "image_url":
+                total += _IMAGE_FLAT_CHARS
+        return total
+    return 0
+
+
+def _attach_images_to_last_user(
+    messages: list[dict[str, Any]], images: list[str]
+) -> list[dict[str, Any]]:
+    """Return a new message list with ``images`` folded into the last user turn.
+
+    Only the caller's list is copied — the original is never mutated. The last
+    ``role == "user"`` message (searched from the end) gets its ``content``
+    rewritten to the multimodal block form via ``build_content_blocks``; any
+    existing list content is collapsed to text first so the image blocks append
+    cleanly. If no user message exists the images are dropped (a vision request
+    with no prompt is malformed — fail safe by ignoring rather than fabricating
+    a prompt).
+    """
+    result = list(messages)
+    for idx in range(len(result) - 1, -1, -1):
+        msg = result[idx]
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            text: Any = msg.get("content", "")
+            if isinstance(text, list):
+                text = "\n".join(
+                    str(b.get("text", ""))
+                    for b in text
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            elif not isinstance(text, str):
+                text = str(text)
+            new_msg = dict(msg)
+            new_msg["content"] = build_content_blocks(text, images)
+            result[idx] = new_msg
+            return result
+    return result
+
 
 class LLMGateway:
     """Unified LLM gateway with rate limiting, caching, fallbacks, and cost tracking.
@@ -184,6 +279,7 @@ class LLMGateway:
         reasoning_effort: str | None = None,
         response_schema: dict[str, Any] | None = None,
         timeout: float | None = None,
+        images: list[str] | None = None,
     ) -> LLMResponse:
         """Send a completion request with full resilience pipeline.
 
@@ -227,6 +323,18 @@ class LLMGateway:
 
         # Compress older messages to reduce token consumption
         messages = self._history_compressor.compress(messages)
+
+        # Multimodal (D2): when vision is enabled and the caller supplied images,
+        # fold them into the LAST user message as OpenAI-format content blocks
+        # (text + image_url) BEFORE the cache lookup so the image payload
+        # participates in the cache key, and flag the call so the fallback loop
+        # restricts the chain to image-capable models. Off (default) or no
+        # images ⇒ the messages list is untouched (byte-identical to the
+        # text-only path) and ``require_vision`` stays False.
+        require_vision = False
+        if images and self._settings.agent.vision_enabled:
+            messages = _attach_images_to_last_user(messages, images)
+            require_vision = True
 
         # Rate limiting moved into _retry_call (retry-aware, keyed on the ACTUAL
         # attempt provider) so a fallback onto a different provider is paced
@@ -296,6 +404,7 @@ class LLMGateway:
             thinking=thinking,
             reasoning_effort=reasoning_effort,
             timeout=timeout,
+            require_vision=require_vision,
         )
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
@@ -565,6 +674,7 @@ class LLMGateway:
         thinking: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
         timeout: float | None = None,
+        require_vision: bool = False,
     ) -> LLMResponse:
         """Execute an LLM call with automatic fallback on failure."""
         # Resolve the sentinel default once into a fresh local. A plain
@@ -573,6 +683,27 @@ class LLMGateway:
         # keeps the inferred float type throughout the function.
         resolved_temperature: float = self._resolve_temperature(temperature)
         fallback_chain = [model] + FALLBACK_CHAINS.get(model, [])
+
+        # Multimodal (D2): when a vision payload is attached, restrict the chain
+        # to image-capable models (``ModelSpec.supports_images``) so a text-only
+        # fallback never silently drops the images. Fail-safe: if the filter
+        # would empty the chain (every entry non-vision or unknown), keep the
+        # original chain unchanged — a degraded text attempt is preferable to
+        # raising immediately (the provider may still tolerate the block).
+        if require_vision:
+            vision_chain = [
+                m
+                for m in fallback_chain
+                if MODEL_REGISTRY.get(m) is not None
+                and MODEL_REGISTRY[m].supports_images
+            ]
+            if vision_chain:
+                fallback_chain = vision_chain
+            else:
+                logger.warning(
+                    f"No vision-capable model in fallback chain for {model}; "
+                    f"attempting original chain (provider may drop the images)"
+                )
 
         # Pre-filter: skip providers without API keys to reduce log noise.
         # If ALL providers lack keys (e.g., test env), fall back to trying all.
@@ -1067,10 +1198,17 @@ class LLMGateway:
 
     @staticmethod
     def _estimate_tokens(messages: list[dict[str, Any]] | str) -> int:
-        """Rough token estimation: ~4 chars per token."""
+        """Rough token estimation: ~4 chars per token.
+
+        Content-tolerant: uses ``_content_char_len`` so a multimodal
+        (block-list) ``content`` field — the shape a vision payload produces —
+        is counted instead of raising on ``len(list)``.
+        """
         if isinstance(messages, str):
             return max(1, len(messages) // 4)
-        total_chars = sum(len(m.get("content", "")) for m in messages if isinstance(m, dict))
+        total_chars = sum(
+            _content_char_len(m.get("content", "")) for m in messages if isinstance(m, dict)
+        )
         return max(1, total_chars // 4)
 
     def _configure_litellm(self) -> None:

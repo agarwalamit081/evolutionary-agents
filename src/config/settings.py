@@ -1873,6 +1873,55 @@ class OptimizerSettings(BaseSettings):
 # ─── Root Settings ──────────────────────────────────────────────────
 
 
+class AgentCronSettings(BaseSettings):
+    """Agent-settable durable cron (Phase 5 I1).
+
+    Lets the agent schedule its OWN future work via the
+    ``create_scheduled_task`` builtin: a durable ``scheduled_tasks`` row the
+    scheduler consumer (``src.scheduler.cron_consumer``) fires into the
+    ``turing:runs`` stream on a cron. Default-off — the tool rejects writes and
+    the consumer registers nothing until ``AGENT_CRON_ENABLED`` is set, so a
+    host run is byte-identical to pre-I1 behavior (mirrors the battery /
+    curve-gate / optimizer opt-in convention).
+
+    The cap is the cron-abuse guard: an agent that loops creating tasks can
+    never exceed ``max_tasks`` enabled rows. The goal-size bound keeps the
+    stored row + the enqueued ``RunJob.goal`` bounded.
+    """
+
+    # Master opt-in. Default False so the tool no-ops and the daemon registers
+    # nothing on a clean host run. Env: AGENT_CRON_ENABLED.
+    enabled: bool = False  # Env: AGENT_CRON_ENABLED
+    # Hard cap on the number of ENABLED scheduled_tasks rows. A defensive bound
+    # against an agent that loops creating tasks (the cron-abuse guard). A
+    # re-call with an existing name UPSERTs (does not consume a new slot), so
+    # this bounds DISTINCT enabled tasks, not call count. Env: AGENT_CRON_MAX_TASKS.
+    max_tasks: int = 25  # Env: AGENT_CRON_MAX_TASKS
+    # Max goal length (chars) the tool accepts — bounds the stored row + the
+    # enqueued RunJob.goal. Env: AGENT_CRON_MAX_GOAL_CHARS.
+    max_goal_chars: int = 2000  # Env: AGENT_CRON_MAX_GOAL_CHARS
+    # How often (seconds) the consumer reconciles scheduled_tasks rows ↔
+    # APScheduler jobs (adds new, drops disabled/deleted, refreshes edits). A
+    # short interval keeps agent-authored edits responsive; the per-task fire
+    # is still gated by the task's own cron. Env: AGENT_CRON_SYNC_INTERVAL_S.
+    sync_interval_s: int = 60  # Env: AGENT_CRON_SYNC_INTERVAL_S
+    # Timezone for the reconcile IntervalTrigger + the daemon. (Per-task cron
+    # triggers read each row's own ``timezone`` column, defaulting to UTC.) Mirrors
+    # the ``timezone`` field on every other scheduler-adjacent settings class.
+    # Env: AGENT_CRON_TIMEZONE.
+    timezone: str = "UTC"  # Env: AGENT_CRON_TIMEZONE
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps AGENT_CRON_* vars to these fields, mirroring the
+        # Scheduler/Worker pattern (a missing prefix silently ignores vars).
+        env_prefix="agent_cron_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class Settings(BaseSettings):
     """Root settings class that composes all settings groups."""
 
@@ -1905,6 +1954,7 @@ class Settings(BaseSettings):
     capability_curve: CapabilityCurveSettings = CapabilityCurveSettings()  # type: ignore[assignment]
     governance_prune: GovernancePruneSettings = GovernancePruneSettings()  # type: ignore[assignment]
     optimizer: OptimizerSettings = OptimizerSettings()  # type: ignore[assignment]
+    agent_cron: AgentCronSettings = AgentCronSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

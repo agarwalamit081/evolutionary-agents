@@ -180,9 +180,9 @@ class TestToolDefinitions:
         for tool_def in ALL_TOOL_DEFINITIONS:
             assert callable(tool_def["handler"]), f"Handler not callable for {tool_def['name']}"
 
-    def test_nineteen_tools_registered(self) -> None:
-        """Exactly 19 built-in tools are registered (14 audited + arxiv_search + 2 corpus tools + ocr_parser + image_generator)."""
-        assert len(ALL_TOOL_DEFINITIONS) == 19
+    def test_twenty_tools_registered(self) -> None:
+        """Exactly 20 built-in tools are registered (14 audited + arxiv_search + 2 corpus tools + ocr_parser + image_generator + create_scheduled_task)."""
+        assert len(ALL_TOOL_DEFINITIONS) == 20
 
 
 class TestCodeExecutorCWD:

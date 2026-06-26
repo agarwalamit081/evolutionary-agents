@@ -125,6 +125,31 @@ async def _run() -> int:
             f"tz={optimizer_settings.timezone} url={optimizer_settings.optimizer_url}"
         )
 
+    # Phase 5 I1: agent-settable durable cron. The agent authors future runs into
+    # ``scheduled_tasks`` via the ``create_scheduled_task`` builtin; this consumer
+    # reconciles those rows onto this scheduler (per-task CronTrigger jobs) and
+    # enqueues a RunJob through the SAME RunsQueue on each tick. Opt-in
+    # (AGENT_CRON_ENABLED, default off). The periodic sync job + an immediate
+    # reconcile arm pre-existing + mid-flight tasks without a daemon restart.
+    agent_cron_settings = settings.agent_cron
+    if agent_cron_settings.enabled:
+        from src.scheduler.cron_consumer import (  # noqa: PLC0415
+            AgentCronEnqueuer,
+            make_agent_cron_sync_job,
+        )
+
+        cron_enqueuer = AgentCronEnqueuer(queue, agent_cron_settings)
+        make_agent_cron_sync_job(scheduler, cron_enqueuer, agent_cron_settings)
+        # Reconcile once immediately so existing tasks fire without waiting for
+        # the first sync-interval tick (added before start() — APScheduler
+        # schedules them when .start() runs).
+        registered = await cron_enqueuer.reconcile(scheduler)
+        logger.info(
+            f"Agent-cron consumer registered — sync_interval_s="
+            f"{agent_cron_settings.sync_interval_s} tz={agent_cron_settings.timezone} "
+            f"tasks_armed={registered} → stream={settings.worker.runs_stream}"
+        )
+
     stop_event = asyncio.Event()
 
     def _request_stop(*_: object) -> None:

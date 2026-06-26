@@ -1056,3 +1056,62 @@ class EvalResult(Base):
         # attempt of a run without scanning every row.
         Index("idx_eval_results_attempt", "run_id", "attempt_id", "created_at"),
     )
+
+
+class ScheduledTask(Base):
+    """An agent-authored durable cron task (Phase 5 I1).
+
+    One row = one future run the agent asked to fire on a cron schedule via the
+    ``create_scheduled_task`` builtin. The scheduler consumer
+    (``src.scheduler.cron_consumer``) polls this table, registers/refreshes an
+    APScheduler ``CronTrigger`` job per enabled row, and on each fire enqueues a
+    ``RunJob`` through the SAME ``RunsQueue.enqueue`` seam the API/battery use —
+    so the run goes through the real deployed worker stack (lease-lock,
+    checkpoint, eval-resolution all apply unchanged). The table is the durable
+    substrate; APScheduler is the in-memory trigger.
+
+    ``name`` is the agent's stable handle: re-calling the tool with the same
+    name UPSERTs (updates cron/goal/model) instead of duplicating, so an agent
+    can revise its own schedule without accumulating stale rows. The unique
+    index backs that upsert. ``owner_run_id`` is provenance (the run that
+    authored the task), read from the ``_active_run_id`` contextvar when bound.
+    """
+
+    __tablename__ = "scheduled_tasks"
+
+    id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # 5-field crontab, validated by CronTrigger.from_crontab at creation time.
+    cron: Mapped[str] = mapped_column(Text, nullable=False)
+    # The goal the fired run will accomplish (the enqueued RunJob.goal).
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    # Optional pinned model (registry key / litellm id). NULL → tiered default.
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Provenance: the run that authored this task (None for operator/manual rows).
+    owner_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Whether the consumer should register/fire it. Disabled rows persist as history.
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # IANA zone for the cron (CronTrigger.from_crontab takes a timezone).
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC")
+    # Informational next fire (UTC); APScheduler is authoritative. Refreshed by
+    # the consumer sync. Nullable so a freshly-inserted row (before first sync)
+    # is valid, and so a disabled row has no misleading future time.
+    next_fire_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+    # Indexes
+    __table_args__ = (
+        # The consumer's primary read: every enabled row, soonest-first.
+        Index("idx_scheduled_tasks_enabled", "enabled", "next_fire_at"),
+        # Provenance lookups ("which tasks did run X author?").
+        Index("idx_scheduled_tasks_owner", "owner_run_id"),
+        # The agent's stable handle — backs the upsert-by-name semantics.
+        UniqueConstraint("name", name="uq_scheduled_tasks_name"),
+    )

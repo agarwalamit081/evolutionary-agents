@@ -550,6 +550,62 @@ class ToolPersister:
         )
         return [m["tool_name"] for m in matches]
 
+    async def retrieve_tools_with_scores(
+        self,
+        query_embedding: list[float],
+        top_k: int = 8,
+    ) -> list[tuple[str, float]]:
+        """RECALL with similarities (E2): top-k ``(tool_name, cosine_similarity)``.
+
+        Same HNSW ranking as :meth:`retrieve_tools` but keeps the similarity so
+        the E2 score-blend can multiply ``cosine · f(success)`` before re-ranking.
+        ``threshold=0.0`` so every embedded tool is eligible. Best-effort:
+        ``[]`` on any DB error (the caller falls back to names-only / full set).
+        """
+        matches = await self.find_similar(
+            query_embedding, threshold=0.0, limit=top_k
+        )
+        return [(m["tool_name"], float(m["similarity"])) for m in matches]
+
+    async def tool_success_metrics(
+        self, names: list[str]
+    ) -> dict[str, dict[str, float]]:
+        """Running success aggregates for ``names`` (E2 blend signal).
+
+        Returns ``{name: {"success_rate", "empty_output_rate", "calls"}}`` for
+        the named generated tools, keyed by ``tool_name``. A name with no row
+        (or a DB error) is simply absent — the caller treats a missing name as a
+        cold-start tool (success_rate=1.0, empty_output_rate=0.0) so an untested
+        tool is never starved by the blend. Best-effort: ``{}`` on any DB error.
+        """
+        if not names:
+            return {}
+        try:
+            from sqlalchemy import select
+
+            from src.db.models import ToolRegistration
+            from src.db.session import get_session
+
+            metrics: dict[str, dict[str, float]] = {}
+            async with get_session() as session:
+                stmt = select(
+                    ToolRegistration.tool_name,
+                    ToolRegistration.success_rate,
+                    ToolRegistration.empty_output_rate,
+                    ToolRegistration.calls,
+                ).where(ToolRegistration.tool_name.in_(names))
+                result = await session.execute(stmt)
+                for name, sr, eor, calls in result.all():
+                    metrics[name] = {
+                        "success_rate": float(sr) if sr is not None else 1.0,
+                        "empty_output_rate": float(eor) if eor is not None else 0.0,
+                        "calls": float(calls) if calls is not None else 0.0,
+                    }
+            return metrics
+        except Exception as e:
+            logger.debug(f"tool_success_metrics failed: {e}")
+            return {}
+
     async def retire(self, names: list[str]) -> int:
         """Mark named generated tools ``is_active=False`` in the DB.
 

@@ -991,6 +991,16 @@ class AgentSettings(BaseSettings):
     # TOOL_RETRIEVAL_ENABLED, TOOL_RETRIEVAL_TOP_K.
     tool_retrieval_enabled: bool = False
     tool_retrieval_top_k: int = 8
+    # E2 — success-metric score-blend. When on, tool retrieval widens to a pool
+    # (top_k × ``tool_retrieval_blend_pool``) by cosine, then RE-RANKS by
+    # ``cosine · (1 + blend_weight · success_rate · (1 − empty_output_rate))``
+    # before taking the top_k — so a reliable, slightly-less-similar tool can
+    # outrank a flaky near-match. Defaults reproduce pure-cosine ranking until
+    # toggled on; untested tools (no metrics) default to success_rate=1.0 so a
+    # cold-start tool is never starved. Env: TOOL_RETRIEVAL_BLEND_*.
+    tool_retrieval_blend_success: bool = False
+    tool_retrieval_blend_pool: int = 2
+    tool_retrieval_blend_weight: float = 0.5
     context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"

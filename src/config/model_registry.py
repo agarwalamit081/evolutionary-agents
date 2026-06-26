@@ -77,7 +77,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_tool_calling=True,
         supports_json_mode=True,
         supports_streaming=True,
-        supports_images=True,
+        supports_images=False,  # DeepSeek V4 is text-only (live-probed 2026-06-26: provider drops image_url blocks)
         input_cost_per_1k=0.0001,
         output_cost_per_1k=0.0004,
     ),
@@ -90,7 +90,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_tool_calling=True,
         supports_json_mode=True,
         supports_streaming=True,
-        supports_images=True,
+        supports_images=False,  # DeepSeek V4 is text-only (live-probed 2026-06-26: provider drops image_url blocks)
         input_cost_per_1k=0.0005,
         output_cost_per_1k=0.002,
     ),
@@ -382,7 +382,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_tool_calling=True,
         supports_json_mode=True,
         supports_streaming=True,
-        supports_images=True,
+        supports_images=False,  # same text-only model as standalone deepseek-v4-flash
         # Mirrors the standalone deepseek-v4-flash pricing (same model).
         input_cost_per_1k=0.0001,
         output_cost_per_1k=0.0004,

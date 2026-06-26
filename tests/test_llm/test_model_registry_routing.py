@@ -92,3 +92,27 @@ def test_zai_models_carry_zai_prefix() -> None:
             f"{key}: zai model_id must carry the 'zai/' litellm prefix, "
             f"got {MODEL_REGISTRY[key].model_id!r}"
         )
+
+
+# DeepSeek V4 is text-only for vision INPUT. Live-probed 2026-06-26: both
+# deepseek-v4-flash and deepseek-v4-pro return "there is no image provided"
+# (in=24 tokens — the image_url block is dropped) when an image is fed via
+# chat completions. The registry previously over-declared supports_images=True,
+# which let the D2 vision path (require_vision fallback filter) attempt a
+# text-only model and silently lose the image. Locks the correction so a
+# maintainer does not "restore" the flag from a doc that implies vision.
+_DEEPSEEK_TEXT_ONLY_KEYS = (
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "alibaba-deepseek-v4-flash",  # same model, DashScope-hosted copy
+)
+
+
+@pytest.mark.parametrize("key", _DEEPSEEK_TEXT_ONLY_KEYS)
+def test_deepseek_v4_is_text_only(key: str) -> None:
+    """DeepSeek V4 (both variants) is text-only — must not declare vision INPUT."""
+    assert key in MODEL_REGISTRY, f"precondition: {key} in registry"
+    assert MODEL_REGISTRY[key].supports_images is False, (
+        f"{key}: DeepSeek V4 is text-only (live-probed 2026-06-26: drops image_url "
+        f"blocks); supports_images must be False or the vision path silently fails"
+    )

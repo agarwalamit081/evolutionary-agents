@@ -716,6 +716,137 @@ class TestAcompletion:
         assert seen_tc[1] is None  # dropped (fallback)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model_key",
+        [
+            "deepseek-v4-flash",
+            "alibaba-deepseek-v4-flash",
+            "nvidia-deepseek-v4-flash",
+        ],
+    )
+    async def test_proactive_thinking_disable_for_deepseek_variants(
+        self,
+        gateway: LLMGateway,
+        simple_messages: list[dict[str, Any]],
+        model_key: str,
+    ) -> None:
+        """P0 — deepseek-v4-flash ships with thinking ON; a FORCED tool_choice
+        makes the provider 400 "Thinking mode does not support this
+        tool_choice". The gateway must DISABLE thinking proactively on the
+        FIRST call (via extra_body) so no thinking tokens are burned on a
+        doomed reject→retry. Covers all three hostings (native,
+        alibaba/DashScope, nvidia free-tier) — they share the
+        ``deepseek-v4-flash`` registry substring. ``litellm.drop_params`` makes
+        the extra_body a harmless no-op for any hosting that ignores it.
+        """
+        mock_resp = _make_litellm_response(content="ok")
+        seen_eb: list[Any] = []
+        seen_calls = 0
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            nonlocal seen_calls
+            seen_calls += 1
+            seen_eb.append(kwargs.get("extra_body"))
+            return mock_resp
+
+        # Ensure the chosen primary is attempted (not pre-filtered for a missing
+        # test-env API key).
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            result = await gateway.acompletion(
+                messages=simple_messages,
+                model=model_key,
+                tool_choice={"type": "function", "function": {"name": "file_writer"}},
+            )
+
+        # Single call — proactive disable means no reject→retry burn.
+        assert seen_calls == 1
+        assert result.content == "ok"
+        # The very first call already disabled thinking.
+        assert seen_eb[0] == {"thinking": {"type": "disabled"}}
+
+    @pytest.mark.asyncio
+    async def test_no_proactive_disable_without_forced_tool_choice(
+        self,
+        gateway: LLMGateway,
+        simple_messages: list[dict[str, Any]],
+    ) -> None:
+        """With NO tool_choice set (the common discovery path — the execute
+        node only forces a tool_choice on write-nudges), the proactive
+        thinking-disable must NOT fire — deepseek may think freely when no
+        tool is being forced.
+        """
+        mock_resp = _make_litellm_response(content="ok")
+        seen_eb: list[Any] = []
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            seen_eb.append(kwargs.get("extra_body"))
+            return mock_resp
+
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model="deepseek-v4-flash",
+            )
+
+        # No thinking-disable injected when no tool_choice is forced.
+        assert seen_eb[0] is None
+
+    @pytest.mark.asyncio
+    async def test_no_proactive_disable_for_non_deepseek(
+        self,
+        gateway: LLMGateway,
+        simple_messages: list[dict[str, Any]],
+    ) -> None:
+        """A forced tool_choice on a NON-deepseek model must NOT get the
+        deepseek-specific thinking-disable injected.
+        """
+        mock_resp = _make_litellm_response(content="ok")
+        seen_eb: list[Any] = []
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            seen_eb.append(kwargs.get("extra_body"))
+            return mock_resp
+
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model="gpt-4.1-mini-2025-04-14",
+                tool_choice={"type": "function", "function": {"name": "file_writer"}},
+            )
+
+        assert seen_eb[0] is None
+
+    @pytest.mark.asyncio
     async def test_uses_complexity_routing_when_no_model(
         self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
     ) -> None:
@@ -845,6 +976,11 @@ class TestBudgetEnforcement:
         mock_tracker = MagicMock()
         mock_tracker.check_budget = AsyncMock(return_value=(False, "Daily budget exhausted"))
         gateway.set_cost_tracker(mock_tracker)
+        # Pin the DEFAULT path (budget_hard_stop=False) so an ambient
+        # BUDGET_HARD_STOP=true in .env cannot pre-empt the typed-raise branch
+        # below. The opt-in hard-stop alternative is covered by the sibling test
+        # ``test_budget_hard_stop_raises_even_when_cheaper_fallback_available``.
+        gateway._settings.budget.budget_hard_stop = False
 
         with pytest.raises(BudgetExhaustedError, match="Budget exhausted"):
             await gateway.acompletion(
@@ -888,6 +1024,10 @@ class TestBudgetEnforcement:
         mock_tracker.check_budget = AsyncMock(return_value=(False, "Daily budget exhausted"))
         mock_tracker.record_usage = AsyncMock(return_value=0.001)
         gateway.set_cost_tracker(mock_tracker)
+        # Pin the DEFAULT downgrade path (budget_hard_stop=False) so an ambient
+        # BUDGET_HARD_STOP=true in .env cannot flip this to a terminal raise
+        # (the opt-in hard-stop is covered by the sibling test).
+        gateway._settings.budget.budget_hard_stop = False
 
         mock_resp = _make_litellm_response(content="cheap answer")
 

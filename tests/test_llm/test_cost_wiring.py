@@ -117,6 +117,10 @@ async def test_real_tracker_budget_exhausted_triggers_model_downgrade() -> None:
     just logs."""
     settings = _make_settings()
     gateway = _make_gateway(settings)
+    # Pin the DEFAULT downgrade path (budget_hard_stop=False) so an ambient
+    # BUDGET_HARD_STOP=true in .env cannot flip this to the terminal-raise path
+    # (the opt-in hard-stop is covered by the sibling test in test_gateway.py).
+    gateway._settings.budget.budget_hard_stop = False
     # Daily spend just over the budget -> check_budget returns (False, ...).
     session = _mock_session(daily_spend=settings.budget.max_cost_usd + 1.0)
     response = _make_litellm_response(content="cheap answer")

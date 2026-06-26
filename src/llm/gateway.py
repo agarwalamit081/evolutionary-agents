@@ -624,6 +624,35 @@ class LLMGateway:
                     else:
                         kwargs[tk] = tv
 
+                # P0 — proactive DeepSeek thinking-disable. deepseek-v4-flash
+                # ships with thinking ON; a FORCED tool_choice (the write-nudge
+                # forcing a specific tool) makes the provider 400 with "Thinking
+                # mode does not support this tool_choice". The reactive handler
+                # below recovers, but only AFTER the first attempt already
+                # burned thinking tokens. Disable thinking pre-flight for any
+                # deepseek-v4-flash variant (native / alibaba-DashScope /
+                # nvidia) whenever a FORCED tool_choice is set and the caller
+                # did not explicitly request thinking. In this codebase the
+                # only tool_choice a caller ever sets is a forced dict
+                # (execute.py write-nudge), so "tool_choice present" ⟺ "forced".
+                # ``litellm.drop_params`` makes the extra_body a harmless no-op
+                # for any provider that ignores it, so this is safe across all
+                # three hostings.
+                if (
+                    kwargs.get("tool_choice")
+                    and "deepseek-v4-flash" in attempt_model
+                    and not kwargs.get("thinking")
+                    and "thinking" not in (kwargs.get("extra_body") or {})
+                ):
+                    kwargs["extra_body"] = {
+                        **(kwargs.get("extra_body") or {}),
+                        "thinking": {"type": "disabled"},
+                    }
+                    logger.debug(
+                        f"Proactively disabled thinking for {attempt_model} "
+                        f"(forced tool_choice pre-flight)"
+                    )
+
                 # Provider-native prompt caching (Anthropic cache_control).
                 # Opt-in; disabled → passthrough (same list object). Computed
                 # per-attempt because fallback may cross providers and
@@ -660,19 +689,26 @@ class LLMGateway:
                 # a *forced* tool_choice with a 400 "Thinking mode does not
                 # support this tool_choice". That is not a provider outage.
                 #
-                # Stage 1 — DeepSeek: the API supports disabling thinking via
+                # Stage 1 — DeepSeek (all 3 hostings: native deepseek-v4-flash,
+                # alibaba-deepseek-v4-flash / DashScope, nvidia-deepseek-v4-flash):
+                # the API supports disabling thinking via
                 # extra_body={"thinking":{"type":"disabled"}}. (litellm 1.83.14's
                 # native ``thinking=`` param only accepts "enabled" and silently
                 # drops "disabled", so extra_body is required.) With thinking
                 # disabled the model honors the forced tool_choice — strictly
                 # better than dropping tool_choice, which made deepseek narrate
                 # instead of calling the file tool (9 wasted write-nudges / q4).
-                # Verified empirically: extra_body path → tool_called=True.
+                # Verified empirically: extra_body path → tool_called=True. The
+                # proactive pre-flight above usually prevents this 400 entirely;
+                # this reactive stage remains as the belt-and-suspenders path
+                # (e.g. caller explicitly enabled thinking despite a forced
+                # tool_choice). Matched on the model substring so all three
+                # hostings share one path.
                 #
                 # Stage 2 — fallback for any other model/cause: drop tool_choice
                 # and rely on the execute-node write-nudge's system-prompt hint.
                 if tool_choice and "tool_choice" in str(exc).lower():
-                    if attempt_provider == "deepseek":
+                    if "deepseek-v4-flash" in attempt_model:
                         logger.warning(
                             f"{attempt_model} rejects forced tool_choice "
                             f"(thinking-mode); retrying same model with "

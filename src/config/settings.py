@@ -655,13 +655,20 @@ class BudgetSettings(BaseSettings):
 
     daily_token_budget: int = 500000
     # Per-run token cap (cumulative across the run_id — ``CostTracker`` sums
-    # ``cost_ledger.total_tokens``). Raised 100K→200K: a legitimately-large
-    # COMPLEX run (battery q07/q09-style multi-deliverable) routinely exceeds
-    # 100K of real work before converging, and the OLD 100K default pushed
-    # healthy runs into budget-downgrade prematurely. The downside-on-exhaust
-    # path (``gateway.py``) still engages at the cap; ``budget_hard_stop``
-    # below is the opt-in HARD-stop alternative. Env: PER_TASK_TOKEN_LIMIT.
-    per_task_token_limit: int = 200000
+    # ``cost_ledger.total_tokens``). Raised 200K→500K: a complex multi-deliverable
+    # run with recompute/verification probes (battery q07/q08/q09 / complex-arxiv
+    # style) routinely spends 250-300K of real work before converging. At the old
+    # 200-300K cap, such a run hit BudgetExhaustedError JUST after writing its
+    # deliverables (complex-arxiv-stats-4 died at 313K, ~22s after the last
+    # write); the gateway died mid-pass, and (pre-A2) the node-level ``except
+    # Exception`` degraded to heuristics that could never complete because the
+    # never-cleared ``errors`` accumulator (operator.add) kept the heuristic gate
+    # blocked — looping to the iteration cap. Now A2 makes a hard-stop terminate
+    # cleanly at the worker (BUDGET_EXHAUSTED, resumable), and 500K gives the
+    # LLM-path enough room to converge on a fresh attempt before the cap fires.
+    # The downgrade path (``gateway.py``) still engages when budget_hard_stop is
+    # OFF. Env: PER_TASK_TOKEN_LIMIT.
+    per_task_token_limit: int = 500000
     max_cost_usd: float = 10.0
     budget_warn_threshold: float = 0.70
     budget_critical_threshold: float = 0.90

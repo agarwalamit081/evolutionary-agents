@@ -11,6 +11,7 @@ from loguru import logger
 from src.graph.enums import GoalStatus, Phase, Strategy, TaskComplexity
 from src.graph.models import Goal, PlanStep
 from src.graph.state import AgentState, objective_goal_text
+from src.llm.exceptions import BudgetExhaustedError
 
 if TYPE_CHECKING:
     from src.graph.schemas import PlanQuality
@@ -385,6 +386,12 @@ async def _llm_plan(
 
         logger.info(f"LLM generated {len(steps)} plan steps")
         return steps
+    except BudgetExhaustedError:
+        # Terminal budget condition: don't degrade to heuristics — the cheapest
+        # tier is already exhausted, so there is no recovery this attempt.
+        # Re-raise so the worker's terminal handler (JobStatus.BUDGET_EXHAUSTED)
+        # stops the run cleanly and resumably instead of looping on heuristics.
+        raise
     except Exception as e:
         logger.debug(f"LLM planning failed, using heuristics: {e}")
         return None

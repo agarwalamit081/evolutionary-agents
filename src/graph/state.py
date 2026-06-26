@@ -42,6 +42,45 @@ def objective_goal_text(state: AgentState) -> str:
     return goal.text if goal is not None else ""
 
 
+_DELIVERABLE_ERROR_PREFIX = "verify: deliverable not present — "
+
+
+def current_blocking_errors(
+    errors: list[str] | None,
+    missing_deliverables: list[str] | None = None,
+) -> list[str]:
+    """Errors that should still gate completion, with stale entries resolved.
+
+    ``errors`` accumulates over a whole run via the ``operator.add`` reducer and
+    is never cleared, so a ``"verify: deliverable not present — {path}"`` entry
+    appended on an early pass (before the agent wrote the file) would otherwise
+    block completion forever — every later verify pass finds the file present,
+    but the stale entry keeps ``bool(errors)`` True (complex-arxiv-stats-4: the
+    run wrote all deliverables then looped to the iteration cap because the
+    heuristic gate could never clear ``no_errors``).
+
+    ``missing_deliverables`` is verify's fresh, last-write-wins view of what is
+    STILL absent (``state["missing_deliverables"]``, refreshed each pass). A
+    deliverable-error whose path is no longer missing has been resolved by a
+    later pass and is dropped; one whose path IS still missing is kept, as are
+    all non-deliverable (genuinely current) errors. Used by both the heuristic
+    verify gate and the heuristic reflect confidence assignment so the two read
+    the SAME current view instead of the ever-growing accumulator.
+    """
+    if not errors:
+        return []
+    still_missing = {str(p) for p in (missing_deliverables or [])}
+    resolved: list[str] = []
+    for err in errors:
+        if err.startswith(_DELIVERABLE_ERROR_PREFIX):
+            path = err[len(_DELIVERABLE_ERROR_PREFIX):]
+            if path not in still_missing:
+                # The deliverable this error flagged is now on disk → resolved.
+                continue
+        resolved.append(err)
+    return resolved
+
+
 class AgentState(TypedDict, total=False):
     """Main graph state for the task execution pipeline.
 

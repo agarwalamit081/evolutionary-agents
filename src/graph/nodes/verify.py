@@ -15,7 +15,8 @@ from loguru import logger
 from src.config.settings import get_settings
 from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.iteration_cap import effective_max_iterations
-from src.graph.state import AgentState, objective_goal_text
+from src.graph.state import AgentState, current_blocking_errors, objective_goal_text
+from src.llm.exceptions import BudgetExhaustedError
 from src.tools._paths import resolve_existing, results_root, strip_results_prefix
 
 if TYPE_CHECKING:
@@ -270,7 +271,12 @@ def _heuristic_verify(
     """Heuristic verification based on step completion, errors, and deliverables."""
     total_steps = len(plan_steps)
     completed_count = len(completed_steps)
-    has_errors = bool(errors)
+    # `errors` accumulates via operator.add and is never cleared, so a stale
+    # "deliverable not present" entry from an early pass (before the agent wrote
+    # the file) would otherwise block completion forever. Drop entries the fresh
+    # deliverable check has since resolved; keep genuinely-current errors.
+    blocking_errors = current_blocking_errors(errors, deliverable_problems)
+    has_errors = bool(blocking_errors)
 
     all_steps_done = step_index >= total_steps if total_steps > 0 else True
     no_errors = not has_errors
@@ -300,7 +306,7 @@ def _heuristic_verify(
         if not all_steps_done:
             reasons.append(f"steps remaining ({step_index}/{total_steps})")
         if has_errors:
-            reasons.append(f"{len(errors)} errors")
+            reasons.append(f"{len(blocking_errors)} errors")
         if not high_confidence:
             reasons.append(f"low confidence ({confidence.value})")
         if not deliverable_ok:
@@ -487,6 +493,12 @@ async def _llm_verify(
             "is_complete": is_complete,
             "final_output": output,
         }
+    except BudgetExhaustedError:
+        # Terminal budget condition: don't degrade to heuristics — the cheapest
+        # tier is already exhausted, so there is no recovery this attempt.
+        # Re-raise so the worker's terminal handler (JobStatus.BUDGET_EXHAUSTED)
+        # stops the run cleanly and resumably instead of looping on heuristics.
+        raise
     except Exception as e:
         logger.debug(f"LLM verification failed, using heuristics: {e}")
         return None

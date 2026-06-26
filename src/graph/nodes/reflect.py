@@ -9,7 +9,8 @@ from loguru import logger
 
 from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.models import ReflectionResult
-from src.graph.state import AgentState
+from src.graph.state import AgentState, current_blocking_errors
+from src.llm.exceptions import BudgetExhaustedError
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
@@ -159,7 +160,13 @@ def _heuristic_reflect(
     completed_count = len(completed_steps) if completed_steps else 0
     completion_ratio = completed_count / total_steps if total_steps > 0 else 0.0
 
-    has_errors = bool(errors)
+    # Mirror verify's gate: drop stale "deliverable not present" errors that a
+    # later pass resolved (state["missing_deliverables"] is verify's fresh view)
+    # so accumulated entries don't force LOW confidence on a run whose
+    # deliverables are now present. operator.add never clears `errors`, so
+    # without this a single early miss pins confidence at LOW forever.
+    blocking_errors = current_blocking_errors(errors, state.get("missing_deliverables"))
+    has_errors = bool(blocking_errors)
     if has_errors:
         confidence = Confidence.LOW
     elif completion_ratio >= 0.8:
@@ -497,6 +504,12 @@ async def _llm_reflect(
                 result["pending_agent_gaps"] = new_agent_gaps
 
         return result
+    except BudgetExhaustedError:
+        # Terminal budget condition: don't degrade to heuristics — the cheapest
+        # tier is already exhausted, so there is no recovery this attempt.
+        # Re-raise so the worker's terminal handler (JobStatus.BUDGET_EXHAUSTED)
+        # stops the run cleanly and resumably instead of looping on heuristics.
+        raise
     except Exception as e:
         logger.debug(f"LLM reflection failed, using heuristics: {e}")
         return None

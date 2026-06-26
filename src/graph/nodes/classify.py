@@ -16,6 +16,7 @@ from src.graph.enums import (
 )
 from src.graph.models import Goal
 from src.graph.state import AgentState
+from src.llm.exceptions import BudgetExhaustedError
 
 if TYPE_CHECKING:
     from src.llm.gateway import LLMGateway
@@ -230,6 +231,12 @@ async def _llm_classify(
         return await extractor.extract(
             response.content, TaskClassification, gateway=gateway, messages=messages
         )
+    except BudgetExhaustedError:
+        # Terminal budget condition: don't degrade to heuristics — the cheapest
+        # tier is already exhausted, so there is no recovery this attempt.
+        # Re-raise so the worker's terminal handler (JobStatus.BUDGET_EXHAUSTED)
+        # stops the run cleanly and resumably instead of looping on heuristics.
+        raise
     except Exception as e:
         logger.debug(f"LLM classification failed, using heuristics: {e}")
         return None

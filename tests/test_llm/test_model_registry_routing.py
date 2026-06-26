@@ -116,3 +116,31 @@ def test_deepseek_v4_is_text_only(key: str) -> None:
         f"{key}: DeepSeek V4 is text-only (live-probed 2026-06-26: drops image_url "
         f"blocks); supports_images must be False or the vision path silently fails"
     )
+
+
+# Live-probed 2026-06-26 batch (32x32 solid-red PNG sent as a data URI, temp=0).
+# Each of these over-declared supports_images=True, yet none actually processes an
+# image_url block over chat completions: OpenAI gpt-5-nano and classic qwen-turbo
+# drop the block (in≈25-32 tokens) and guess the color; MiniMax m2.5 / m2.5-highspeed
+# answer "there is no image provided"; Groq's llama-3.3-70b rejects multimodal
+# content outright ("messages[0].content must be a string"). The D2 vision path
+# (require_vision fallback filter) would otherwise hand a real image to one of
+# these and silently lose it, so the flag must stay False. Locks the prune so a
+# doc that implies vision does not re-introduce the silent-failure vector.
+_PRUNED_VISION_OVER_DECLARATION_KEYS = (
+    "gpt-5-nano-2025-08-07",
+    "minimax-m2.5",
+    "minimax-m2.5-highspeed",
+    "qwen-turbo",
+    "llama-3.3-70b-versatile",
+)
+
+
+@pytest.mark.parametrize("key", _PRUNED_VISION_OVER_DECLARATION_KEYS)
+def test_pruned_models_do_not_declare_vision_input(key: str) -> None:
+    """Live-probed text-only models must not declare vision INPUT support."""
+    assert key in MODEL_REGISTRY, f"precondition: {key} in registry"
+    assert MODEL_REGISTRY[key].supports_images is False, (
+        f"{key}: live-probed text-only (2026-06-26 vision batch — drops/rejects "
+        f"image_url); supports_images must be False or the vision path silently fails"
+    )

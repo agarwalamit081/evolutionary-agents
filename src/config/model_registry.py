@@ -130,7 +130,10 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_tool_calling=True,
         supports_json_mode=True,
         supports_streaming=True,
-        supports_images=True,
+        # Live-probed 2026-06-26: image_url block is dropped (in≈25 tokens, no
+        # image processing) and the model guesses the color ("pink"/"blue" at
+        # temp=0). Effectively text-only for vision INPUT despite doc claims.
+        supports_images=False,
         input_cost_per_1k=0.0001,
         output_cost_per_1k=0.0004,
     ),
@@ -197,7 +200,9 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_tool_calling=True,
         supports_json_mode=True,
         supports_streaming=True,
-        supports_images=True,
+        # Live-probed 2026-06-26: "there is no image provided" — MiniMax drops
+        # the image_url block (text-only for vision INPUT).
+        supports_images=False,
         input_cost_per_1k=0.0001,
         output_cost_per_1k=0.0002,
     ),
@@ -210,7 +215,9 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_tool_calling=True,
         supports_json_mode=True,
         supports_streaming=True,
-        supports_images=True,
+        # Live-probed 2026-06-26: "there is no image provided" — MiniMax drops
+        # the image_url block (text-only for vision INPUT).
+        supports_images=False,
         input_cost_per_1k=0.0005,
         output_cost_per_1k=0.001,
     ),
@@ -348,7 +355,9 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_tool_calling=True,
         supports_json_mode=True,
         supports_streaming=True,
-        supports_images=True,
+        # Live-probed 2026-06-26: classic qwen-turbo drops the image_url block
+        # (in≈32 tokens, no image processing) and guesses the color — text-only.
+        supports_images=False,
         # Approximate DashScope pricing (cost estimate only).
         input_cost_per_1k=0.0001,
         output_cost_per_1k=0.0002,
@@ -452,7 +461,9 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         supports_tool_calling=True,
         supports_json_mode=True,
         supports_streaming=True,
-        supports_images=True,
+        # Live-probed 2026-06-26: Groq rejects multimodal content outright
+        # ("messages[0].content must be a string") — Llama 3.3 70B is text-only.
+        supports_images=False,
         # Real Groq pricing (verified via litellm model_cost): $0.59/$0.79 per 1M.
         input_cost_per_1k=0.00059,
         output_cost_per_1k=0.00079,

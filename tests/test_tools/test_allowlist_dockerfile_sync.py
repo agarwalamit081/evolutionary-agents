@@ -56,6 +56,8 @@ _IMPORT_TO_DIST: dict[str, str] = {
     "fitz": "pymupdf",
     "tree_sitter": "tree-sitter",
     "tree_sitter_python": "tree-sitter-python",
+    # Phase 5 H1 — formal-verification SMT solver (import name z3 ← z3-solver dist).
+    "z3": "z3-solver",
 }
 
 

@@ -521,3 +521,98 @@ class TestBrowserPackagesStayBlocked:
     @pytest.mark.parametrize("import_name", ["playwright", "selenium"])
     def test_browser_pkg_not_pip_installable(self, import_name: str) -> None:
         assert import_name not in SAFE_PIP_PACKAGES
+
+
+class TestPhase5H1Allowlist:
+    """Phase 5 H1 (findings.md H1): formal-verification libs admitted.
+
+    ``hypothesis`` (property-based testing) and ``z3`` (SMT solver; import name
+    z3 ← z3-solver dist) let sandboxed generated code *verify* invariants
+    rather than only assert them — anti-fabrication / invariant-proving. Both
+    are pure-compute (no egress); z3-solver ships the compiled solver in its
+    wheel, so it needs no separate container (unlike a proof assistant such as
+    Lean 4, deliberately deferred in findings.md H1). Each is bound by BOTH
+    controls (import name in ALLOWED_MODULES, dist name in SAFE_PIP_PACKAGES)
+    and pre-imported by the materializer when installed.
+    """
+
+    # (import name, pip dist name) — z3's dist name differs; hypothesis shares.
+    NEW_PACKAGES: list[tuple[str, str]] = [
+        ("hypothesis", "hypothesis"),
+        ("z3", "z3-solver"),
+    ]
+
+    def test_each_new_import_name_is_allowed(self) -> None:
+        for import_name, _ in self.NEW_PACKAGES:
+            assert import_name in ALLOWED_MODULES, (
+                f"{import_name} missing from ALLOWED_MODULES"
+            )
+
+    def test_each_new_pip_dist_name_is_installable(self) -> None:
+        for _, dist_name in self.NEW_PACKAGES:
+            assert dist_name in SAFE_PIP_PACKAGES, (
+                f"{dist_name} missing from SAFE_PIP_PACKAGES"
+            )
+
+    def test_z3_dist_name_is_z3_solver(self) -> None:
+        """The import name ``z3`` ships under the z3-solver dist (not ``z3``)."""
+        assert "z3-solver" in SAFE_PIP_PACKAGES
+        # the bare ``z3`` dist name is NOT present (no shadow dup)
+        assert "z3" not in SAFE_PIP_PACKAGES
+
+    def test_no_duplicates_introduced(self) -> None:
+        new_imports = {name for name, _ in self.NEW_PACKAGES}
+        assert len(new_imports) == len(self.NEW_PACKAGES)
+        new_dists = {dist for _, dist in self.NEW_PACKAGES}
+        assert len(new_dists) == len(self.NEW_PACKAGES)
+
+    def test_new_packages_in_materializer_namespace_when_installed(self) -> None:
+        ns = get_materializer_namespace()
+        for import_name, _ in self.NEW_PACKAGES:
+            try:
+                importlib.import_module(import_name)
+            except ImportError:
+                # Not installed in this environment — namespace must omit it.
+                assert import_name not in ns, (
+                    f"{import_name} present in namespace but not importable"
+                )
+            else:
+                assert import_name in ns, (
+                    f"{import_name} installed but missing from materializer namespace"
+                )
+                assert hasattr(ns[import_name], "__name__"), (
+                    f"{import_name} namespace entry is not a module"
+                )
+
+    def test_still_excludes_dangerous_modules(self) -> None:
+        """The H1 expansion must not admit dangerous modules."""
+        for name in ("os", "sys", "subprocess", "socket", "shutil", "ctypes"):
+            assert name not in ALLOWED_MODULES
+
+
+class TestPhase5H1PackagesPassSafetyLayer4:
+    """Phase 5 H1: a generated tool importing each lib clears Layer-4."""
+
+    @pytest.mark.parametrize("import_name", ["hypothesis", "z3"])
+    def test_import_statement_passes_layer4(self, import_name: str) -> None:
+        from src.safety.pipeline import SafetyPipeline
+
+        pipeline = SafetyPipeline()
+        code = f"import {import_name}\n"
+        result = pipeline._check_imports(
+            code, allowlisted=set(ALLOWED_MODULES)
+        )
+        assert result["passed"] is True, result["issues"]
+        assert result["issues"] == []
+
+    @pytest.mark.parametrize("import_name", ["hypothesis", "z3"])
+    def test_from_import_statement_passes_layer4(self, import_name: str) -> None:
+        from src.safety.pipeline import SafetyPipeline
+
+        pipeline = SafetyPipeline()
+        code = f"from {import_name} import something\n"
+        result = pipeline._check_imports(
+            code, allowlisted=set(ALLOWED_MODULES)
+        )
+        assert result["passed"] is True, result["issues"]
+        assert result["issues"] == []

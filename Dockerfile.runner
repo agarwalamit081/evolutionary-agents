@@ -42,7 +42,8 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install \
     scipy scikit-learn openpyxl tabulate aiofiles trafilatura libcst \
     pymupdf pulp cvxpy tree-sitter tree-sitter-python arxiv \
     selectolax mdformat mistune matplotlib \
-    pyomo highspy
+    pyomo highspy \
+    hypothesis z3-solver
 
 # ONLY the self-contained server module (no intra-src imports → runs standalone,
 # keeping DB models / gateway / Settings-with-DB-URLs out of this no-creds image).

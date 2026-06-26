@@ -152,6 +152,15 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     # its import name.
     "matplotlib",
     "matplotlib.pyplot",
+    # ── Phase 5 H1 — formal verification (findings.md H1) ──
+    # ``hypothesis``: property-based testing (pure-Python; generates cases to
+    #   falsify invariants — anti-fabrication / invariant verification). ``z3`` ←
+    #   z3-solver dist: SMT solver ("prove this invariant / find a counterexample").
+    #   Both pure-compute, no egress; z3-solver ships the compiled solver in its
+    #   wheel. Lean 4 (a proof assistant) is deliberately deferred — it needs its
+    #   own container (findings.md H1), unlike these two pure-Python/wheel libs.
+    "hypothesis",
+    "z3",
 })
 
 # Packages that can be pip-installed in the sandbox.
@@ -223,6 +232,11 @@ SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     # ── Phase 3 D6 — dist name for matplotlib (shares its import name) ──
     # See the ALLOWED_MODULES Phase-3-D6 note for the Agg-backend rationale.
     "matplotlib",
+    # ── Phase 5 H1 — dist names for the formal-verification libs above ──
+    # hypothesis shares its import name; z3 ← z3-solver (SMT; compiled solver
+    # bundled in the wheel). See the ALLOWED_MODULES Phase-5-H1 note.
+    "hypothesis",
+    "z3-solver",
 })
 
 
@@ -317,6 +331,10 @@ def get_materializer_namespace() -> dict[str, Any]:
         "selectolax", "mdformat", "mistune",
         # Phase 3 D6: matplotlib (plotting); code_executor bootstrap sets Agg.
         "matplotlib",
+        # Phase 5 H1: formal verification — hypothesis (property-based testing)
+        # + z3 (SMT solver; import name z3 ← z3-solver dist).
+        "hypothesis",
+        "z3",
     ):
         try:
             mod = __import__(mod_name)

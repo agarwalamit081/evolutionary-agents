@@ -373,8 +373,13 @@ services:
     profiles: ["graph"]
     image: neo4j:5-community          # 5.x community (free); pin to neo4j:5.26 for reproducibility
     ports:
-      - "7474:7474"                   # HTTP browser UI (http://localhost:7474)
-      - "7687:7687"                   # Bolt — api/worker connect via bolt://neo4j:7687
+      # Host ports remapped (17474/17687): the host runs its own Neo4j on the
+      # default 7474/7687, which would clash. The api/worker containers connect
+      # via the INTERNAL turing-net hostname bolt://neo4j:7687 (container port
+      # 7687, unaffected by this host mapping); these host mappings only expose
+      # the browser UI / Bolt for host-side inspection.
+      - "17474:7474"                  # HTTP browser UI (http://localhost:17474)
+      - "17687:7687"                  # Bolt host-side mirror (api/worker use neo4j:7687)
     environment:
       # user/password the container bootstraps; set NEO4J_AUTH=neo4j/<password> in
       # .env and make the api/worker NEO4J_PASSWORD match <password>.
@@ -391,6 +396,19 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # neo4j's entrypoint runs as root, chowns its home + /data on EVERY boot,
+    # then drops to the neo4j user (7474) via gosu. The project-wide cap_drop:
+    # ALL strips CAP_CHOWN → every chown returns EPERM → exit 1 → restart loop
+    # (observed crash-loop on bring-up). Grant ONLY the caps the entrypoint
+    # needs (file-ownership + privilege drop). Stays least-privilege in spirit:
+    # neo4j owns NO run logic and carries NO DATABASE_URL/search/runner creds
+    # (env exposes only NEO4J_AUTH), so these caps let it manage its own files.
+    cap_add:
+      - CHOWN          # entrypoint chowns /var/lib/neo4j + /data on boot
+      - DAC_OVERRIDE   # bypass file perms while walking the tree to chown it
+      - FOWNER         # set ownership on files it doesn't currently own
+      - SETUID         # entrypoint drops root → neo4j user (7474) via gosu
+      - SETGID
     networks:
       - turing-net
     restart: unless-stopped

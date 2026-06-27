@@ -136,6 +136,91 @@ def _guard_open_def(guard_roots: tuple[str, ...]) -> str:
     )
 
 
+def _listing_relocation_shim() -> str:
+    """Run-subdir-only appendix: relocate directory LISTING calls the same way
+    ``_turing_open`` relocates reads.
+
+    The bootstrap patches ``builtins.open`` only, so an in-``code_executor``
+    script that discovers deliverables via ``glob.glob('results/*.csv')`` or
+    ``os.listdir('results')`` scanned the flat ``results/`` root (which holds
+    per-run SUBDIRS, not files) and found nothing — the agent is *told* to do
+    exactly this (the ``code_executor`` docstring recommends reading existing
+    deliverables as ``results/<file>``). This appendix rebinds
+    ``glob.glob``/``glob.iglob``/``os.listdir``/``os.scandir`` so a
+    results-prefixed (or root-name/``run_subdir``-prefixed) target resolves
+    subdir-first with a flat-root fallback — the SAME resolution as the open()
+    read-branch. Bare patterns/dirs with no ``results/`` prefix are left on the
+    real CWD (conservative: never relocates unrelated listings); a ``glob`` call
+    with ``root_dir=`` is passed through unchanged (the caller already scoped
+    the dir). Returns absolute paths (acceptable — ``open()`` handles absolute,
+    and the agent just needs to find the files).
+
+    Critical: unlike the open() read-branch's ``len(_pp) > 1`` strip guard
+    (which keeps at least the final filename), the dir-relocator strips a lone
+    leading marker so ``os.listdir('results')`` -> ``_rest=[]`` -> lists the run
+    subdir, not ``<sub>/results``. ``pathlib.Path.glob/iterdir/rglob`` remain a
+    documented edge (class-method patching is invasive; open()+glob+listdir
+    cover the common agent patterns).
+    """
+    return (
+        "import glob as _turing_glob_mod\n"
+        "_turing_glob_real = _turing_glob_mod.glob\n"
+        "_turing_glob_ireal = _turing_glob_mod.iglob\n"
+        "_turing_listdir_real = _turing_os.listdir\n"
+        "_turing_scandir_real = _turing_os.scandir\n"
+        "def _turing_relocate_dir(_p):\n"
+        "    _s = str(_p)\n"
+        "    if _turing_os.path.isabs(_s):\n"
+        "        return _p\n"
+        "    _pp = _turing_parts(_s)\n"
+        "    if not _pp or _pp[0].lower() not in _TURING_STRIP:\n"
+        "        return _p\n"
+        "    _rest = _pp[1:]\n"
+        "    _sub = _turing_os.path.abspath(_turing_os.path.join(_TURING_ROOT, _TURING_SUB, *_rest))\n"
+        "    if _turing_os.path.isdir(_sub):\n"
+        "        return _sub\n"
+        "    _flat = _turing_os.path.abspath(_turing_os.path.join(_TURING_ROOT, *_rest))\n"
+        "    if _turing_os.path.isdir(_flat):\n"
+        "        return _flat\n"
+        "    return _p\n"
+        "def _turing_glob_pat(_pat):\n"
+        "    _s = str(_pat)\n"
+        "    if _turing_os.path.isabs(_s):\n"
+        "        return _pat\n"
+        "    _wc = len(_s)\n"
+        "    for _ch in ('*', '?', '['):\n"
+        "        _i = _s.find(_ch)\n"
+        "        if _i != -1 and _i < _wc:\n"
+        "            _wc = _i\n"
+        "    _lead = _s[:_wc]\n"
+        "    _tail = _s[_wc:]\n"
+        "    _lead_parts = _turing_parts(_lead)\n"
+        "    if not _lead_parts or _lead_parts[0].lower() not in _TURING_STRIP:\n"
+        "        return _pat\n"
+        "    _rest = _lead_parts[1:]\n"
+        "    _sub_lead = _turing_os.path.join(_TURING_ROOT, _TURING_SUB, *_rest)\n"
+        "    _flat_lead = _turing_os.path.join(_TURING_ROOT, *_rest)\n"
+        "    _dir = _sub_lead if _turing_os.path.isdir(_sub_lead) else (_flat_lead if _turing_os.path.isdir(_flat_lead) else _sub_lead)\n"
+        "    return _dir + _turing_os.sep + _tail\n"
+        "def _turing_glob(_pat, *_a, **_k):\n"
+        "    if 'root_dir' in _k:\n"
+        "        return _turing_glob_real(_pat, *_a, **_k)\n"
+        "    return _turing_glob_real(_turing_glob_pat(_pat), *_a, **_k)\n"
+        "def _turing_iglob(_pat, *_a, **_k):\n"
+        "    if 'root_dir' in _k:\n"
+        "        return _turing_glob_ireal(_pat, *_a, **_k)\n"
+        "    return _turing_glob_ireal(_turing_glob_pat(_pat), *_a, **_k)\n"
+        "def _turing_listdir(_p='.', *_a, **_k):\n"
+        "    return _turing_listdir_real(_turing_relocate_dir(_p), *_a, **_k)\n"
+        "def _turing_scandir(_p='.', *_a, **_k):\n"
+        "    return _turing_scandir_real(_turing_relocate_dir(_p), *_a, **_k)\n"
+        "_turing_glob_mod.glob = _turing_glob\n"
+        "_turing_glob_mod.iglob = _turing_iglob\n"
+        "_turing_os.listdir = _turing_listdir\n"
+        "_turing_os.scandir = _turing_scandir\n"
+    )
+
+
 def _write_bootstrap(
     results_root_abs: str,
     run_subdir: str | None = None,
@@ -172,8 +257,13 @@ def _write_bootstrap(
     ``run_subdir`` component, namespaced under the subdir, and traversal-guarded
     to stay inside it; relative reads resolve subdir-first with a flat-root
     fallback (a write→read round-trip finds the file; legacy flat data still
-    recalls). ``run_subdir=None`` is byte-identical to the legacy relocating
-    shim. This closes the flat-write contamination vector: code_executor
+    recalls). The listing functions — ``glob.glob``/``glob.iglob`` and
+    ``os.listdir``/``os.scandir`` — are ALSO rebound for the run-subdir variant
+    (``_listing_relocation_shim``) so a results-prefixed listing resolves the
+    same subdir-first + flat-fallback way as the open() read branch; bare
+    (non-results-prefixed) patterns stay on the real CWD. ``run_subdir=None`` is
+    byte-identical to the legacy relocating shim. This closes the flat-write
+    contamination vector: code_executor
     deliverables used to land FLAT under ``results/`` (file_writer subfolders),
     so a prior run's flat file was recalled by a later run via the flat fallback.
 
@@ -289,6 +379,7 @@ def _write_bootstrap(
         "                _p = _flat\n"
         "    return _turing_open_orig(_p, _m, *_a, **_k)\n"
         "_turing_b.open = _turing_open\n"
+        + _listing_relocation_shim()
     )
 
 

@@ -11,7 +11,32 @@ from src.config import get_settings
 from src.graph.enums import Confidence
 from src.graph.iteration_cap import effective_max_iterations
 from src.graph.nodes.reflect import _ground_should_evolve
+from src.graph.search.lats import _lats_should_engage
 from src.graph.state import AgentState
+
+
+def _maybe_lats(state: AgentState, *, require_always_scope: bool = False) -> str:
+    """Return ``"lats_search"`` when LATS engages for this decision, else ``"execute"``.
+
+    LATS (reasoning-space MCTS) intercepts the single-trajectory retry that
+    follows a stalled reflection — that retry *is* "single-trajectory has
+    stalled." The full engage gate (default-off + CRITICAL + remaining-steps +
+    confidence/scope) lives in :func:`_lats_should_engage`; when it declines,
+    this returns the normal ``"execute"`` so routing is byte-identical to
+    pre-G3a. ``require_always_scope`` gates the mid-plan progressing path so it
+    is left alone unless ``LATS_SCOPE == "always"``.
+    """
+    if require_always_scope:
+        try:
+            scope = str(getattr(get_settings().lats, "scope", "stall")).lower()
+        except Exception:  # noqa: BLE001 — settings must never gate a run out
+            scope = "stall"
+        if scope != "always":
+            return "execute"
+    if _lats_should_engage(state):
+        logger.info("LATS engaging on CRITICAL retry → lats_search")
+        return "lats_search"
+    return "execute"
 
 
 def route_after_execute(state: AgentState) -> str:
@@ -204,7 +229,7 @@ def route_after_reflect(state: AgentState) -> str:
                 "progressing (steps remaining, steps completed, no errors); "
                 "continuing execution instead of discarding completed work"
             )
-            return "execute"
+            return _maybe_lats(state, require_always_scope=True)
         if not has_remaining_steps:
             logger.info(
                 "Reflect suggests replan with plan exhausted; routing to "
@@ -234,8 +259,8 @@ def route_after_reflect(state: AgentState) -> str:
                 "routing to verify instead of retrying execute"
             )
             return "verify"
-        logger.info(f"Low confidence ({confidence.value}), routing back to execute")
-        return "execute"
+        logger.info(f"Low confidence ({confidence.value}) on a stalled retry")
+        return _maybe_lats(state)
 
     return "verify"
 

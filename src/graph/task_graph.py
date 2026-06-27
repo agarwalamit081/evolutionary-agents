@@ -28,6 +28,7 @@ from src.graph.nodes import (
     evolve_node,
     execute_node,
     hitl_gate_node,
+    lats_search_node,
     plan_node,
     reflect_node,
     retrieve_memory_node,
@@ -155,6 +156,13 @@ def build_task_graph(
     # No deps needed for HITL and error handler
     graph.add_node("hitl_gate", hitl_gate_node)  # type: ignore[arg-type]
     graph.add_node("error_handler", error_handler_node)  # type: ignore[arg-type]
+    # G3a LATS/MCTS tree-search (default-off). Explores alternative next-steps in
+    # reasoning space on a stalled CRITICAL retry, then hands the chosen branch to
+    # execute. Unreachable unless route_after_reflect returns "lats_search"
+    # (LATS_ENABLED + CRITICAL + remaining-steps), so the topology is byte-identical
+    # until toggled on. lats_search always → execute (single-trajectory execution
+    # preserved; LATS only selects the step).
+    graph.add_node("lats_search", _wrap(lats_search_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
 
     # ─── Linear Edges (START → execute) ────────────────────────────────
     graph.add_edge(START, "classify")
@@ -192,7 +200,11 @@ def build_task_graph(
         "verify": "verify",
         "execute": "execute",
         "plan": "plan",
+        "lats_search": "lats_search",
     })
+    # G3a: lats_search commits the best branch (or a no-op pass-through) then
+    # always runs execute on the (possibly swapped) current step.
+    graph.add_edge("lats_search", "execute")
 
     graph.add_conditional_edges("tool_create", route_after_tool_create, {
         "plan": "plan",

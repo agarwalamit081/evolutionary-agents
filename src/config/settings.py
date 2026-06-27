@@ -1972,6 +1972,57 @@ class GitCloneSettings(BaseSettings):
     )
 
 
+class LatsSettings(BaseSettings):
+    """LATS / MCTS tree-search execution primitive (Phase 5 G3a).
+
+    A reasoning-space MCTS that, on a stalled CRITICAL decision, explores
+    alternative next-steps via gateway-only rollouts + an LLM value function
+    (UCB1 lookahead), then commits the best branch for the single-trajectory
+    ``execute`` to run. Default-off: when disabled ``route_after_reflect`` never
+    routes to ``lats_search`` and the topology is byte-identical (mirrors the
+    AgentCron/GitClone opt-in convention). Fail-safe: any error ⇒ the incumbent
+    step runs unchanged.
+
+    The caps are the cost guardrail — every CRITICAL retry is bounded by
+    ``max_evaluations`` value calls (+ ``max_expansions`` one expand call +
+    rollouts when ``rollout_depth > 0``), and the gateway's global budget
+    hard-stop is the backstop.
+    """
+
+    # Master opt-in. Default False so a host run never engages LATS. Env:
+    # LATS_ENABLED.
+    enabled: bool = False  # Env: LATS_ENABLED
+    # Number of DISTINCT alternative next-steps the expand call proposes (plus
+    # the incumbent "stay-the-course" child). Bounds branching. Env:
+    # LATS_MAX_EXPANSIONS.
+    max_expansions: int = 3  # Env: LATS_MAX_EXPANSIONS
+    # Per-child imagined-rollout depth (gateway-only, no tool calls). 0 = skip
+    # rollouts (flat 1-ply value selection). Env: LATS_ROLLOUT_DEPTH.
+    rollout_depth: int = 1  # Env: LATS_ROLLOUT_DEPTH
+    # Hard ceiling on value-function calls across the whole per-call tree.
+    # Bounds cost per CRITICAL retry. Env: LATS_MAX_EVALUATIONS.
+    max_evaluations: int = 8  # Env: LATS_MAX_EVALUATIONS
+    # Max MCTS search depth (plies). v1 builds a shallow frontier; this caps any
+    # deeper expansion. Env: LATS_MAX_DEPTH.
+    max_depth: int = 2  # Env: LATS_MAX_DEPTH
+    # UCB1 exploration constant c (sqrt(2) ≈ 1.41). Env: LATS_EXPLORATION.
+    exploration: float = 1.41  # Env: LATS_EXPLORATION
+    # Engagement scope. "stall" (default) = only on CRITICAL + LOW/VERY_LOW
+    # confidence (single-trajectory has stalled). "always" = any CRITICAL
+    # decision. Env: LATS_SCOPE.
+    scope: str = "stall"  # Env: LATS_SCOPE
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps LATS_* vars to these fields, mirroring the
+        # AgentCron/GitClone pattern (a missing prefix silently ignores vars).
+        env_prefix="lats_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class Settings(BaseSettings):
     """Root settings class that composes all settings groups."""
 
@@ -2006,6 +2057,7 @@ class Settings(BaseSettings):
     optimizer: OptimizerSettings = OptimizerSettings()  # type: ignore[assignment]
     agent_cron: AgentCronSettings = AgentCronSettings()  # type: ignore[assignment]
     git_clone: GitCloneSettings = GitCloneSettings()  # type: ignore[assignment]
+    lats: LatsSettings = LatsSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

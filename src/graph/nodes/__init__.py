@@ -14,6 +14,7 @@ from src.graph.nodes.reflect import reflect_node
 from src.graph.nodes.structure_analysis import structure_analysis_node
 from src.graph.nodes.tool_create import tool_create_node
 from src.graph.nodes.verify import verify_node
+from src.graph.search import lats_search_node
 
 __all__ = [
     "classify_node",
@@ -31,4 +32,5 @@ __all__ = [
     "tool_create_node",
     "agent_spawn_node",
     "delegate_node",
+    "lats_search_node",
 ]

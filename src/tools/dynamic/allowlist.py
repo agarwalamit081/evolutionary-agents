@@ -141,9 +141,13 @@ ALLOWED_MODULES: frozenset[str] = frozenset({
     # whose core dep ``magika`` pulls ``onnxruntime`` into every image — at odds
     # with the slim-image principle. HTML main-content extraction stays
     # trafilatura (web_scraper); these give generated tools fast parse/render.
+    # ``parsel``: CSS/XPath + JMESPath selection over lxml — deps (lxml,
+    # cssselect, jmespath, w3lib) are lightweight; lxml already transitively
+    # present (trafilatura/markdownify) and ships wheels.
     "selectolax",
     "mdformat",
     "mistune",
+    "parsel",
     # ── Phase 3 D6 — plotting (matplotlib) ──
     # ``matplotlib`` + its ``matplotlib.pyplot`` submodule so a generated tool can
     # render a chart and ``savefig`` it under results/. Pure compute (no egress);
@@ -224,11 +228,12 @@ SAFE_PIP_PACKAGES: frozenset[str] = frozenset({
     "pyomo",
     "highspy",
     # ── Phase 3 D5 — dist names for the fast HTML/markdown libs above ──
-    # selectolax/mdformat/mistune share their import name. See the
+    # selectolax/mdformat/mistune/parsel share their import name. See the
     # ALLOWED_MODULES Phase-3-D5 note for the markitdown/onnxruntime rationale.
     "selectolax",
     "mdformat",
     "mistune",
+    "parsel",
     # ── Phase 3 D6 — dist name for matplotlib (shares its import name) ──
     # See the ALLOWED_MODULES Phase-3-D6 note for the Agg-backend rationale.
     "matplotlib",
@@ -327,8 +332,8 @@ def get_materializer_namespace() -> dict[str, Any]:
         "tree_sitter", "tree_sitter_python", "arxiv",
         # Phase S8: pyomo (modeling) + highspy (offline HiGHS solver backend).
         "pyomo", "highspy",
-        # Phase 3 D5: fast HTML/markdown libs (selectolax/mdformat/mistune).
-        "selectolax", "mdformat", "mistune",
+        # Phase 3 D5: fast HTML/markdown libs (selectolax/mdformat/mistune/parsel).
+        "selectolax", "mdformat", "mistune", "parsel",
         # Phase 3 D6: matplotlib (plotting); code_executor bootstrap sets Agg.
         "matplotlib",
         # Phase 5 H1: formal verification — hypothesis (property-based testing)

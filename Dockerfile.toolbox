@@ -38,7 +38,7 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install \
     python-dateutil jsonschema tenacity loguru \
     scipy scikit-learn openpyxl tabulate aiofiles trafilatura libcst \
     pymupdf pulp cvxpy tree-sitter tree-sitter-python arxiv \
-    selectolax mdformat mistune matplotlib \
+    selectolax mdformat mistune parsel matplotlib \
     pyomo highspy \
     hypothesis z3-solver
 

@@ -372,13 +372,16 @@ class TestPhase3D5Allowlist:
     core dep ``magika`` pulls ``onnxruntime`` into every image. Each new lib is
     bound by BOTH controls (import name in ALLOWED_MODULES, dist name in
     SAFE_PIP_PACKAGES) and pre-imported by the materializer when installed.
-    These share their import name with their dist name.
+    These share their import name with their dist name. parsel (CSS/XPath
+    selection over lxml) joins the set — its deps are lightweight and lxml is
+    already transitively present.
     """
 
     NEW_PACKAGES: list[tuple[str, str]] = [
         ("selectolax", "selectolax"),
         ("mdformat", "mdformat"),
         ("mistune", "mistune"),
+        ("parsel", "parsel"),
     ]
 
     def test_each_new_import_name_is_allowed(self) -> None:
@@ -429,7 +432,7 @@ class TestPhase3D5Allowlist:
 class TestPhase3D5PackagesPassSafetyLayer4:
     """Phase 3 D5: a generated tool importing each new lib clears Layer-4."""
 
-    @pytest.mark.parametrize("import_name", ["selectolax", "mdformat", "mistune"])
+    @pytest.mark.parametrize("import_name", ["selectolax", "mdformat", "mistune", "parsel"])
     def test_import_statement_passes_layer4(self, import_name: str) -> None:
         from src.safety.pipeline import SafetyPipeline
 
@@ -441,7 +444,7 @@ class TestPhase3D5PackagesPassSafetyLayer4:
         assert result["passed"] is True, result["issues"]
         assert result["issues"] == []
 
-    @pytest.mark.parametrize("import_name", ["selectolax", "mdformat", "mistune"])
+    @pytest.mark.parametrize("import_name", ["selectolax", "mdformat", "mistune", "parsel"])
     def test_from_import_statement_passes_layer4(self, import_name: str) -> None:
         from src.safety.pipeline import SafetyPipeline
 

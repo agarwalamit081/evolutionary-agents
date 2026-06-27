@@ -59,6 +59,31 @@ class TestRunStatusHashing:
         with pytest.raises(KeyError):
             RunStatus.from_hash({})
 
+    def test_results_dir_roundtrips_through_hash(self) -> None:
+        """results_dir (the surfaced output folder) survives to_hash→from_hash."""
+        original = RunStatus(
+            run_id="r1",
+            thread_id="api-r1",
+            status=JobStatus.RUNNING,
+            results_dir="/vol/results/r1",
+        )
+        rebuilt = RunStatus.from_hash(original.to_hash())
+        assert rebuilt.results_dir == "/vol/results/r1"
+
+    def test_from_hash_results_dir_load_bearing_default(self) -> None:
+        """A status hash written BEFORE the field existed round-trips with the
+        empty default (so an in-flight run from an older worker still reads)."""
+        rebuilt = RunStatus.from_hash(
+            {
+                "run_id": "r1",
+                "thread_id": "api-r1",
+                "status": "running",
+                "is_complete": "False",
+                "iteration_count": "1",
+            }
+        )
+        assert rebuilt.results_dir == ""
+
 
 class TestRunStatusStore:
     async def test_put_then_get_roundtrip(
@@ -134,6 +159,20 @@ class TestRunStatusStore:
         assert rec.final_output == "answer"
         assert rec.is_complete is True
         assert rec.iteration_count == 4
+
+    async def test_mark_merges_results_dir(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """The surfaced output folder is stamped at RUNNING and survives a later
+        status transition (a caller discovers results/<run_id>/ from the API)."""
+        store = RunStatusStore(fake_redis, worker_settings)
+        running = await store.mark(
+            "r1", "api-r1", JobStatus.RUNNING, results_dir="/vol/results/r1"
+        )
+        assert running.results_dir == "/vol/results/r1"
+        completed = await store.mark("r1", "api-r1", JobStatus.COMPLETED)
+        # Merged onto the existing record — not clobbered by a later transition.
+        assert completed.results_dir == "/vol/results/r1"
 
 
 class _ExplodingRedis:

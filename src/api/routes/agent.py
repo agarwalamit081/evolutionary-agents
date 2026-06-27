@@ -69,6 +69,7 @@ class StatusResponse(BaseModel):
     error: str
     started_at: str
     finished_at: str
+    results_dir: str = ""
 
 
 class CancelResponse(BaseModel):
@@ -240,4 +241,5 @@ def _to_response(record: RunStatus) -> StatusResponse:
         error=record.error,
         started_at=record.started_at,
         finished_at=record.finished_at,
+        results_dir=record.results_dir,
     )

@@ -81,6 +81,14 @@ class RunStatus(BaseModel):
     # field existed (a load-bearing default — ``from_hash`` round-trips cleanly)
     # and for any future enqueue path that does not yet capture the id.
     entry_id: str = ""
+    # The resolved per-run output folder (``<results_root>/<run_id>/``) stamped
+    # at run start. Surfaces the artifact location through the API/Redis so a
+    # caller discovers the deliverables' folder without guessing — the run's
+    # artifacts live in a per-run subdir (RESULTS_PER_RUN_SUBDIR), not the flat
+    # results/ root. Empty for status hashes written before this field existed
+    # (load-bearing default → ``from_hash`` round-trips cleanly) and for runs
+    # whose run_id did not resolve to a subdir.
+    results_dir: str = ""
 
     def to_hash(self) -> dict[str, str]:
         """Flatten to a Redis hash mapping (all values str).

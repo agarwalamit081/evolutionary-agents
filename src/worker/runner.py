@@ -23,6 +23,7 @@ from loguru import logger
 
 from src.llm.exceptions import BudgetExhaustedError
 from src.runner import RunCancelled
+from src.tools._paths import run_subdir_path
 from src.worker.queue import RunsQueue
 from src.worker.schema import JobStatus, RunJob
 from src.worker.status import RunStatusStore
@@ -113,7 +114,19 @@ class RunConsumer:
             self._renew_lease(run_id, token, max(1.0, self._s.lock_ttl_s / 3.0))
         )
         try:
-            await self._status.mark(run_id, thread_id, JobStatus.RUNNING)
+            # Surface the per-run output folder through the status hash so a
+            # caller discovers the artifact location (``results/<run_id>/``)
+            # without guessing — deliverables live in a per-run subdir, not the
+            # flat results/ root. Observability-only: a bad run_id / settings
+            # hiccup must never break the run (empty string is a safe no-op).
+            results_dir = ""
+            try:
+                results_dir = str(run_subdir_path(run_id))
+            except (ValueError, OSError) as exc:
+                logger.debug("results_dir resolution skipped for {}: {}", run_id, exc)
+            await self._status.mark(
+                run_id, thread_id, JobStatus.RUNNING, results_dir=results_dir
+            )
             logger.info(f"Worker claimed run {run_id} ({entry_id}): {job.goal[:80]}")
 
             # #255: report the live iteration_count into the status hash mid-run so

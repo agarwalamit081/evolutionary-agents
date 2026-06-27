@@ -16,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 import src.api.routes.agent as agent_mod
 from src.api.app import create_app
 from src.api.routes.agent import API_PREFIX
+from src.worker.schema import JobStatus, RunStatus
 
 
 @pytest.fixture
@@ -65,6 +66,35 @@ class TestAgentRoutes:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get(f"{API_PREFIX}/runs/does-not-exist")
         assert resp.status_code == 404
+
+    async def test_get_status_surfaces_results_dir(self, monkeypatch) -> None:
+        """The surfaced output folder (``results/<run_id>/``) is readable from the
+        API — a caller discovers where the artifacts landed without guessing."""
+        server = fakeredis.FakeServer()
+        client = fakeredis.FakeAsyncRedis(server=server)
+
+        def fake_from_url(_url: str, **_kw: object) -> object:
+            return client
+
+        monkeypatch.setattr(agent_mod.aioredis, "from_url", fake_from_url)
+        app = create_app()
+
+        # Stamp a RUNNING record with a results_dir (as the worker does at run
+        # start) straight into the status hash the route reads — same store the
+        # route's get_run_status polls.
+        record = RunStatus(
+            run_id="r77",
+            thread_id="api-r77",
+            status=JobStatus.RUNNING,
+            results_dir="/vol/results/r77",
+        )
+        await client.hset("turing:run:r77", mapping=record.to_hash())
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            get = await ac.get(f"{API_PREFIX}/runs/r77")
+        assert get.status_code == 200
+        assert get.json()["results_dir"] == "/vol/results/r77"
 
     async def test_post_run_rejects_empty_goal(self, fakeredis_app) -> None:
         """Validation (Pydantic min_length=1) → 422, not enqueue."""

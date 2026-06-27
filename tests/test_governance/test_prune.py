@@ -42,10 +42,15 @@ async def test_run_applies_real_knobs_and_enforces_tool_cap() -> None:
         captured["enforce_max_active"] = max_active
         return 3
 
+    async def fake_unused_enforcer(min_age_days: int) -> int:
+        captured["unused_min_age_days"] = min_age_days
+        return 2  # 2 never-invoked dead-weight tools retired
+
     pruner = GovernancePruner(
         settings,
         consolidate=fake_consolidate,
         tool_cap_enforcer=fake_enforcer,
+        unused_enforcer=fake_unused_enforcer,
     )
 
     result = await pruner.run()
@@ -57,14 +62,17 @@ async def test_run_applies_real_knobs_and_enforces_tool_cap() -> None:
     assert kwargs["success_floor"] == settings.retire_success_floor
     assert kwargs["empty_output_floor"] == settings.retire_empty_output_floor
     assert captured["enforce_max_active"] == settings.max_active_tools
-    # 1 redundant-tool plan + 1 redundant-agent plan + 1 underperformer + 3 cap-excess = 6.
+    # The unused dead-weight age gate threads through verbatim (default 30).
+    assert captured["unused_min_age_days"] == settings.retire_unused_days
+    # 1 redundant-tool plan + 1 redundant-agent plan + 1 underperformer + 2 unused + 3 cap-excess = 8.
     # (redundant_* count MergePlan objects, not retired items — see ConsolidationReport.)
     assert result == {
         "pruned": True,
-        "total_freed": 6,
+        "total_freed": 8,
         "redundant_tools": 1,
         "redundant_agents": 1,
         "underperformers": 1,
+        "unused": 2,
         "tool_cap_excess": 3,
     }
 
@@ -97,10 +105,16 @@ async def test_run_never_raises_on_cap_enforce_error() -> None:
     async def exploding_enforcer(_max_active: int) -> int:
         raise RuntimeError("cap-enforce DB down")
 
+    # Inject the unused enforcer so this resilience test never opens a real DB
+    # session via _retire_unused (runs before the exploding cap-enforce).
+    async def fake_unused_enforcer(_min_age_days: int) -> int:
+        return 0
+
     pruner = GovernancePruner(
         _settings(),
         consolidate=fake_consolidate,
         tool_cap_enforcer=exploding_enforcer,
+        unused_enforcer=fake_unused_enforcer,
     )
 
     result = await pruner.run()  # must not raise

@@ -1032,6 +1032,20 @@ class AgentSettings(BaseSettings):
     # RETIRE_EMPTY_OUTPUT_FLOOR.
     retire_empty_output_floor: float = 0.8
     retire_recency_days: int = 30
+    # Phase-4 gap fix — retire objective dead weight (0-call tools). Distinct from
+    # the performance path above: retire_underperforming INTENTIONALLY spares
+    # untried tools (a tool is never retired for performance before a fair
+    # chance), so a generated tool with calls == 0 that is neither redundant, nor
+    # over the cumulative cap, nor has enough calls to underperform would survive
+    # FOREVER — the nightly GovernancePruner was a no-op on exactly this cruft
+    # (battery-04 q07: 8 of 25 slots were never-invoked dead weight). This knob
+    # retires active generated tools with calls == 0 whose created_at age exceeds
+    # ``retire_unused_days`` (the age gate is the safety — a freshly-spawned tool
+    # no run has picked YET is NOT retired; "never used" must be durable). The
+    # periodic GovernancePruner runs it; ``<= 0`` disables (no retirement). Env:
+    # RETIRE_UNUSED_DAYS. Default 30 mirrors retire_recency_days (the existing
+    # "stale" bar) so it is effective whenever GOVERNANCE_PRUNE_ENABLED is on.
+    retire_unused_days: int = 30
     # Per-tool success-metrics recording (M4). When true, the execute chokepoint
     # records each tool invocation (success/empty/latency) to tool_call_metrics
     # and updates the running aggregates on tool_registrations, which the
@@ -1723,7 +1737,9 @@ class GovernancePruneSettings(BaseSettings):
     passes on a cron, lowering active counts to free cap headroom WITHOUT
     raising the caps themselves. It reuses ``AgentSettings`` retire knobs
     (``retire_min_runs`` / ``retire_success_floor`` / ``retire_recency_days`` /
-    ``capability_redundancy_threshold``) — no new retirement thresholds here.
+    ``retire_empty_output_floor`` / ``capability_redundancy_threshold``) plus the
+    Phase-4 ``retire_unused_days`` dead-weight pass (0-call tools aged past the
+    gate) — no other retirement thresholds here.
     Opt-in (default False) like the scheduler/curve-gate, so a host run with no
     env does nothing. ``cron`` defaults to 04:00 UTC (before the 02:00 battery
     shifts if the operator wants a clean slate overnight).

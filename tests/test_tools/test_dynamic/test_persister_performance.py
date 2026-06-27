@@ -130,3 +130,75 @@ class TestEmptyOutputPredicate:
         sql = str(session.statements[0])
         assert "success_rate" in sql
         assert "empty_output_rate" not in sql
+
+
+# ─── Phase-4 dead-weight pass: 0-call tools aged past the gate ──────────────
+
+
+class TestUnusedTools:
+    @pytest.mark.asyncio
+    async def test_returns_sorted_names_from_session(self) -> None:
+        session = _FakeSession(rows=[("z_dead",), ("a_dead",)])
+        with patch("src.db.session.get_session", lambda: session):
+            names = await ToolPersister().unused_tools(30)
+        assert names == ["a_dead", "z_dead"]
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_qualifiers(self) -> None:
+        with patch("src.db.session.get_session", lambda: _FakeSession(rows=[])):
+            assert await ToolPersister().unused_tools(30) == []
+
+    @pytest.mark.asyncio
+    async def test_db_error_degrades_to_empty(self) -> None:
+        with patch("src.db.session.get_session", lambda: _RaisingSession()):
+            assert await ToolPersister().unused_tools(30) == []
+
+    @pytest.mark.asyncio
+    async def test_disabled_when_age_gate_le_zero(self) -> None:
+        """``<= 0`` short-circuits before any session is opened (no DB contact)."""
+
+        def _forbid() -> Any:
+            raise AssertionError("get_session must not open when the pass is disabled")
+
+        with patch("src.db.session.get_session", _forbid):
+            assert await ToolPersister().unused_tools(0) == []
+            assert await ToolPersister().unused_tools(-5) == []
+
+    @pytest.mark.asyncio
+    async def test_filter_uses_calls_zero_and_age_gate(self) -> None:
+        """The scan emits the calls==0 + created_at age-gate predicates."""
+        session = _CapturingSession()
+        with patch("src.db.session.get_session", lambda: session):
+            await ToolPersister().unused_tools(30)
+        sql = str(session.statements[0])
+        assert "calls" in sql
+        assert "created_at" in sql
+        assert "is_active" in sql
+
+
+class TestRetireUnused:
+    @pytest.mark.asyncio
+    async def test_no_qualifiers_returns_zero(self) -> None:
+        p = ToolPersister()
+        p.unused_tools = AsyncMock(return_value=[])  # type: ignore[method-assign]
+        p.retire = AsyncMock(return_value=99)  # type: ignore[method-assign]
+        assert await p.retire_unused(30) == 0
+        p.retire.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_delegates_names_to_retire(self) -> None:
+        p = ToolPersister()
+        p.unused_tools = AsyncMock(return_value=["dead_a", "dead_b"])  # type: ignore[method-assign]
+        p.retire = AsyncMock(return_value=2)  # type: ignore[method-assign]
+        count = await p.retire_unused(30)
+        assert count == 2
+        p.unused_tools.assert_awaited_once_with(30)
+        p.retire.assert_awaited_once_with(["dead_a", "dead_b"])
+
+    @pytest.mark.asyncio
+    async def test_disabled_age_zero_returns_zero(self) -> None:
+        """``min_age_days=0`` → the real scan short-circuits to [], no retirement."""
+        p = ToolPersister()
+        p.retire = AsyncMock(return_value=99)  # type: ignore[method-assign]
+        assert await p.retire_unused(0) == 0
+        p.retire.assert_not_awaited()

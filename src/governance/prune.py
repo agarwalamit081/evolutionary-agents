@@ -19,6 +19,13 @@ Why cap-enforce is needed at all: ``consolidate_all`` retires only REDUNDANT dup
 and mostly succeeding, so consolidation alone retired nothing; only the cumulative-cap
 enforce (retire oldest over the cap) freed headroom.
 
+Phase-4 dead-weight pass: ``consolidate_all`` + cap-enforce STILL miss one population —
+0-call tools that are neither redundant, nor over-cap, nor have enough calls to
+underperform (q07: 8 of 25 slots were never-invoked dead weight).
+``retire_unused_days`` retires those (calls == 0, aged past the gate) so the prune is
+no longer a no-op on accumulated cruft. Default 30 (mirrors ``retire_recency_days``);
+``<= 0`` disables the pass.
+
 Sub-agent cumulative-cap enforcement (``SubAgentRegistry.enforce_caps``) scores the
 in-memory registry, so it is inherently load-time; this periodic prune handles the
 tool cap directly + redundancy/performance for both tools and sub-agents, and a worker
@@ -39,14 +46,20 @@ from src.governance.consolidate import consolidate_all
 # ``Callable[[int], Awaitable[int]]``: takes max_active, returns the count retired.
 ToolCapEnforcer = Callable[[int], Awaitable[int]]
 
+# The unused-tool retire method on ToolPersister (retire 0-call tools aged past
+# the gate). Same shape as ToolCapEnforcer: takes min_age_days, returns count.
+UnusedToolEnforcer = Callable[[int], Awaitable[int]]
+
 
 class GovernancePruner:
-    """Re-run retire/redundancy + the tool cumulative-cap enforce to free headroom.
+    """Re-run retire/redundancy + unused dead-weight + the tool cap-enforce.
 
     Mirrors the load-time governance sequence but standalone (no registry load), so
     a long-lived worker can debloat between restarts. Reuses ``AgentSettings`` retire
     knobs (``capability_redundancy_threshold`` / ``retire_min_runs`` /
-    ``retire_success_floor`` / ``retire_empty_output_floor`` / ``max_active_tools``).
+    ``retire_success_floor`` / ``retire_empty_output_floor`` / ``max_active_tools`` /
+    ``retire_unused_days``). The unused pass (``retire_unused_days``) closes the
+    Phase-4 gap where 0-call dead weight survived every other retire path.
     """
 
     def __init__(
@@ -55,6 +68,7 @@ class GovernancePruner:
         *,
         consolidate: Callable[..., Awaitable[Any]] | None = None,
         tool_cap_enforcer: ToolCapEnforcer | None = None,
+        unused_enforcer: UnusedToolEnforcer | None = None,
     ) -> None:
         s = settings or get_settings().agent
         self._threshold = s.capability_redundancy_threshold
@@ -62,14 +76,16 @@ class GovernancePruner:
         self._success_floor = s.retire_success_floor
         self._empty_output_floor = s.retire_empty_output_floor
         self._max_active_tools = s.max_active_tools
+        self._retire_unused_days = s.retire_unused_days
         # Injectable for tests (mirrors CurveRegressionGate.telemetry). Defaults
         # resolve the real deps lazily inside run() so importing this module needs
         # no DB — and so a unit test never opens a session.
         self._consolidate = consolidate
         self._tool_cap_enforcer = tool_cap_enforcer
+        self._unused_enforcer = unused_enforcer
 
     async def run(self) -> dict[str, Any]:
-        """Prune redundant + underperforming capabilities and enforce the tool cap.
+        """Prune redundant + underperforming + unused capabilities, enforce the cap.
 
         Never raises — a DB error is logged at WARNING and reported, not propagated,
         so the scheduler survives a governance hiccup (observability-only).
@@ -82,19 +98,24 @@ class GovernancePruner:
                 success_floor=self._success_floor,
                 empty_output_floor=self._empty_output_floor,
             )
+            unused = await self._retire_unused()
             tool_excess = await self._enforce_tool_cap()
 
             redundant_tools = len(report.tools)
             redundant_agents = len(report.agents)
             underperformers = len(report.performance_retired)
-            total = redundant_tools + redundant_agents + underperformers + tool_excess
+            total = (
+                redundant_tools + redundant_agents + underperformers + unused + tool_excess
+            )
             logger.info(
                 "Governance prune complete: freed {} capability slot(s) "
-                "(redundant tools={} agents={} underperformers={} tool-cap-excess={})",
+                "(redundant tools={} agents={} underperformers={} unused={} "
+                "tool-cap-excess={})",
                 total,
                 redundant_tools,
                 redundant_agents,
                 underperformers,
+                unused,
                 tool_excess,
             )
             return {
@@ -103,6 +124,7 @@ class GovernancePruner:
                 "redundant_tools": redundant_tools,
                 "redundant_agents": redundant_agents,
                 "underperformers": underperformers,
+                "unused": unused,
                 "tool_cap_excess": tool_excess,
             }
         except Exception as exc:  # noqa: BLE001 — never abort the scheduler
@@ -129,6 +151,26 @@ class GovernancePruner:
             p = ToolPersister()
             enforcer = p._retire_excess_tools  # noqa: SLF001 — mirrors consolidate.py
         return int(await enforcer(self._max_active_tools) or 0)
+
+    async def _retire_unused(self) -> int:
+        """Retire never-invoked generated tools aged past ``retire_unused_days``.
+
+        The Phase-4 complement to the underperformer pass:
+        ``retire_underperforming`` spares untried tools (a fair chance before a
+        performance verdict), so a 0-call tool that is neither redundant, nor
+        over-cap, nor has enough calls to underperform would survive forever.
+        This retires that objective dead weight (calls == 0, older than the age
+        gate). Injectable for tests so the unit never opens a session.
+        ``retire_unused_days <= 0`` disables the pass (returns 0, touches nothing).
+        """
+        if self._retire_unused_days <= 0:
+            return 0
+        enforcer = self._unused_enforcer
+        if enforcer is None:
+            from src.tools.dynamic.persister import ToolPersister  # noqa: PLC0415
+
+            enforcer = ToolPersister().retire_unused
+        return int(await enforcer(self._retire_unused_days) or 0)
 
 
 def add_governance_prune_job(

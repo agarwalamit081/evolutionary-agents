@@ -35,6 +35,11 @@ def _agent_settings(**kw: Any) -> AgentSettings:
         capability_redundancy_threshold=0.92,
         retire_min_runs=20, retire_success_floor=0.5,
         retire_empty_output_floor=0.8, max_active_tools=25,
+        # Force the unused dead-weight pass OFF so the legacy scenario tests
+        # (which only inject consolidate + tool_cap_enforcer) stay hermetic —
+        # _retire_unused no-ops at <= 0 before it can reach a real session.
+        # Tests that exercise the unused pass override this explicitly.
+        retire_unused_days=0,
     )
     base.update(kw)
     return AgentSettings(**base)  # type: ignore[arg-type]
@@ -205,3 +210,63 @@ class TestPrunerResilienceAndJob:
         assert added["id"] == "turing-governance-prune"
         assert added["max_instances"] == 1
         assert added["coalesce"] is True
+
+
+# ─── unused dead-weight pass (Phase-4 gap fix) ──────────────────────────────
+
+
+class TestRetireUnused:
+    async def test_should_retire_unused_when_days_set(self) -> None:
+        # retire_unused_days=30 → the unused enforcer is called with 30 and its
+        # freed count is reported + counted in the total.
+        calls: list[int] = []
+
+        async def _unused(min_age_days: int) -> int:
+            calls.append(min_age_days)
+            return 4  # 4 never-invoked dead-weight tools retired
+
+        pruner = GovernancePruner(
+            _agent_settings(retire_unused_days=30),
+            consolidate=AsyncMock(return_value=ConsolidationReport()),
+            tool_cap_enforcer=AsyncMock(return_value=0),
+            unused_enforcer=_unused,
+        )
+        out = await pruner.run()
+        assert out["pruned"] is True
+        assert out["unused"] == 4
+        assert calls == [30]  # the age gate was threaded through verbatim
+        assert out["total_freed"] == 4
+
+    async def test_should_disable_unused_pass_when_days_zero(self) -> None:
+        # retire_unused_days=0 → the unused pass is a no-op: the enforcer is
+        # NEVER reached (guarded before any session) and unused reports 0.
+        enforcer = AsyncMock(return_value=99)
+
+        pruner = GovernancePruner(
+            _agent_settings(retire_unused_days=0),
+            consolidate=AsyncMock(return_value=ConsolidationReport()),
+            tool_cap_enforcer=AsyncMock(return_value=0),
+            unused_enforcer=enforcer,
+        )
+        out = await pruner.run()
+        assert out["unused"] == 0
+        enforcer.assert_not_awaited()
+
+    async def test_unused_count_adds_to_total_alongside_other_passes(self) -> None:
+        report = ConsolidationReport(
+            tools=[_merge("tool_a", ["tool_a_dup"])],
+            performance_retired=["bad_tool"],
+        )
+        pruner = GovernancePruner(
+            _agent_settings(retire_unused_days=30),
+            consolidate=AsyncMock(return_value=report),
+            tool_cap_enforcer=AsyncMock(return_value=3),
+            unused_enforcer=AsyncMock(return_value=2),
+        )
+        out = await pruner.run()
+        # 1 redundant tool + 1 underperformer + 2 unused + 3 cap-excess = 7
+        assert out["redundant_tools"] == 1
+        assert out["underperformers"] == 1
+        assert out["unused"] == 2
+        assert out["tool_cap_excess"] == 3
+        assert out["total_freed"] == 7

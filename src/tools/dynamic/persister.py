@@ -6,6 +6,7 @@ and loads them back into ToolRegistry at startup.
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -912,6 +913,76 @@ class ToolPersister:
                 f"Retired {retired} underperforming tools "
                 f"(min_runs={min_runs}, floor={success_floor}, "
                 f"empty_floor={empty_output_floor}): {', '.join(names)}"
+            )
+        return retired
+
+    async def unused_tools(self, min_age_days: int) -> list[str]:
+        """Active generated tools never invoked and older than ``min_age_days``.
+
+        Phase-4 dead-weight scan. A tool qualifies when ``calls == 0`` (never
+        exercised — ``last_run_at`` is NULL) AND it was created more than
+        ``min_age_days`` ago. The age gate is the safety: a freshly-spawned tool
+        that no run has picked YET is NOT retired, so "never used" is a durable
+        signal rather than a transient one. Distinct from
+        :meth:`underperforming_tools`, which INTENTIONALLY spares untried tools
+        (a tool is never retired for *performance* before a fair chance); this
+        pass targets objective dead weight no run ever selected. Best-effort: any
+        DB error degrades to an empty list (no retirement).
+
+        Args:
+            min_age_days: Minimum ``created_at`` age in days. ``<= 0`` disables
+                the pass (returns ``[]``).
+
+        Returns:
+            Names of qualifying tools (sorted).
+        """
+        if min_age_days <= 0:
+            return []
+        try:
+            from datetime import timedelta
+
+            from sqlalchemy import select
+
+            from src.db.models import ToolRegistration
+            from src.db.session import get_session
+
+            cutoff = dt.datetime.now(dt.timezone.utc) - timedelta(days=min_age_days)
+            async with get_session() as session:
+                stmt = (
+                    select(ToolRegistration.tool_name)
+                    .where(
+                        ToolRegistration.is_active.is_(True),
+                        ToolRegistration.tool_type == "generated",
+                        ToolRegistration.calls == 0,
+                        ToolRegistration.created_at < cutoff,
+                    )
+                )
+                result = await session.execute(stmt)
+                return sorted(row[0] for row in result.all())
+        except Exception as e:
+            logger.debug(f"Unused-tool scan failed: {e}")
+            return []
+
+    async def retire_unused(self, min_age_days: int) -> int:
+        """Retire never-invoked generated tools older than ``min_age_days``.
+
+        The Phase-4 complement to :meth:`retire_underperforming`: that removes
+        chronic low *performers* (enough calls, poor outcomes); this removes
+        objective dead weight (zero calls, aged past the gate). Delegates
+        selection to :meth:`unused_tools` and retirement to :meth:`retire`.
+        Returns the count retired (0 when none qualify or the pass is disabled).
+
+        Args:
+            min_age_days: Minimum ``created_at`` age in days; ``<= 0`` disables.
+        """
+        names = await self.unused_tools(min_age_days)
+        if not names:
+            return 0
+        retired = await self.retire(names)
+        if retired:
+            logger.info(
+                f"Retired {retired} unused tools (0 calls, older than "
+                f"{min_age_days}d): {', '.join(names)}"
             )
         return retired
 

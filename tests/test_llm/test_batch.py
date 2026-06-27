@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -141,3 +141,65 @@ class TestAbatchIsolation:
         assert [r.content for r in out] == ["ok:a", "", "ok:c"]
         assert (out[1].metadata or {}).get("error") == "upstream 500"
         assert out[1].cost_usd == 0.0
+
+
+class TestAbatchLitellmSmoke:
+    """CI-exercised smoke: ``abatch`` routes each request through the REAL
+    ``acompletion`` body (model resolution → ``_execute_with_fallback`` →
+    ``litellm.acompletion``), not a mocked ``acompletion``. The classes above
+    patch ``gw.acompletion``, so they can never see the wiring this locks:
+    that ``BatchRequest`` kwargs are compatible with the real ``acompletion``
+    signature, that each request is a DISTINCT litellm call, and that the
+    response's ``content`` + ``usage`` parse into ``BatchResponse`` via the real
+    ``_build_response``.
+    """
+
+    @staticmethod
+    def _litellm_resp(content: str, model: str, in_t: int, out_t: int) -> Any:
+        message = MagicMock()
+        message.content = content
+        message.tool_calls = None
+        choice = MagicMock()
+        choice.message = message
+        choice.finish_reason = "stop"
+        usage = MagicMock()
+        usage.prompt_tokens = in_t
+        usage.completion_tokens = out_t
+        usage.total_tokens = in_t + out_t
+        resp = MagicMock()
+        resp.choices = [choice]
+        resp.usage = usage
+        resp.model = model
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_abatch_through_real_acompletion_body(self) -> None:
+        gw = _make_gateway(_make_settings(batch_on=True, max_concurrency=4))
+        # Fully neutralize the rate limiter (mirror test_gateway's seam) so the
+        # real _execute_with_fallback path never blocks.
+        gw._rate_limiter = MagicMock()
+        gw._rate_limiter.acquire = AsyncMock(return_value=None)
+
+        seen: list[str] = []
+
+        async def _fake_litellm_acompletion(**kwargs: Any) -> Any:
+            user = kwargs["messages"][0]["content"]
+            seen.append(user)
+            return self._litellm_resp(f"echo:{user}", "gpt-4o-mini-2024-07-18", 7, 3)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = _fake_litellm_acompletion
+            out = await gw.abatch([_req("hello"), _req("ping")])
+
+        # Order preserved + one BatchResponse per request.
+        assert len(out) == 2
+        assert [r.content for r in out] == ["echo:hello", "echo:ping"]
+        # Each request was a DISTINCT litellm.acompletion call — abatch never
+        # shares/caches one call across requests.
+        assert seen == ["hello", "ping"]
+        # Usage parsed from the litellm ModelResponse into BatchResponse via the
+        # real _build_response (the mock-acompletion tests above cannot see this).
+        for r in out:
+            assert r.input_tokens == 7
+            assert r.output_tokens == 3
+            assert r.model == "gpt-4o-mini-2024-07-18"

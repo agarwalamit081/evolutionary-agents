@@ -69,6 +69,12 @@ from src.runner import _create_gateway, execute_run
 @click.option("--export", "curve_export", default=None, help="With --capability-curve: write JSON/CSV (.json/.csv by suffix) and exit")
 @click.option("--plot", "curve_plot", default=None, help="With --capability-curve: write a PNG of the battery trend (matplotlib optional)")
 @click.option(
+    "--aflow",
+    "run_aflow",
+    is_flag=True,
+    help="Offline AFlow workflow-topology optimizer — search per-category technique policies (G3b, opt-in)",
+)
+@click.option(
     "--retrieval-eval",
     "run_retrieval_eval",
     is_flag=True,
@@ -102,6 +108,7 @@ def main(
     curve_plot: str | None,
     run_retrieval_eval: bool,
     retrieval_k: int | None,
+    run_aflow: bool,
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -140,6 +147,14 @@ def main(
         from src.eval.retrieval import DEFAULT_K
 
         asyncio.run(_run_retrieval_eval(k=retrieval_k or DEFAULT_K))
+        return
+
+    # --aflow: offline workflow-topology optimizer — search per-category
+    # technique policies (baseline → propose → evaluate → keep-if-better over
+    # real agent runs). Forces EVAL_ENABLED. Opt-in (AFLOW_ENABLED); the
+    # optimizer never raises (a runtime failure is a printed AflowResult).
+    if run_aflow:
+        asyncio.run(_run_aflow())
         return
 
     # --resume: continue a prior run from its last checkpoint. The goal lives in
@@ -407,6 +422,79 @@ async def _run_capability_curve(
             click.echo(f"\nExported PNG → {plot}")
         else:
             click.echo("\nPNG skipped (matplotlib unavailable; install it or use --export .json/.csv).")
+
+
+async def _run_aflow() -> None:
+    """Offline AFlow workflow-topology optimizer (Phase 5 G3b).
+
+    For each target node × seed-spec category, measures the baseline technique
+    selection, proposes ``max_candidates`` policies via one gateway call,
+    evaluates each against a real agent run (``eval_correctness_score``), keeps
+    the best if it clears the improvement margin, and persists it via
+    ``AflowPolicyStore``. Forces ``EVAL_ENABLED`` (the fitness needs the verify
+    correctness layer). Per-(node, category) baseline/candidates/winner printed.
+    The optimizer never raises — a runtime failure is a printed ``AflowResult``.
+
+    Fitness = full ``execute_run`` per seed (the dominant cost); bounded by
+    ``AFLOW_MAX_CANDIDATES`` × the seed set per (node, category). Evolution is
+    off inside fitness runs so the technique policy is the only variable.
+    """
+    from src.eval.golden import BATTERY04_GOALS  # noqa: PLC0415
+    from src.graph.search.aflow import (  # noqa: PLC0415
+        AFlowOptimizer,
+        AflowPolicyStore,
+        bucket_specs_by_category,
+    )
+
+    settings = get_settings()
+    aflow = settings.aflow
+    if not aflow.enabled:
+        click.echo(
+            "AFLOW_ENABLED is false — AFlow is opt-in. Set AFLOW_ENABLED=true "
+            "(and AFLOW_MAX_CANDIDATES low) to run."
+        )
+        return
+    # Fitness needs the verify correctness layer; force it on for this session.
+    settings.eval.eval_enabled = True
+
+    gateway = _create_gateway(settings)
+    store = AflowPolicyStore()
+
+    async def run_fn(spec) -> float | None:  # noqa: ANN001 — GoalSpec, lazy import avoided
+        run_id = f"aflow-{spec.spec_id}"
+        result = await execute_run(
+            spec.goal_text,
+            spec.max_iterations,
+            no_evolution=True,
+            run_id=run_id,
+        )
+        return result.get("eval_correctness_score")
+
+    optimizer = AFlowOptimizer(gateway, store, run_fn, aflow)
+    target_nodes = [n.strip() for n in aflow.target_nodes.split(",") if n.strip()] or [
+        "execute"
+    ]
+    bucket = bucket_specs_by_category(list(BATTERY04_GOALS))
+
+    click.echo("=" * 60)
+    click.echo("🔀 AFlow workflow-topology optimizer (technique-policy search)")
+    click.echo("=" * 60)
+    click.echo(
+        f"target_nodes={target_nodes}  categories={sorted(bucket)}  "
+        f"max_candidates={aflow.max_candidates}"
+    )
+    for node in target_nodes:
+        for category, seeds in sorted(bucket.items()):
+            result = await optimizer.optimize(node, category, seeds=seeds)
+            click.echo("-" * 60)
+            click.echo(
+                f"{node}/{category}  promoted={result.promoted} skipped={result.skipped} "
+                f"reason={result.reason or '-'}"
+            )
+            click.echo(
+                f"  baseline={_fmt_score(result.baseline)} "
+                f"best={_fmt_score(result.best_score)} names={result.names or '-'}"
+            )
 
 
 async def _run_retrieval_eval(k: int) -> None:

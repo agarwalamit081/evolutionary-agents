@@ -2023,6 +2023,60 @@ class LatsSettings(BaseSettings):
     )
 
 
+class AflowSettings(BaseSettings):
+    """AFlow / ADAS workflow-topology optimization (Phase 5 G3b).
+
+    An OFFLINE optimizer that searches which prompting TECHNIQUES get wired into
+    each graph node, in what order, PER TASK CATEGORY — the one rewirable
+    topology surface (``TechniqueSelector``), distinct from C2's single-node
+    prompt-text optimizer and the mutation engine. Learns a per-(node, category)
+    override via baseline→propose→evaluate→keep-if-better over an injected
+    fitness ``run_fn`` (full agent runs reading correctness), persisted through
+    an ``AflowPolicyStore`` pointer (mirrors ``PromotionGate``). Default-off:
+    when disabled the builder hook short-circuits before any pointer read and
+    ``optimize()`` is a no-op — selection is byte-identical (mirrors the LATS
+    opt-in convention). The optimizer never raises (structured ``AflowResult``).
+
+    The caps are the cost guardrail — fitness = real agent runs, bounded by
+    ``max_candidates`` (× seed count) per (node, category); ``max_cost_usd`` is
+    an advisory mid-search cap the CLI wires to the ledger, and the per-run
+    budget hard-stop inside ``execute_run`` is the backstop.
+    """
+
+    # Master opt-in. Default False so a host run never installs an AFlow policy
+    # (selection byte-identical). Env: AFLOW_ENABLED.
+    enabled: bool = False  # Env: AFLOW_ENABLED
+    # Comma-separated target nodes to optimize (e.g. "execute" or
+    # "plan,execute"). Env: AFLOW_TARGET_NODES.
+    target_nodes: str = "execute"  # Env: AFLOW_TARGET_NODES
+    # Max DISTINCT candidate policies proposed per (node, category) (the dominant
+    # cost lever — each is a full fitness evaluation × seeds). Env:
+    # AFLOW_MAX_CANDIDATES.
+    max_candidates: int = 3  # Env: AFLOW_MAX_CANDIDATES
+    # Required improvement over the baseline to accept a candidate policy. 0.0
+    # = any improvement; raise to require a clear margin. Env:
+    # AFLOW_IMPROVEMENT_MARGIN.
+    improvement_margin: float = 0.0  # Env: AFLOW_IMPROVEMENT_MARGIN
+    # Advisory mid-search spend cap (USD). 0 = inert (the CLI wires a real ledger
+    # read; max_candidates + the per-run hard-stop are the hard bounds). Env:
+    # AFLOW_MAX_COST_USD.
+    max_cost_usd: float = 1.0  # Env: AFLOW_MAX_COST_USD
+    # Pre-flight C1 safety gate: refuse to consolidate during a known regression
+    # OR insufficient curve data (mirrors the optimizer's require_curve_clear).
+    # Env: AFLOW_PREFLIGHT_CURVE_CLEAR.
+    preflight_curve_clear: bool = True  # Env: AFLOW_PREFLIGHT_CURVE_CLEAR
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps AFLOW_* vars to these fields, mirroring the LATS
+        # pattern (a missing prefix silently ignores vars).
+        env_prefix="aflow_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class Settings(BaseSettings):
     """Root settings class that composes all settings groups."""
 
@@ -2058,6 +2112,7 @@ class Settings(BaseSettings):
     agent_cron: AgentCronSettings = AgentCronSettings()  # type: ignore[assignment]
     git_clone: GitCloneSettings = GitCloneSettings()  # type: ignore[assignment]
     lats: LatsSettings = LatsSettings()  # type: ignore[assignment]
+    aflow: AflowSettings = AflowSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

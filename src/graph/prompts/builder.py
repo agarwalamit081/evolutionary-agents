@@ -84,6 +84,82 @@ def evolved_suffixes_for_node(node: str | None) -> list[str]:
         return []
 
 
+# Phase 5 G3b: in-process AFlow technique-policy candidate override. The AFlow
+# optimizer (``src.graph.search.aflow.AFlowOptimizer``) binds a candidate
+# ((node, category) → technique names) for the duration of an evaluation run
+# WITHOUT mutating the on-disk pointer, so a trial policy is visible to
+# ``aflow_techniques_for`` then cleared. Empty unless AFlow is mid-evaluation;
+# ``AFLOW_ENABLED`` off → the pointer read is skipped → byte-identical selection.
+_aflow_candidate: dict[tuple[str, str], list[str]] = {}
+
+
+def set_aflow_candidate(node: str, category: str, names: list[str]) -> None:
+    """Bind a candidate ((node, category) → names) for an eval run (in-process only)."""
+    _aflow_candidate[(node, category)] = list(names)
+
+
+def clear_aflow_candidate(node: str | None = None, category: str | None = None) -> None:
+    """Clear the candidate override (a matching node/category, or all when neither given).
+
+    ``node``/``category`` filter the entries to drop (None matches all on that axis);
+    both None clears everything. The optimizer clears per-(node, category) after each
+    trial and clears-all before the baseline.
+    """
+    if node is None and category is None:
+        _aflow_candidate.clear()
+        return
+    for key in [
+        k
+        for k in _aflow_candidate
+        if (node is None or k[0] == node) and (category is None or k[1] == category)
+    ]:
+        _aflow_candidate.pop(key, None)
+
+
+def aflow_candidate_for(node: str, category: str) -> list[str] | None:
+    """Read the in-process candidate for (node, category) (None when none bound).
+
+    Test/diagnostic accessor — mirrors how a fitness ``run_fn`` infers whether a
+    candidate is currently active during an AFlow evaluation.
+    """
+    if (node, category) in _aflow_candidate:
+        return list(_aflow_candidate[(node, category)])
+    return None
+
+
+def aflow_techniques_for(
+    node: str, category: str, budget_tokens: int = 512
+) -> list[Technique] | None:
+    """Active AFlow technique policy for (node, category); None when AFlow is inactive.
+
+    Precedence: in-process candidate → on-disk pointer (ONLY when ``AFLOW_ENABLED``)
+    → None. Returns None (not []) when there is no policy so the caller falls
+    through to the heuristic selector; returns a resolved Technique list (possibly
+    empty) when a policy IS active. Names are resolved via the registry (unknown /
+    off-node names dropped — a policy can never inject a technique the registry does
+    not key on for that node) and budget-capped. Never raises — a pointer read error
+    → None (AFlow must never break prompt building).
+    """
+    try:
+        if (node, category) in _aflow_candidate:
+            names = list(_aflow_candidate[(node, category)])
+        else:
+            from src.config.settings import get_settings
+
+            if not get_settings().aflow.enabled:
+                return None
+            from src.graph.search.aflow import AflowPolicyStore
+
+            names = AflowPolicyStore().current_policy(node, category)
+            if names is None:
+                return None
+        from src.graph.search.aflow import resolve_policy
+
+        return resolve_policy(names, node, budget_tokens)
+    except Exception:  # noqa: BLE001 — AFlow must never break prompt building
+        return None
+
+
 def render_evolved_block(suffixes: list[str]) -> str:
     """Render promoted suffixes as a headed ``[evolved]`` block (empty when none)."""
     if not suffixes:
@@ -148,6 +224,18 @@ def select_techniques_for_node(
     signal_text = refined_intent or goal_text
     audience = TechniqueSelector.infer_audience(signal_text)
     uncertainty = TechniqueSelector.infer_uncertainty(signal_text)
+    # Phase 5 G3b: an installed AFlow technique policy for (node, goal_pattern)
+    # overrides the heuristic selection. Byte-identical when no policy exists —
+    # ``aflow_techniques_for`` returns None (pointer read gated behind AFLOW_ENABLED,
+    # short-circuited before any IO when off), so the selector runs as before.
+    category = goal_pattern or "general"
+    aflow_policy = aflow_techniques_for(node, category, budget_tokens)
+    if aflow_policy is not None:
+        logger.info(
+            f"AFlow policy applied for {node}/{category}: "
+            f"{[t.name for t in aflow_policy]}"
+        )
+        return aflow_policy
     selected = _SELECTOR.select(
         complexity=complexity,
         node=node,

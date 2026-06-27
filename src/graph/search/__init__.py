@@ -8,6 +8,7 @@ corresponding gate is toggled.
 
 from __future__ import annotations
 
+from src.graph.search.aflow import AFlowOptimizer
 from src.graph.search.lats import lats_search_node
 
-__all__ = ["lats_search_node"]
+__all__ = ["AFlowOptimizer", "lats_search_node"]

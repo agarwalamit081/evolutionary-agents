@@ -1365,8 +1365,10 @@ class LangSmithSettings(BaseSettings):
 class EvalSettings(BaseSettings):
     """Evaluation harness configuration (Phase 3 correctness layer).
 
-    Eval is opt-in: ``eval_enabled`` gates the verify-node correctness checks
-    (a normal goal with no registered GoalSpec is unaffected even when True).
+    Eval is opt-in: ``eval_enabled`` gates the verify-node correctness checks.
+    A run with no registered battery GoalSpec still gets a generic ad-hoc
+    deliverable eval row (parsed + non-empty per on-disk deliverable) when
+    ``eval_adhoc_deliverables`` is on — pure observability, never enforced.
     ``eval_enforce`` (default False) makes a failing correctness check downgrade
     a "complete" verdict to incomplete so the agent retries; when False the
     score is recorded and a grounding warning emitted without changing the
@@ -1384,6 +1386,13 @@ class EvalSettings(BaseSettings):
     # run (state.eval_rescue_attempted) so the LLM-judge fires at most ~once
     # extra. Never forces completion — the iteration hard-cap still self-completes.
     eval_rescue_incomplete: bool = True  # Env: EVAL_RESCUE_INCOMPLETE
+    # Ad-hoc deliverable eval: a run with no battery GoalSpec still records a
+    # generic structural eval_results row (parse + non-empty per on-disk
+    # deliverable) so fresh/unspecced queries are evaluated too. Observability-
+    # only — never enforces (a parse hiccup must not loop a real run; verify's
+    # own completion gate already enforces well-formedness). Default on: zero
+    # LLM cost, pure observability; disable to skip eval entirely for ad-hoc runs.
+    eval_adhoc_deliverables: bool = True  # Env: EVAL_ADHOC_DELIVERABLES
 
     model_config = SettingsConfigDict(
         env_file=".env",

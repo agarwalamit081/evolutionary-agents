@@ -20,6 +20,7 @@ from src.llm.exceptions import BudgetExhaustedError
 from src.tools._paths import resolve_existing, results_root, strip_results_prefix
 
 if TYPE_CHECKING:
+    from src.eval.models import GoalSpec
     from src.llm.gateway import LLMGateway
 
 
@@ -727,8 +728,20 @@ async def _run_correctness_checks(
     from src.eval.golden import lookup_goal_spec
 
     spec = lookup_goal_spec(state.get("eval_goal_spec_id"))
+    _adhoc_eval = False
     if spec is None:
-        return result
+        # No battery GoalSpec is registered for this run. When ad-hoc deliverable
+        # eval is on and the run produced files on disk, synthesize a generic
+        # structural spec (parse + non-empty per deliverable) so an ad-hoc query
+        # gets a machine-verifiable eval_results row too — pure observability
+        # (never enforced; a parse hiccup must not loop a real run, and verify's
+        # own completion gate already enforces well-formedness).
+        if not settings.eval.eval_adhoc_deliverables:
+            return result
+        spec = _build_adhoc_spec(deliverable_paths)
+        if spec is None:
+            return result
+        _adhoc_eval = True
 
     correctness = await run_checks(spec, deliverable_paths, state, gateway=gateway)
     # Observability: the eval layer previously ran silently on its happy path,
@@ -775,6 +788,12 @@ async def _run_correctness_checks(
         )
     except Exception as exc:  # noqa: BLE001 — eval persistence must never break verify
         logger.debug("Eval store write skipped: {}", exc)
+
+    # Ad-hoc eval is observability-only: it never enforces (a synthetic spec's
+    # parse hiccup must not loop a real run; verify's completion gate already
+    # enforces well-formedness). Battery-spec enforcement continues below.
+    if _adhoc_eval:
+        return result
 
     if settings.eval.eval_enforce and not correctness.passed:
         iteration = state.get("iteration_count", 0)
@@ -1066,6 +1085,54 @@ def _any_deliverable_on_disk(deliverable_paths: list[str]) -> bool:
     so "present" means the same thing as in ``_load_deliverable_content``.
     """
     return any(_resolve_deliverable(p) is not None for p in deliverable_paths)
+
+
+def _build_adhoc_spec(deliverable_paths: list[str]) -> GoalSpec | None:
+    """Synthesize a generic structural GoalSpec for an ad-hoc (no battery spec) run.
+
+    An ad-hoc query has no registered GoalSpec, so verify's correctness layer used
+    to skip it entirely (``spec is None``) — writing no eval_results row even when
+    the run produced real deliverables. This builds one structural check (parsed +
+    non-empty; CSV/JSON/JSONL are parse-checked via StructuralCheck's auto-applied
+    ``parsed_nonempty`` condition) per deliverable that resolves to an on-disk
+    file, so every completed ad-hoc run gets a machine-verifiable eval row. Pure
+    observability — the caller never enforces it.
+
+    Returns ``None`` when no declared deliverable resolves to a file on disk
+    (nothing to check), so the caller leaves the result unchanged rather than
+    recording a vacuous row.
+    """
+    from src.eval.models import CheckConfig, GoalSpec
+
+    on_disk: list[str] = []
+    checks: list[CheckConfig] = []
+    seen: set[str] = set()
+    for raw in deliverable_paths:
+        resolved = _resolve_deliverable(raw)
+        if resolved is None or not resolved.is_file():
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        on_disk.append(raw)
+        checks.append(
+            CheckConfig(
+                check_type="structural",
+                name=f"adhoc:{Path(raw).name}",
+                params={"deliverable": raw},
+            )
+        )
+    if not checks:
+        return None
+    return GoalSpec(
+        spec_id="adhoc-deliverables",
+        name="adhoc-deliverables",
+        goal_text="adhoc deliverable evaluation (synthetic spec — no battery GoalSpec)",
+        expected_deliverables=on_disk,
+        checks=checks,
+        target_node=None,
+    )
 
 
 def _resolve_deliverable(raw: str) -> Path | None:

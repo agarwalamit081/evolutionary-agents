@@ -37,6 +37,7 @@ def _settings(
             eval_canary_min_score=0.8,
             eval_store_enabled=False,  # keep the suite DB-free
             eval_rescue_incomplete=True,
+            eval_adhoc_deliverables=True,
         ),
     )
 
@@ -223,6 +224,7 @@ class TestRunCorrectnessChecksRealQ01Spec:
                 eval_canary_min_score=0.8,
                 eval_store_enabled=False,  # DB-free
                 eval_rescue_incomplete=True,
+                eval_adhoc_deliverables=True,
             ),
         )
         # verify binds get_settings at module level — patch both bindings so the

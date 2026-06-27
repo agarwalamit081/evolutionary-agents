@@ -106,7 +106,12 @@ class TestDefaultOff:
     async def test_off_short_circuits_no_driver_touch(self) -> None:
         """enabled=False ⇒ _write/_read never open a session."""
         store = _store()
-        settings = Neo4jSettings(_env_file=None, enabled=False)  # type: ignore[call-arg]
+        # `enabled` carries a validation_alias (GRAPH_ENABLED), so an `enabled=False`
+        # init-kwarg is ignored by pydantic-settings (it'd map to the alias name).
+        # Flip the instance attribute directly — mirrors `_enabled_settings` — so this
+        # default-off test stays hermetic to the live .env value.
+        settings = Neo4jSettings(_env_file=None)  # type: ignore[call-arg]
+        settings.enabled = False
         graph = Neo4jGraph(settings, driver=_FakeDriver(store))
 
         await graph.sync_skill("normalize", "content", skill_type="skill")

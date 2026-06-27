@@ -83,6 +83,9 @@ class TestSelectSubagentsForSubtask:
     ) -> None:
         """Regression guard: default-off is unchanged — all spawn, embed never called."""
         s = Settings()
+        # Pin OFF explicitly so this stays hermetic to the ambient .env value of
+        # AGENT_SELECTION_ENABLED.
+        s.agent.agent_selection_enabled = False
         assert s.agent.agent_selection_enabled is False
         spawned = _spawned("a", "b", "c")
         embed_called = {"v": False}

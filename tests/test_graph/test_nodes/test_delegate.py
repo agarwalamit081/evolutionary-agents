@@ -1082,6 +1082,10 @@ class TestSubAgentSelection:
         }
 
         default_off = Settings()
+        # Pin OFF explicitly so the patched get_settings() returns a genuinely
+        # default-off instance, independent of the ambient .env value of
+        # AGENT_SELECTION_ENABLED.
+        default_off.agent.agent_selection_enabled = False
         assert default_off.agent.agent_selection_enabled is False
         with patch(
             "src.graph.nodes.delegate.get_settings", return_value=default_off

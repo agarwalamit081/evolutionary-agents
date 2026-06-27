@@ -618,8 +618,11 @@ class TestPlanAtomicityNodeIntegration:
         return state
 
     @pytest.mark.asyncio
-    async def test_plan_quality_always_attached(self) -> None:
+    async def test_plan_quality_always_attached(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Even with enforce off, plan_quality is attached as advisory telemetry."""
+        # Pin enforce OFF explicitly (mirrors the _on tests) so this stays
+        # hermetic to the ambient .env value of PLAN_ATOMICITY_ENFORCE.
+        monkeypatch.setattr(get_settings().agent, "plan_atomicity_enforce", False)
         state = self._state_with_coarse_goal("thread-quality")
         result = await plan_node(state, gateway=_mock_gateway_for_plan(self._COARSE_PLAN_JSON))
         # The coarse step is preserved (enforce is off by default).
@@ -632,8 +635,11 @@ class TestPlanAtomicityNodeIntegration:
         assert "atomicity_replan_done" not in result
 
     @pytest.mark.asyncio
-    async def test_enforce_off_preserves_coarse_step(self) -> None:
+    async def test_enforce_off_preserves_coarse_step(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default-off: the coarse step is NOT split (plan unchanged)."""
+        # Pin enforce OFF explicitly so this stays hermetic to the ambient .env
+        # value of PLAN_ATOMICITY_ENFORCE.
+        monkeypatch.setattr(get_settings().agent, "plan_atomicity_enforce", False)
         state = self._state_with_coarse_goal("thread-nosplit")
         result = await plan_node(state, gateway=_mock_gateway_for_plan(self._COARSE_PLAN_JSON))
         assert len(result["plan_steps"]) == 1

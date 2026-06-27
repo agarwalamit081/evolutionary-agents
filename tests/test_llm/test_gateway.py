@@ -1318,6 +1318,9 @@ class TestGatewayVision:
         and plain text content reaches the provider — byte-identical to a
         text-only call."""
         mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
+        # Pin vision OFF explicitly (mirrors the _on test below) so this stays
+        # hermetic to the ambient .env value of VISION_ENABLED.
+        gateway._settings.agent.vision_enabled = False
         assert gateway._settings.agent.vision_enabled is False
 
         with patch("src.llm.gateway.litellm") as mock_litellm:

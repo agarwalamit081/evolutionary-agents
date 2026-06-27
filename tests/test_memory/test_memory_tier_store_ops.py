@@ -177,6 +177,11 @@ class TestHotTtlEviction:
         mem = HotMemory(redis_client=redis, ttl_seconds=3600)
         # Explicit short TTL overrides the default long TTL.
         await mem.set("quick", {"x": 1}, ttl=1)
+        # Advance the fakeredis server clock past the 1s TTL (mirrors
+        # ``test_value_evicted_after_ttl``) so the assertion is deterministic
+        # rather than depending on a 0.2s wall-clock margin that flakes under
+        # heavy suite load.
+        redis.now = lambda: time.time() + 5  # type: ignore[assignment]
         time.sleep(1.2)
         assert await mem.get("quick") is None
 

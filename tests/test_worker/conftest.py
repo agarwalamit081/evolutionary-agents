@@ -33,6 +33,11 @@ def worker_settings() -> WorkerSettings:
         block_ms=10,
         reclaim_min_idle_ms=0,
         status_ttl_s=0,
+        # "Unarmed" by default (0s ⇒ no hard wall-clock cap) so the
+        # timeout-precedence / stray-dead-letter tests stay hermetic to the
+        # ambient .env value of WORKER_RUN_TIMEOUT_S. Tests that exercise the
+        # armed path opt in via ``model_copy(update={"run_timeout_s": ...})``.
+        run_timeout_s=0,
     )
 
 

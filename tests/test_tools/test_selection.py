@@ -48,6 +48,10 @@ def _enabled_settings(top_k: int = 8) -> Settings:
     s = Settings()
     s.agent.tool_retrieval_enabled = True
     s.agent.tool_retrieval_top_k = top_k
+    # Blend OFF by default: callers that exercise the success-blend path opt in
+    # via ``_blend_settings``. Pinning this keeps the "blend OFF" test hermetic to
+    # the ambient .env value of TOOL_RETRIEVAL_BLEND_SUCCESS.
+    s.agent.tool_retrieval_blend_success = False
     return s
 
 
@@ -111,6 +115,9 @@ class TestSelectToolsForQuery:
     async def test_disabled_flag_returns_full_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Regression guard: default-off is unchanged — full set, embed never called."""
         s = Settings()
+        # Pin OFF explicitly so this stays hermetic to the ambient .env value of
+        # TOOL_RETRIEVAL_ENABLED.
+        s.agent.tool_retrieval_enabled = False
         assert s.agent.tool_retrieval_enabled is False
         reg = _registry_with("web_search", "dyn_a", "dyn_b")
         embed_called = {"v": False}

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.config.settings import Settings
+from src.config.settings import AgentSettings, Settings
 from src.tools.selection import _retrieve_with_blend, blend_rank, select_tools_for_query
 
 
@@ -133,10 +133,19 @@ class TestRetrieveWithBlendContract:
 
 
 class TestSelectionParityAndKnobs:
-    def test_all_tool_retrieval_knobs_default_off(self) -> None:
+    def test_all_tool_retrieval_knobs_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Byte-identical behavior until toggled on — every knob starts False/conservative.
-        s = Settings()
-        a = s.agent
+        # Verify the genuine CODE defaults by clearing BOTH the ambient env vars
+        # (pytest's collection pollutes ``os.environ`` with the live .env values)
+        # AND the .env file (``_env_file=None``) — BaseSettings reads both, so
+        # neither alone is hermetic here.
+        for var in (
+            "TOOL_RETRIEVAL_ENABLED",
+            "TOOL_RETRIEVAL_BLEND_SUCCESS",
+            "AGENT_SELECTION_ENABLED",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        a = AgentSettings(_env_file=None)  # type: ignore[call-arg]
         assert a.tool_retrieval_enabled is False
         assert a.tool_retrieval_blend_success is False
         assert a.agent_selection_enabled is False  # F1 also default-off
@@ -161,6 +170,9 @@ class TestSelectionParityAndKnobs:
 
         monkeypatch.setattr("src.tools.selection.embed_capability", fake_embed)
         s = Settings()  # tool_retrieval_enabled False
+        # Pin OFF explicitly so this stays hermetic to the ambient .env value of
+        # TOOL_RETRIEVAL_ENABLED.
+        s.agent.tool_retrieval_enabled = False
         out = await select_tools_for_query("anything", reg, s)
         assert out == reg.list_tools()
         assert embed_called["v"] is False

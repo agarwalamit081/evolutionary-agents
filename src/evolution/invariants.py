@@ -1,27 +1,35 @@
 """Graph-invariant verifier, stage-1 (Phase 5 G1).
 
-Deterministic, **static-AST** checks over a deployed mutation's shadow-repo
-snapshot. No LLM, no imports, no execution — so they are fast, hermetic, and
+Deterministic checks over a deployed mutation's shadow-repo snapshot. Four are
+**static-AST** (no LLM, no execution); one (``imports_clean``) runs a hermetic
+import smoke in a subprocess. Together they are fast, hermetic, and
 unit-testable with planted fixtures. The evolution engine runs these between
 ``deploy()`` and ``post_deploy_verify()`` for CODE mutations; a failed
 invariant trips the existing ``rollback_deployment()`` path so a
 graph-breaking mutation never reaches the running agent.
 
-Four checks (mapped to findings.md's cycle / bad-router / breaking-state-change
+Five checks (mapped to findings.md's cycle / bad-router / breaking-state-change
 classes):
 
 1. ``compiles`` — every ``.py`` under the repo ``src/`` tree parses and
    compiles (``ast.parse`` + ``compile``; no file written, no import). Catches
    a mutation that left the agent's own source in a syntax-broken state.
-2. ``state_schema_compatible`` — the mutated ``AgentState`` TypedDict is a
+2. ``imports_clean`` — the mutated ``src/graph/{state,routers,task_graph}``
+   modules import successfully in a **subprocess** that shares the live
+   interpreter + environment but isolates ``sys.modules``. Catches import-time
+   breakage ``compile`` cannot: ``NameError`` / ``AttributeError`` /
+   ``ModuleNotFoundError`` / circular-import / missing-symbol raised while the
+   mutated graph's import graph is resolved. Never run in-process — importing
+   the shadow ``src`` would clobber the running agent's own modules.
+3. ``state_schema_compatible`` — the mutated ``AgentState`` TypedDict is a
    superset of the live baseline (no baseline key removed). Adding fields is
    safe; removing/renaming one a live node reads is a breaking change.
-3. ``routers_valid`` — every ``return "<literal>"`` in a ``route_*`` function
+4. ``routers_valid`` — every ``return "<literal>"`` in a ``route_*`` function
    is a registered node name (``add_node("...", ...)``) or the sentinel
    ``"complete"`` (which maps to END). Catches a router rewired to a node the
    graph never registered (LangGraph would raise at compile time — we catch it
    earlier, without compiling).
-4. ``no_self_loops`` — no ``graph.add_edge("X", "X")`` with identical string
+5. ``no_self_loops`` — no ``graph.add_edge("X", "X")`` with identical string
    literals (a degenerate progress-free cycle; the intentional
    ``execute→execute`` retry goes through ``add_conditional_edges`` and is
    bounded by the iteration cap, so it is exempt).
@@ -32,11 +40,20 @@ than failed — the verifier must never false-positive on a repo shape it didn't
 plant. The engine wraps the whole call in a fail-open guard, so a verifier bug
 never aborts an evolution cycle (the post-deploy sandbox smoke remains as the
 second barrier).
+
+Note: termination and budget are **runtime-enforced** (``effective_max_iterations``
++ the budget hard-cap live inside ``route_after_*`` router logic, not graph
+structure), so a sound *static* proof that a mutated graph still terminates is
+deferred — the runtime sandbox smoke (``post_deploy_verify``) is the dynamic
+backstop.
 """
 
 from __future__ import annotations
 
 import ast
+import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,8 +70,8 @@ class InvariantCheck:
     """The outcome of one invariant check.
 
     Attributes:
-        name: Stable check identifier (``compiles``, ``state_schema_compatible``,
-            ``routers_valid``, ``no_self_loops``).
+        name: Stable check identifier (``compiles``, ``imports_clean``,
+            ``state_schema_compatible``, ``routers_valid``, ``no_self_loops``).
         passed: ``True`` iff the invariant holds (or was deliberately skipped).
         detail: Human-readable explanation / first offending item.
     """
@@ -262,6 +279,98 @@ def _check_compiles(repo_path: Path) -> InvariantCheck:
     )
 
 
+# ─── Dynamic import smoke ────────────────────────────────────────────────
+
+# Importing these three in a subprocess transitively pulls the whole node
+# package (src/graph/nodes/* → llm/gateway, memory/manager, tools/registry),
+# so a broken import anywhere in the orchestration layer's import graph is
+# surfaced — far broader than the ``compiles`` AST check.
+_IMPORT_SMOKE_MODULES: tuple[str, ...] = (
+    "src.graph.state",
+    "src.graph.routers",
+    "src.graph.task_graph",
+)
+
+# Bounded wall-clock: a pathological mutated import (an accidental blocking
+# call / infinite loop at module top) must not hang the evolution cycle.
+_IMPORT_SMOKE_TIMEOUT_S: int = 30
+
+
+def _check_imports(repo_path: Path) -> InvariantCheck:
+    """Dynamic import smoke — import the mutated graph modules in a subprocess.
+
+    ``compile`` (the ``compiles`` check) catches ``SyntaxError`` but nothing
+    that fires when the module is *resolved*: ``NameError`` / ``AttributeError``
+    at module scope, ``ModuleNotFoundError`` for a renamed/missing dependency,
+    circular-import errors, or a symbol a downstream ``from … import …``
+    expects but no longer exists. Those only surface on actual import.
+
+    Runs ``sys.executable -c "<smoke>"`` in a **child process** with
+    ``PYTHONPATH=<repo>`` and the live environment inherited. The shadow
+    ``src/`` resolves first on that path, so the *mutated* modules import —
+    but in isolation: importing them in-process would replace the live agent's
+    ``src.graph.*`` entries in our own ``sys.modules``, poisoning this process.
+    Sharing the interpreter + env + deps means an import failure here is a
+    genuine breakage the running agent would hit, so there is no
+    false-positive surface.
+
+    Skip-pass semantics (mirroring the sibling checks — never false-positive on
+    a repo shape it didn't plant): no ``task_graph.py`` ⇒ skip; no interpreter
+    found (``FileNotFoundError``) ⇒ skip (fail-open). A timeout or nonzero exit
+    ⇒ fail, the detail naming the offending error (last stderr/stdout line).
+    """
+    task_graph = repo_path / "src" / "graph" / "task_graph.py"
+    if not task_graph.is_file():
+        return InvariantCheck(
+            "imports_clean",
+            passed=True,
+            detail="skipped (task_graph.py absent from repo)",
+        )
+
+    imports = ", ".join(f"importlib.import_module({m!r})" for m in _IMPORT_SMOKE_MODULES)
+    smoke_code = f"import importlib; {imports}\n"
+    # Inherit the live environment (interpreter, deps, config) so the subprocess
+    # matches the running agent's import conditions exactly; prepend the repo so
+    # the shadow src/ takes precedence over any installed copy.
+    env = {**os.environ, "PYTHONPATH": str(repo_path), "PYTHONUNBUFFERED": "1"}
+    try:
+        proc = subprocess.run(  # noqa: S603 -- argv is fully literal; code is a hardcoded import probe
+            [sys.executable, "-c", smoke_code],
+            cwd=str(repo_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_IMPORT_SMOKE_TIMEOUT_S,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        return InvariantCheck(
+            "imports_clean",
+            passed=True,
+            detail=f"skipped (interpreter unavailable: {exc})",
+        )
+    except subprocess.TimeoutExpired:
+        return InvariantCheck(
+            "imports_clean",
+            passed=False,
+            detail=f"import smoke timed out (>{_IMPORT_SMOKE_TIMEOUT_S}s) — pathological import",
+        )
+
+    if proc.returncode != 0:
+        stream = (proc.stderr or proc.stdout or "").strip().splitlines()
+        last = stream[-1] if stream else f"exit code {proc.returncode}"
+        return InvariantCheck(
+            "imports_clean",
+            passed=False,
+            detail=f"import failed: {last}",
+        )
+    return InvariantCheck(
+        "imports_clean",
+        passed=True,
+        detail="src/graph/{state,routers,task_graph} import clean in subprocess",
+    )
+
+
 def _check_state_schema(
     state_path: Path,
     baseline_keys: set[str] | None,
@@ -368,6 +477,7 @@ def verify_graph_invariants(
 
     checks: tuple[InvariantCheck, ...] = (
         _check_compiles(root),
+        _check_imports(root),
         _check_state_schema(state_path, baseline_state_keys),
         _check_routers(routers_path, task_graph_path),
         _check_no_self_loops(task_graph_path),

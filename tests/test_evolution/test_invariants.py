@@ -1,8 +1,10 @@
 """Tests for src.evolution.invariants — stage-1 graph-invariant verifier (Phase 5 G1).
 
-Pure static-AST checks over planted repo fixtures (no LLM, no execution). The
-engine hook wiring (``SelfEvolutionEngine._verify_invariants``) is exercised
-against planted shadow-repo snapshots and the fail-open guard.
+Four checks are pure static-AST over planted repo fixtures (no LLM, no
+execution); the fifth (``imports_clean``) spawns a subprocess that imports the
+mutated graph modules in isolation. The engine hook wiring
+(``SelfEvolutionEngine._verify_invariants``) is exercised against planted
+shadow-repo snapshots and the fail-open guard.
 """
 
 from __future__ import annotations
@@ -86,8 +88,22 @@ def build():
     return graph
 """
 
+# A task_graph that compiles cleanly (passes the ``compiles`` check) but raises
+# at IMPORT time — ``ModuleNotFoundError`` here is invisible to ``compile()``
+# and only surfaces when the module is actually imported (what imports_clean
+# catches). Names an attribute on a missing submodule, not a bare raise, so the
+# failure is representative of a real rename/missing-symbol mutation.
+_BROKEN_IMPORT_TASK_GRAPH = """from src.graph.does_not_exist import missing_symbol
+"""
+
 _BASELINE_KEYS: set[str] = {"goal", "messages", "errors"}
-_CHECK_NAMES = {"compiles", "state_schema_compatible", "routers_valid", "no_self_loops"}
+_CHECK_NAMES = {
+    "compiles",
+    "imports_clean",
+    "state_schema_compatible",
+    "routers_valid",
+    "no_self_loops",
+}
 
 
 def _write_repo(
@@ -113,20 +129,26 @@ def _write_repo(
 
 
 def _write_repo_with_live_graph(tmp_path: Path) -> Path:
-    """Plant a repo whose src/graph/* is a COPY of the live graph files.
+    """Plant a repo whose ``src/`` is a full COPY of the live source tree.
 
     The engine computes its baseline from the live state.py, so a repo whose
     state.py IS the live one is an exact superset (0 removed) → all checks
     pass. Used to validate the hook's good-repo path against real files.
+
+    The full tree (not just the three graph files) is required because the
+    ``imports_clean`` check spawns a subprocess that imports the real
+    ``src.graph.task_graph``, which transitively imports the nodes package,
+    config, llm gateway, memory, and tools — only a full copy resolves that
+    import graph. The ~5s subprocess cost is inherent to importing the live
+    orchestration stack and is expected for these real-file validation tests.
     """
-    live_graph = _REPO_ROOT / "src" / "graph"
     root = tmp_path / "repo"
-    gdir = root / "src" / "graph"
-    gdir.mkdir(parents=True, exist_ok=True)
-    (root / "src" / "__init__.py").write_text("", encoding="utf-8")
-    (gdir / "__init__.py").write_text("", encoding="utf-8")
-    for name in ("state.py", "routers.py", "task_graph.py"):
-        shutil.copy(live_graph / name, gdir / name)
+    root.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        _REPO_ROOT / "src",
+        root / "src",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     return root
 
 
@@ -134,7 +156,7 @@ def _write_repo_with_live_graph(tmp_path: Path) -> Path:
 
 
 class TestVerifyGraphInvariants:
-    """The four stage-1 checks against planted-good / planted-bad repos."""
+    """The five stage-1 checks against planted-good / planted-bad repos."""
 
     def test_good_repo_passes_all_checks(self, tmp_path: Path) -> None:
         report = verify_graph_invariants(
@@ -200,6 +222,70 @@ class TestVerifyGraphInvariants:
             c for c in report.checks if c.name == "state_schema_compatible"
         )
         assert "skipped" in state_check.detail
+
+
+# ─── imports_clean: dynamic subprocess import smoke ─────────────────────
+
+
+class TestImportSmoke:
+    """The ``imports_clean`` check — a subprocess imports the mutated graph.
+
+    Uses the minimal planted fixtures (fast: the minimal task_graph has no
+    imports, so the subprocess resolves instantly). The ``_check_imports``
+    skip/fail/pass branches are each exercised, plus a subprocess-isolation
+    assertion proving the smoke reads the SHADOW src without poisoning the live
+    process's ``sys.modules``.
+    """
+
+    def test_imports_clean_passes_on_minimal_graph(self, tmp_path: Path) -> None:
+        report = verify_graph_invariants(_write_repo(tmp_path))
+        smoke = next(c for c in report.checks if c.name == "imports_clean")
+        assert smoke.passed, smoke.detail
+
+    def test_imports_clean_fails_on_broken_import(self, tmp_path: Path) -> None:
+        report = verify_graph_invariants(
+            _write_repo(tmp_path, task_graph=_BROKEN_IMPORT_TASK_GRAPH)
+        )
+        # The broken import trips imports_clean → the whole report fails, so a
+        # graph-breaking mutation would roll back in the engine.
+        assert not report.passed
+        smoke = next(c for c in report.failures if c.name == "imports_clean")
+        assert "import failed" in smoke.detail
+        assert "does_not_exist" in smoke.detail
+
+    def test_imports_clean_skips_when_task_graph_absent(self, tmp_path: Path) -> None:
+        # No task_graph.py ⇒ the smoke cannot run ⇒ skip-as-pass (never
+        # false-positive on a repo shape it didn't plant).
+        root = _write_repo(tmp_path, include_graph=False)
+        (root / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
+        report = verify_graph_invariants(root)
+        smoke = next(c for c in report.checks if c.name == "imports_clean")
+        assert smoke.passed
+        assert "skipped" in smoke.detail
+
+    def test_imports_clean_reads_shadow_not_live(self, tmp_path: Path) -> None:
+        # The shadow state defines a marker the LIVE state lacks; task_graph
+        # imports it. A passing smoke PROVES the subprocess resolved the SHADOW
+        # src (the live state has no such attribute → import would fail), and
+        # the post-run check PROVES the subprocess did not poison this process.
+        root = tmp_path / "repo"
+        gdir = root / "src" / "graph"
+        gdir.mkdir(parents=True)
+        (root / "src" / "__init__.py").write_text("", encoding="utf-8")
+        (gdir / "__init__.py").write_text("", encoding="utf-8")
+        (gdir / "state.py").write_text('SHADOW_MARKER = "isolated"\n', encoding="utf-8")
+        (gdir / "routers.py").write_text("def route():\n    return 1\n", encoding="utf-8")
+        (gdir / "task_graph.py").write_text(
+            "from src.graph.state import SHADOW_MARKER  # lives ONLY in shadow\n"
+            "_ = SHADOW_MARKER\n",
+            encoding="utf-8",
+        )
+        report = verify_graph_invariants(root)
+        smoke = next(c for c in report.checks if c.name == "imports_clean")
+        assert smoke.passed, smoke.detail
+        import src.graph.state as live_state
+
+        assert not hasattr(live_state, "SHADOW_MARKER")  # live unpoisoned
 
 
 # ─── extract_state_keys ─────────────────────────────────────────────────

@@ -360,6 +360,41 @@ services:
       - turing-net
     restart: unless-stopped
 
+  # ─── Phase 5 I3 — Neo4j entity/relation graph (structured mirror) ──────────
+  # Profile-gated (opt-in): bring up with `docker compose --profile graph up -d`.
+  # The api/worker mirror STRUCTURED records (sub-agents, skills/procedures/
+  # workflows, facts) into this graph on write when GRAPH_ENABLED (NEO4J_URI ->
+  # bolt://neo4j:7687 mirrored via .env). NO LLM extraction here — pure structured
+  # sync. LEAST-PRIVILEGE: no DATABASE_URL / search / runner creds (it owns no run
+  # logic). Best-effort + non-fatal: a down/slow/unreachable Neo4j never aborts a
+  # run (the mirror write is caught + logged WARNING), so no healthcheck gate is
+  # wired — the first mirror after it is up simply succeeds.
+  neo4j:
+    profiles: ["graph"]
+    image: neo4j:5-community          # 5.x community (free); pin to neo4j:5.26 for reproducibility
+    ports:
+      - "7474:7474"                   # HTTP browser UI (http://localhost:7474)
+      - "7687:7687"                   # Bolt — api/worker connect via bolt://neo4j:7687
+    environment:
+      # user/password the container bootstraps; set NEO4J_AUTH=neo4j/<password> in
+      # .env and make the api/worker NEO4J_PASSWORD match <password>.
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/turing-graph}
+    volumes:
+      - neo4jdata:/data
+    deploy:
+      resources:
+        limits:
+          memory: 1g                  # JVM heap + page cache for the structured mirror
+          cpus: "1.0"
+          pids: 512
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - turing-net
+    restart: unless-stopped
+
   # ─── Phase 2 C2 — metric-driven prompt-optimizer sidecar (DSPy + GEPA) ──
   # The IMPROVEMENT loop C1 left out. The scheduler POSTs /optimize (OPTIMIZER_CRON,
   # gated by OPTIMIZER_ENABLED); the optimizer runs DSPy/GEPA against a cheap proxy
@@ -537,6 +572,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  neo4jdata:
   meilidata:
   turing-workspace:
   turing-logs:

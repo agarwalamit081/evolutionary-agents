@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config.settings import Settings
 from src.memory.cold import ColdMemory as ColdMemoryStore
 from src.memory.embeddings import EmbeddingGenerator
+from src.memory.graph import Neo4jGraph
 from src.memory.hot import HotMemory as HotMemoryStore
 from src.memory.warm import WarmMemoryStore
 
@@ -43,6 +44,13 @@ class MemoryManager:
             generator=embedding_gen,
         )
         self._settings = settings
+        # I3 — Neo4j entity/relation mirror (default-off). Held for the process
+        # lifetime so the underlying driver pools connections across all writes;
+        # skills/facts sync best-effort and a graph hiccup never aborts a run.
+        # None when GRAPH_ENABLED is off (the driver isn't even imported then).
+        self._graph: Neo4jGraph | None = (
+            Neo4jGraph(settings.neo4j) if settings.neo4j.enabled else None
+        )
         logger.info("MemoryManager initialized with hot/warm/cold tiers")
 
     async def store_observation(
@@ -99,13 +107,21 @@ class MemoryManager:
         Returns:
             UUID of the stored skill.
         """
-        return await self.warm.store(
+        skill_id = await self.warm.store(
             memory_type=skill_type,
             name=name,
             content=content,
             tags=tags,
             fitness_score=0.5,
         )
+        # I3 — mirror the skill/procedure/workflow into the Neo4j graph
+        # (best-effort, default-off). Non-graph-worthy types such as
+        # folded_memory are skipped inside the store via its label whitelist.
+        if self._graph is not None:
+            await self._graph.sync_skill(
+                name, content, skill_type=skill_type, tags=tags
+            )
+        return skill_id
 
     async def retrieve_context(
         self,
@@ -198,13 +214,19 @@ class MemoryManager:
         Returns:
             UUID of the stored fact.
         """
-        return await self.warm.store_fact(
+        fact_id = await self.warm.store_fact(
             key=key,
             value=value,
             source=source,
             confidence=confidence,
             tags=tags,
         )
+        # I3 — mirror the fact into the Neo4j graph (best-effort, default-off).
+        if self._graph is not None:
+            await self._graph.sync_fact(
+                key, value, entity=key, confidence=confidence
+            )
+        return fact_id
 
     async def retrieve_facts(
         self,

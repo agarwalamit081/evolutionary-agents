@@ -2077,6 +2077,44 @@ class AflowSettings(BaseSettings):
     )
 
 
+class Neo4jSettings(BaseSettings):
+    """Neo4j entity/relation graph — structured mirror (Phase 5 I3).
+
+    An ADDITIVE, opt-in graph store: when enabled, the MemoryManager write hooks
+    mirror STRUCTURED records (sub-agent defs, skills/procedures/workflows, facts)
+    into Neo4j nodes/edges on write — a relationship substrate the relational +
+    pgvector stores don't express (which skills depend on X, which sub-agent
+    handles Y). Pure structured sync — NO LLM extraction (a later option).
+    Best-effort + non-fatal (CostTracker-resilience pattern): a missing package,
+    an unreachable Neo4j, or any driver error is caught, logged WARNING, and never
+    re-raises — a graph hiccup can never abort a run. Default-off: when disabled
+    the store is a no-op and nothing syncs (byte-identical to pre-I3).
+
+    Env-var names are read via explicit per-field validation_alias (no env_prefix)
+    so they are exactly GRAPH_ENABLED (the mirror FEATURE, conceptually independent
+    of the Neo4j connection — you may have Neo4j up but the mirror off) and
+    NEO4J_URI/USER/PASSWORD (the connection) — NOT NEO4J_ENABLED.
+    """
+
+    # Master opt-in for the entity/relation mirror. Env: GRAPH_ENABLED.
+    enabled: bool = Field(default=False, validation_alias="GRAPH_ENABLED")
+    # Bolt URI. Host mode: bolt://localhost:7687; compose: bolt://neo4j:7687.
+    # Env: NEO4J_URI.
+    uri: str = Field(default="bolt://localhost:7687", validation_alias="NEO4J_URI")
+    # Neo4j user (the container's bootstrap user). Env: NEO4J_USER.
+    user: str = Field(default="neo4j", validation_alias="NEO4J_USER")
+    # Neo4j password — MUST match the container NEO4J_AUTH password. Env:
+    # NEO4J_PASSWORD.
+    password: str = Field(default="", validation_alias="NEO4J_PASSWORD")
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class Settings(BaseSettings):
     """Root settings class that composes all settings groups."""
 
@@ -2113,6 +2151,7 @@ class Settings(BaseSettings):
     git_clone: GitCloneSettings = GitCloneSettings()  # type: ignore[assignment]
     lats: LatsSettings = LatsSettings()  # type: ignore[assignment]
     aflow: AflowSettings = AflowSettings()  # type: ignore[assignment]
+    neo4j: Neo4jSettings = Neo4jSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

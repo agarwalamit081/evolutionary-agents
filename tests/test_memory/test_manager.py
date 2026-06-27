@@ -37,6 +37,9 @@ def mock_settings() -> MagicMock:
     settings.llm.embedding_dim = 768
     # A4: hot-recall count read by retrieve_context (settings.agent.memory_hot_recall_size).
     settings.agent.memory_hot_recall_size = 3
+    # I3: Neo4j graph mirror stays OFF in unit tests (default-off in prod too) so
+    # store_skill/store_fact don't attempt a real driver/connectivity check.
+    settings.neo4j.enabled = False
     return settings
 
 

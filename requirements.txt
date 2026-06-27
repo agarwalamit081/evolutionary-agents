@@ -29,6 +29,7 @@ asyncpg==0.31.0
 alembic==1.18.4
 pgvector==0.4.2
 redis==7.4.0
+neo4j==5.28.4                       # Graph DB driver (I3 — entity/relation structured sync; default-off, lazy import so a missing/unreachable Neo4j never breaks a run)
 aiosqlite==0.21.0                   # Local development + testing only
 sqlite-vec==0.1.9                   # Local vector search without Postgres
 

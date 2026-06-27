@@ -87,6 +87,7 @@ class SubAgentPersister:
                     logger.info(
                         f"Updated sub-agent '{spec.name}' to version {new_version}"
                     )
+                    await self._sync_subagent_graph(spec)
                     return model.id
 
                 # Create new sub-agent
@@ -100,11 +101,47 @@ class SubAgentPersister:
                 await session.flush()
 
                 logger.info(f"Persisted new sub-agent '{spec.name}' (version 1)")
+                await self._sync_subagent_graph(spec)
                 return model.id
 
         except Exception as e:
             logger.warning(f"Failed to persist sub-agent '{spec.name}': {e}")
             return None
+
+    async def _sync_subagent_graph(self, spec: SubAgentSpec) -> None:
+        """Mirror a persisted sub-agent def into the Neo4j graph (I3).
+
+        Best-effort structured sync — no extraction. Lazy ``get_settings()``
+        + a fresh :class:`Neo4jGraph` per call (sub-agent creation is rare,
+        ≤3/run) so a missing package / unreachable Neo4j / any driver error is
+        caught inside the store and never re-raises. Default-off
+        (``GRAPH_ENABLED=False`` ⇒ no-op). Called AFTER the DB row is written,
+        so a graph hiccup can never abort the persistence.
+        """
+        try:
+            from src.config.settings import get_settings
+            from src.memory.graph import Neo4jGraph
+
+            neo4j_settings = get_settings().neo4j
+            if not neo4j_settings.enabled:
+                return
+            tier = (
+                spec.model_tier.value
+                if hasattr(spec.model_tier, "value")
+                else str(spec.model_tier)
+            )
+            graph = Neo4jGraph(neo4j_settings)
+            try:
+                await graph.sync_subagent(
+                    spec.name,
+                    spec.description,
+                    tool_scope=list(spec.tool_subset),
+                    model_tier=tier,
+                )
+            finally:
+                await graph.close()
+        except Exception as exc:  # noqa: BLE001 — non-fatal observability-only
+            logger.debug(f"Sub-agent graph sync skipped for '{spec.name}': {exc}")
 
     async def find_similar(
         self,

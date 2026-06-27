@@ -27,6 +27,8 @@ def _manager() -> tuple[MemoryManager, MagicMock]:
     settings = MagicMock()
     settings.redis.cache_ttl_seconds = 3600
     settings.llm.embedding_dim = 768
+    # I3: Neo4j graph mirror stays OFF in unit tests (default-off in prod too).
+    settings.neo4j.enabled = False
     mgr = MemoryManager(
         redis_client=MagicMock(),  # type: ignore[arg-type]
         db_session=MagicMock(),  # type: ignore[arg-type]

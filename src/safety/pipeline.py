@@ -18,7 +18,7 @@ _FORBIDDEN_PATTERNS: list[str] = [
     r"eval\s*\(",
     r"exec\s*\(",
     r"compile\s*\([^)]*['\"]exec['\"]",
-    r"open\s*\([^)]*['\"]w['\"].*(?:/etc/passwd|/etc/shadow|\.ssh|\.env)",
+    r"open\s*\([^)]*(?:/etc/passwd|/etc/shadow|\.ssh|\.env)",
     r"rm\s+-rf",
     r"shutil\.rmtree",
     r"pickle\.loads?\s*\(",

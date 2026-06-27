@@ -111,15 +111,16 @@ class TestSecurityBarrierRejectsDangerousPatterns:
         result = _security_layer('open("w", "/etc/passwd")\n')
         assert result["passed"] is False
 
-    def test_open_path_first_ordering_not_caught_by_layer3(self) -> None:
-        """KNOWN GAP (documented, not a regression): Layer 3's open() regex
-        expects write-mode-then-path, so the realistic path-first escape
-        ``open("/etc/passwd", "w")`` is NOT caught by the textual scan. It is
-        instead bounded by the behavioral Layer-5 write-scoping + the sandbox.
-        This test pins the textual layer's actual contract so a future regex
-        tightening is a visible behavior change, not a silent one."""
+    def test_open_path_first_ordering_now_caught_by_layer3(self) -> None:
+        """FIXED: Layer 3's open() regex is now ordering-independent — it flags
+        any open() touching a sensitive path (/etc/passwd, /etc/shadow, .ssh,
+        .env) regardless of whether the mode literal precedes or follows the
+        path. Reading a credential file is a leak too, so dropping the
+        write-mode requirement is the correct, more conservative posture. The
+        realistic path-first escape ``open("/etc/passwd", "w")`` is now caught
+        by the textual Layer 3 directly (previously relied on Layer 5)."""
         result = _security_layer('open("/etc/passwd", "w")\n')
-        assert result["passed"] is True  # NOT caught by Layer 3 today
+        assert result["passed"] is False  # now caught by Layer 3 directly
 
 
 class TestImportBarrierRejectsDangerousModules:

@@ -435,21 +435,23 @@ class TestLayer3SecurityRejects:
         )
 
     @pytest.mark.asyncio
-    async def test_path_first_sensitive_write_caught_by_behavioral_not_security(
+    async def test_path_first_sensitive_write_caught_by_security_and_behavioral(
         self, pipeline: SafetyPipeline
     ) -> None:
-        """Known Layer-3 regex limitation (pinned REAL behavior): the
-        ``open(...'w'.../etc/passwd|.ssh|.env)`` forbidden pattern requires the
-        literal MODE to PRECEDE the path token, so the common path-first form
-        ``open('/etc/passwd', 'w')`` / ``open('/tmp/.env', 'w')`` is NOT matched
-        by Layer 3. It IS still blocked overall — by Layer 5 (absolute write
-        outside sandbox). This pins defense-in-depth: even with the regex
-        ordering gap the consolidated verdict is ``blocked``, via another layer.
+        """Layer 3's open() regex is now ORDERING-INDEPENDENT (security
+        hardening): it flags any ``open()`` touching /etc/passwd, /etc/shadow,
+        .ssh, or .env regardless of whether the mode literal precedes or follows
+        the path — so the common path-first form ``open('/etc/passwd', 'w')`` is
+        now matched by Layer 3 directly AND still by Layer 5 (absolute write
+        outside sandbox). Defense-in-depth now spans two independent layers.
         """
         for path in ("/etc/passwd", "/tmp/.env", "/home/u/.ssh/id_rsa"):
             code = _fn(f"open({path!r}, 'w').write('SECRET')")
             result = await pipeline.validate(code)
             assert result["passed"] is False, f"{path} not blocked overall"
+            assert result["layers"]["security"]["passed"] is False, (
+                f"{path} should be caught by the textual Layer 3"
+            )
             assert result["layers"]["behavioral"]["passed"] is False
 
     @pytest.mark.asyncio

@@ -575,7 +575,21 @@ class GoldenCanary:
         self._suite = [GOLDEN_SPECS[i] for i in ids if i in GOLDEN_SPECS]
 
     async def score(self, node: str, suffixes: list[str]) -> float | None:
-        """Run the golden suite with ``suffixes`` active for ``node``; mean score."""
+        """Run the golden suite with ``suffixes`` active for ``node``; mean score.
+
+        Each per-goal ``run_benchmark`` is wall-clock-bounded by
+        ``EvolutionSettings.promotion_canary_timeout_s``. The canary runs the
+        golden goal SYNCHRONOUSLY inside the live run's evolve node on the live
+        gateway; without a budget a non-converging goal (q01 tz-shift) blocks
+        ``run_cycle`` → ``evolve`` → the live run until the worker wall-clock
+        kills it (observed: a 30-min held-hostage run). A goal that exceeds the
+        budget is abandoned (no score) and the live run proceeds; if every goal
+        is abandoned the canary is inconclusive (``None``) → no promotion. A
+        budget ``<= 0`` skips the bound (offline-only escape hatch).
+        """
+        import asyncio
+
+        from src.config import get_settings
         from src.graph.prompts.builder import (
             clear_evolved_candidate,
             set_evolved_candidate,
@@ -583,15 +597,39 @@ class GoldenCanary:
 
         if not self._suite:
             return None
+        budget = float(get_settings().evolution.promotion_canary_timeout_s)
         set_evolved_candidate(node, suffixes)
         scores: list[float] = []
         try:
             for spec in self._suite:
-                result = await self._harness.run_benchmark(
-                    spec.to_benchmark_goal(), spec=spec
-                )
-                if result.correctness_score is not None:
-                    scores.append(float(result.correctness_score))
+                try:
+                    if budget > 0:
+                        async with asyncio.timeout(budget):
+                            result = await self._harness.run_benchmark(
+                                spec.to_benchmark_goal(), spec=spec
+                            )
+                    else:
+                        result = await self._harness.run_benchmark(
+                            spec.to_benchmark_goal(), spec=spec
+                        )
+                    if result.correctness_score is not None:
+                        scores.append(float(result.correctness_score))
+                except TimeoutError:
+                    # The live run must never be parked by a canary goal that
+                    # cannot converge in budget. Abandon this goal (no score) and
+                    # continue; ``asyncio.timeout`` cancels the in-flight ainvoke,
+                    # so the harness's finally blocks (run_id + results path
+                    # reset) still run.
+                    logger.warning(
+                        f"Promotion canary goal '{spec.spec_id}' exceeded the "
+                        f"{budget:.0f}s inline budget — abandoning (a "
+                        f"non-converging battery goal must not park the live "
+                        f"run); no score recorded."
+                    )
+                except Exception as exc:  # noqa: BLE001 — pluggable harness; one goal's failure must not abort the suite
+                    logger.warning(
+                        f"Promotion canary goal '{spec.spec_id}' errored: {exc}"
+                    )
         finally:
             clear_evolved_candidate(node)
         if not scores:

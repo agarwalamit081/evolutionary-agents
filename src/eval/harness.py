@@ -78,6 +78,19 @@ class BenchmarkHarness:
             # optimizer runs several specs) don't inherit a stale run_id.
             set_active_run_id(thread_id)
             clean_run_subdir(thread_id)
+            # Scope the gateway's cost run_id to this canary's thread_id so the
+            # canary's LLM cost is NOT billed to the live run that triggered
+            # evolution. The canary runs INLINE inside the live run's evolve node
+            # and reuses the live gateway (parked while the canary scores); without
+            # this scoping the canary's battery-goal calls attribute to the live
+            # run_id (observed: q01 calls billed to api-adhoc-eval-proof-1). The
+            # gateway is per-execute_run (one active run), so save/restore is
+            # concurrency-safe. Restored in finally so a cancelled/errored canary
+            # never leaks the bench run_id back to the live run.
+            gateway = self._gateway
+            prev_run_id = getattr(gateway, "_run_id", None)
+            if hasattr(gateway, "set_run_id"):
+                gateway.set_run_id(thread_id)
             try:
                 state = initial_state(
                     goal_text=goal.goal_text,
@@ -111,6 +124,8 @@ class BenchmarkHarness:
 
                 return self._extract_result(goal, result_state, latency_ms)
             finally:
+                if hasattr(gateway, "set_run_id"):
+                    gateway.set_run_id(prev_run_id)
                 set_active_run_id(None)
 
         except Exception as exc:

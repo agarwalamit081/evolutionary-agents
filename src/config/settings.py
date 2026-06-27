@@ -828,6 +828,22 @@ class EvolutionSettings(BaseSettings):
     # DB tool registry; this gate is scoped to PROMPT mutations. Off by default
     # so nothing is promoted until the operator opts in. Env: EVOLUTION_PROMOTE_TO_LIVE.
     evolution_promote_to_live: bool = False
+    # Wall-clock budget (seconds) for the INLINE promotion canary
+    # (``GoldenCanary.score`` → ``BenchmarkHarness.run_benchmark``), per battery
+    # goal. When promotion is on, the engine scores a deployed PROMPT mutation by
+    # running a full golden goal (default ``battery04_q01``) SYNCHRONOUSLY inside
+    # the live run's evolve node, ON THE LIVE GATEWAY. A non-converging goal
+    # (e.g. q01's tz-shift) otherwise blocks ``run_cycle`` → ``evolve`` → the
+    # live run until the worker wall-clock kills it (observed live: a 30-min
+    # held-hostage run, adhoc-eval-proof-1, 2026-06-27), AND bills its LLM cost
+    # to the live run_id. The budget bounds that: a goal that cannot score
+    # within it is abandoned (no score recorded → no promotion) and the live run
+    # proceeds. The canary's gateway run_id is also scoped to its own ``bench-``
+    # thread_id (harness.run_benchmark) so its cost never attributes to the live
+    # run. ``<= 0`` disables the bound — an escape hatch for controlled OFFLINE
+    # benchmark contexts only, NOT for live worker runs. Env:
+    # PROMOTION_CANARY_TIMEOUT_S.
+    promotion_canary_timeout_s: float = 180.0
     # Directory holding promoted, versioned handler artifacts (prompts first).
     # Layout: ``<dir>/prompts/<node>.<sha>.json`` (immutable versions) +
     # ``<dir>/prompts/current.json`` (the live pointer manifest the builder reads).

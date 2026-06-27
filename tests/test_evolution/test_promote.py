@@ -11,7 +11,9 @@ run (the full-graph canary runs in Phase 10).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -40,15 +42,27 @@ def _fake_settings(
     promote_on: bool = True,
     handlers_dir: Any | None = None,
     min_score: float = 0.8,
+    canary_timeout_s: float = 180.0,
 ) -> SimpleNamespace:
+    """Minimal settings fake for the promotion gate + canary.
+
+    Patches get_settings on BOTH ``src.config.settings`` (what
+    ``PromotionGate`` lazy-imports) AND ``src.config`` (the package re-export
+    that ``GoldenCanary.score`` / ``BenchmarkHarness.run_benchmark`` import).
+    Without both bindings the canary silently reads the REAL 180s default for
+    ``promotion_canary_timeout_s``, so a time-box regression test can't force an
+    abandon. With both, the canary's inline budget is genuinely controllable.
+    """
     fake = SimpleNamespace(
         evolution=SimpleNamespace(
             evolution_promote_to_live=promote_on,
             evolved_handlers_dir=str(handlers_dir or (tmp_path / "evolved")),
+            promotion_canary_timeout_s=canary_timeout_s,
         ),
         eval=SimpleNamespace(eval_canary_min_score=min_score),
     )
     monkeypatch.setattr("src.config.settings.get_settings", lambda: fake)
+    monkeypatch.setattr("src.config.get_settings", lambda: fake)
     return fake
 
 
@@ -548,6 +562,58 @@ class _FakeHarness:
         )
 
 
+class _ScriptedHarness:
+    """Stand-in BenchmarkHarness whose ``run_benchmark`` runs a scripted list of
+    behaviors, one per goal. A behavior is a ``(kind, value)`` tuple:
+
+    * ``("score", float | None)`` — return immediately with that ``correctness_score``.
+    * ``("sleep", seconds)`` — ``await asyncio.sleep(seconds)``; under a canary
+      budget ``asyncio.timeout`` cancels the call mid-sleep, modeling a
+      non-converging goal. If it survives (no budget), it scores ``None``.
+
+    Records the call count so a time-boxed abandonment + a sibling goal's success
+    can be asserted together. Does NOT call the real BenchmarkHarness (no
+    clean_run_subdir / gateway) so it stays hermetic.
+    """
+
+    def __init__(self, behaviors: list[tuple[str, Any]]) -> None:
+        self._behaviors = list(behaviors)
+        self.call_count = 0
+
+    async def run_benchmark(self, goal: Any, spec: Any | None = None) -> Any:
+        from src.eval.models import BenchmarkResult
+
+        self.call_count += 1
+        kind, value = self._behaviors.pop(0)
+        if kind == "sleep":
+            await asyncio.sleep(float(value))  # cancelled by asyncio.timeout on overrun
+            value = None  # reached only when the budget is disabled (escaped the cancel)
+        return BenchmarkResult(
+            goal_name=goal.name,
+            category=goal.category,
+            success=True,
+            total_latency_ms=1,
+            total_tokens=0,
+            total_cost_usd=0.0,
+            iterations=1,
+            correctness_score=value,
+        )
+
+
+class _RecordingGateway:
+    """Fake gateway recording every ``set_run_id`` so the canary's run_id
+    save/set/restore can be asserted. Mirrors the real ``LLMGateway.set_run_id``
+    contract (sets ``self._run_id``) without a live client / cost tracker."""
+
+    def __init__(self, initial_run_id: str | None = "api-live-run") -> None:
+        self._run_id = initial_run_id
+        self.set_calls: list[str | None] = []
+
+    def set_run_id(self, run_id: str | None) -> None:
+        self.set_calls.append(run_id)
+        self._run_id = run_id
+
+
 class TestGoldenCanary:
     @pytest.mark.asyncio
     async def test_returns_mean_of_scores(
@@ -591,6 +657,150 @@ class TestGoldenCanary:
         # After the canary, no candidate override leaks (promotion is opt-in
         # pointer-based, not override-based).
         assert evolved_suffixes_for_node("execute") == []
+
+
+# ---------------------------------------------------------------------------
+# Canary time-box + gateway run_id isolation (regression: adhoc-eval-proof-1)
+# ---------------------------------------------------------------------------
+
+
+class TestCanaryDoesNotBlockOrContaminate:
+    """Regression (run ``adhoc-eval-proof-1``, 2026-06-27): with
+    ``EVOLUTION_PROMOTE_TO_LIVE`` on, ``run_cycle`` scores a deployed PROMPT
+    mutation by running a full golden goal INLINE inside the live run's evolve
+    node, ON THE LIVE GATEWAY. Two design defects surfaced:
+
+    1. A non-converging goal (q01 tz-shift) blocked ``run_cycle`` → ``evolve`` →
+       the live run until the worker wall-clock (1800s) killed it — a 30-min
+       held-hostage run.
+    2. The canary's battery-goal LLM calls attributed to the LIVE run_id (shared
+       gateway, run_id not scoped) — cost contamination.
+
+    The fix: ``GoldenCanary.score`` time-boxes each per-goal ``run_benchmark``
+    (``promotion_canary_timeout_s``) and ``BenchmarkHarness.run_benchmark``
+    scopes the gateway run_id to its bench thread_id. These tests pin both.
+    """
+
+    @pytest.mark.asyncio
+    async def test_time_box_abandons_non_converging_goal_and_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """A 0.05s budget vs a 3s 'goal' (a non-converging run): the canary must
+        abandon it within the budget and return inconclusive (``None``) — NOT
+        park the caller for the full 3s. The elapsed guard is the real
+        regression discriminator: a broken/absent budget would take ~3s."""
+        _fake_settings(monkeypatch, tmp_path, canary_timeout_s=0.05)
+        harness = _ScriptedHarness([("sleep", 3.0)])
+        canary = GoldenCanary(
+            None, None, None, harness=harness, goal_ids=["battery04_q01"]
+        )
+
+        start = time.monotonic()
+        score = await canary.score("execute", ["candidate"])
+        elapsed = time.monotonic() - start
+
+        assert score is None  # abandoned → no score → no promotion
+        assert harness.call_count == 1  # the goal WAS attempted, then abandoned
+        # Abandoned within the budget, NOT parked for the 3s sleep.
+        assert elapsed < 1.0
+        # The candidate override is cleared even on the abandon path (finally ran).
+        from src.graph.prompts.builder import evolved_suffixes_for_node
+
+        assert evolved_suffixes_for_node("execute") == []
+
+    @pytest.mark.asyncio
+    async def test_one_goal_timeout_another_scores_returns_mean_of_scored(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """Two goals: q01 sleeps past the budget (abandoned, no score); q02
+        completes instantly with 0.8. The suite must NOT abort on q01's abandon —
+        it scores q02 and returns the mean of the SCORED goals only."""
+        _fake_settings(monkeypatch, tmp_path, canary_timeout_s=0.05)
+        harness = _ScriptedHarness([("sleep", 3.0), ("score", 0.8)])
+        canary = GoldenCanary(
+            None,
+            None,
+            None,
+            harness=harness,
+            goal_ids=["battery04_q01", "battery04_q02"],
+        )
+
+        score = await canary.score("execute", ["candidate"])
+
+        assert score == 0.8  # mean of the one scored goal
+        assert harness.call_count == 2  # both attempted; q01's abandon didn't abort q02
+
+    @pytest.mark.asyncio
+    async def test_budget_disabled_runs_unbounded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """``promotion_canary_timeout_s <= 0`` is the offline escape hatch: no
+        time-box, the goal runs to completion normally."""
+        _fake_settings(monkeypatch, tmp_path, canary_timeout_s=0.0)
+        harness = _ScriptedHarness([("score", 0.7)])
+        canary = GoldenCanary(
+            None, None, None, harness=harness, goal_ids=["battery04_q01"]
+        )
+
+        score = await canary.score("execute", ["candidate"])
+
+        assert score == 0.7
+
+    @pytest.mark.asyncio
+    async def test_run_benchmark_scopes_gateway_run_id_to_bench_thread(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """The canary reuses the live run's gateway; its battery-goal cost must
+        bill to the canary's own ``bench-`` thread_id, NOT the live run that
+        parked for evolution. ``run_benchmark`` saves the live run_id, scopes the
+        gateway to the bench thread_id for the duration of ``ainvoke``, and
+        restores the live run_id in ``finally``."""
+        from src.eval.harness import BenchmarkHarness
+        from src.eval.models import BenchmarkGoal
+
+        _fake_settings(monkeypatch, tmp_path)
+
+        # The live run parked its gateway at this run_id; the canary must NOT bill to it.
+        gateway = _RecordingGateway(initial_run_id="api-adhoc-eval-proof-1")
+        observed: dict[str, Any] = {}
+
+        async def fake_ainvoke(_state: dict[str, Any]) -> dict[str, Any]:
+            # Captured INSIDE the graph run — the run_id billed to these calls.
+            observed["run_id_during_ainvoke"] = gateway._run_id
+            return {}  # _extract_result tolerates an empty state
+
+        compiled = SimpleNamespace(ainvoke=fake_ainvoke)
+
+        def fake_compile_task_graph(**_kwargs: Any) -> Any:
+            return compiled
+
+        monkeypatch.setattr("src.graph.task_graph.compile_task_graph", fake_compile_task_graph)
+        monkeypatch.setattr("src.graph.factory.initial_state", lambda **_kw: {})
+        # clean_run_subdir reads agent.results_root via the resolver; neutralize it so
+        # the test does not need a full agent settings object.
+        monkeypatch.setattr("src.tools._paths.clean_run_subdir", lambda _rid: False)
+
+        # Deliberate fake substitution: gateway is a recording stand-in and the
+        # tools/registry are unused (the compiled graph is monkeypatched out).
+        harness = BenchmarkHarness(gateway, tools=None, sub_agent_registry=None)  # type: ignore[arg-type]
+        goal = BenchmarkGoal(
+            name="t-goal", description="unit", goal_text="g", category="complex"
+        )
+
+        result = await harness.run_benchmark(goal)
+
+        # The run came back (no exception); the bench thread_id was used mid-run.
+        assert result.goal_name == "t-goal"
+        assert observed["run_id_during_ainvoke"].startswith("bench-t-goal-")
+        assert observed["run_id_during_ainvoke"] != "api-adhoc-eval-proof-1"
+        # After the run the prior LIVE run_id was restored (the parked run resumes
+        # billing to itself; a cancelled/errored canary never leaks the bench id).
+        assert gateway._run_id == "api-adhoc-eval-proof-1"
+        # set_run_id sequence: [scope to bench thread_id, restore live run_id].
+        first_call = gateway.set_calls[0]
+        assert first_call is not None
+        assert first_call.startswith("bench-t-goal-")
+        assert gateway.set_calls[-1] == "api-adhoc-eval-proof-1"
 
 
 # ---------------------------------------------------------------------------

@@ -186,7 +186,16 @@ class ToolGenerator:
         # safety + optional sandbox smoke. Extracted to
         # ``src.tools.dynamic.validation`` so the operator-facing edit→approve
         # API (D10) applies the IDENTICAL bar; the two entry points cannot drift.
-        from src.tools.dynamic.validation import validate_tool_code
+        from src.tools.dynamic.validation import dedupe_imports, validate_tool_code
+
+        # Sanitize exact-duplicate top-level imports (F811): the dedupe inside
+        # ``validate_tool_code`` makes the gate tolerant, but the registry
+        # persists ``tool.handler_code`` directly (registry.register(...,
+        # handler_code=...) below), so dedupe the field here too — the stored
+        # handler is clean and registers on the first attempt. The retry-feedback
+        # loop otherwise never converges on the model re-emitting the dup.
+        tool.handler_code = dedupe_imports(tool.handler_code)
+        tool.test_code = dedupe_imports(tool.test_code)
 
         validation = await validate_tool_code(
             handler_code=tool.handler_code,

@@ -9,7 +9,7 @@ import pytest
 
 from src.safety.pipeline import SafetyPipeline
 from src.tools.dynamic.generator import GeneratedTool, ToolGenerator
-from src.tools.dynamic.validation import _run_sandbox_smoke, validate_tool_code
+from src.tools.dynamic.validation import _run_sandbox_smoke, dedupe_imports, validate_tool_code
 from src.tools.registry import ToolRegistry
 
 
@@ -502,6 +502,133 @@ class TestValidateToolCode:
         assert result.reason == ""
         assert result.safety_result.get("passed") is True
         assert result.lint_result.get("passed") is True
+
+
+class TestDedupeImportsF811:
+    """Regress the systematic F811 defect: LLM-generated handlers re-emit the
+    same top-level ``import json`` twice. Ruff/pyflakes flags the second binding
+    F811 and the D9 lint gate rejected the tool, but the retry-feedback loop
+    never converged (the model kept re-emitting the duplicate). The deterministic
+    ``dedupe_imports`` sanitizer — applied in ``validate_tool_code`` (gate
+    tolerance) AND ``validate_and_register`` (clean persistence) — drops the
+    later exact-duplicate so the tool registers on the first attempt.
+    """
+
+    def test_dedupe_drops_exact_duplicate_top_level_import(self) -> None:
+        src = (
+            "import json\n"
+            "\n"
+            "import json\n"  # exact duplicate → dropped
+            "\n"
+            "async def f() -> str:\n"
+            "    return json.dumps({})\n"
+        )
+        out = dedupe_imports(src)
+        assert sum(1 for ln in out.splitlines() if ln.rstrip() == "import json") == 1
+        # Non-import content survives byte-identical.
+        assert "async def f() -> str:" in out
+        assert "return json.dumps({})" in out
+
+    def test_dedupe_keeps_distinct_imports(self) -> None:
+        # ``import json`` (duplicated) collapses to one; ``import os`` is distinct.
+        src = "import json\nimport os\nimport json\n"
+        out = dedupe_imports(src)
+        assert sum(1 for ln in out.splitlines() if ln.rstrip() == "import json") == 1
+        assert sum(1 for ln in out.splitlines() if ln.rstrip() == "import os") == 1
+
+    def test_dedupe_tolerates_trailing_whitespace_variant(self) -> None:
+        # ``import json`` and ``import json `` (trailing space) are the same import.
+        src = "import json \nimport json\n"
+        out = dedupe_imports(src)
+        assert sum(1 for ln in out.splitlines() if ln.rstrip() == "import json") == 1
+
+    def test_dedupe_leaves_indented_import_untouched(self) -> None:
+        # A function-body re-import is a different binding scope → never deduped.
+        src = (
+            "import json\n"
+            "async def f() -> str:\n"
+            "    import json\n"  # indented → kept
+            "    return json.dumps({})\n"
+        )
+        out = dedupe_imports(src)
+        assert out == src
+
+    def test_dedupe_idempotent_on_clean_source(self) -> None:
+        src = "import json\nimport asyncio\n\nx = 1\n"
+        assert dedupe_imports(src) == src
+
+    @pytest.mark.asyncio
+    async def test_validate_tool_code_accepts_duplicate_import(self) -> None:
+        # Previously F811 → lint failed → rejected; now deduped pre-gate → accepted.
+        result = await validate_tool_code(
+            handler_code=(
+                "import json\n"
+                "\n"
+                "import json\n"
+                "\n"
+                "async def parse_json(payload: str) -> str:\n"
+                "    '''Parse a JSON string and re-emit it.'''\n"
+                "    try:\n"
+                "        data = json.loads(payload)\n"
+                "    except Exception as e:\n"
+                "        return f'ERR: {e}'\n"
+                "    return json.dumps(data)\n"
+            ),
+            test_code=(
+                "import asyncio\n"
+                "result = asyncio.run(parse_json('{\"a\": 1}'))\n"
+                "assert isinstance(result, str)\n"
+            ),
+            tool_name="parse_json",
+            safety_pipeline=SafetyPipeline(),
+        )
+        assert result.passed, result.reason
+        assert result.lint_result.get("passed") is True
+
+    @pytest.mark.asyncio
+    async def test_validate_and_register_persists_deduped_handler(self) -> None:
+        # The registry persists ``tool.handler_code`` directly, so the generator
+        # must dedupe the field before register — the stored handler ends up clean.
+        gen = ToolGenerator(gateway=_make_gateway("ok"), safety_pipeline=SafetyPipeline())
+        registry = ToolRegistry()
+        tool = GeneratedTool(
+            tool_name="parse_json",
+            description="Parse and re-emit a JSON string",
+            input_schema={
+                "type": "object",
+                "properties": {"payload": {"type": "string"}},
+                "required": ["payload"],
+            },
+            handler_code=(
+                "import json\n"
+                "\n"
+                "import json\n"
+                "\n"
+                "async def parse_json(payload: str) -> str:\n"
+                "    '''Parse a JSON string and re-emit it.'''\n"
+                "    try:\n"
+                "        data = json.loads(payload)\n"
+                "    except Exception as e:\n"
+                "        return f'ERR: {e}'\n"
+                "    return json.dumps(data)\n"
+            ),
+            test_code=(
+                "import asyncio\n"
+                "result = asyncio.run(parse_json('{\"a\": 1}'))\n"
+                "assert isinstance(result, str)\n"
+            ),
+        )
+        outcome = await gen.validate_and_register(tool, registry)
+        assert outcome["success"], outcome.get("reason")
+        # The tool object was mutated to the deduped handler (exactly one import).
+        assert sum(
+            1 for ln in tool.handler_code.splitlines() if ln.rstrip() == "import json"
+        ) == 1
+        # And the registered, materialized handler is callable on the clean code.
+        handler = registry.get_handler("parse_json")
+        assert handler is not None
+        out = await handler('{"a": 1}')
+        assert isinstance(out, str)
 
 
 class TestRunSandboxTestEnvAlignment:

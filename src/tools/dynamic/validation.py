@@ -55,6 +55,38 @@ class ToolCodeValidation:
 # errors.`` summary and the ``-->``/``|`` decoration lines are filtered out.
 _RULE_LINE = re.compile(r"^(?:[A-Z]+\d{2,4}\b|invalid-syntax)")
 
+# A module-level (column-0) import statement: ``import …`` or ``from … import …``.
+# Anchored at column 0 so an import re-stated *inside* a function body (indented —
+# a different binding scope) is never touched.
+_IMPORT_LINE = re.compile(r"^(?:import\s+\S|from\s+\S.*\bimport\b)")
+
+
+def dedupe_imports(source: str) -> str:
+    """Drop exact-duplicate top-level import lines (F811 defense).
+
+    LLM-generated handlers sometimes emit the same ``import json`` (or
+    ``from x import y``) twice. Python tolerates a re-import at runtime, but
+    ruff/pyflakes flags the second binding **F811** ("redefinition of unused
+    name") and the D9 lint gate rejects the tool — and the generation retry
+    loop does NOT converge (the model reliably re-emits the duplicate). This
+    deterministic sanitizer removes later *exact-duplicate* top-level import
+    lines (keeping the first) so the gate passes on the first attempt and the
+    persisted handler is clean. Only column-0 (module-level) imports are
+    deduped; comparison keys trailing whitespace so ``import json`` and
+    ``import json `` collapse together. An import re-stated inside a function
+    body is a different binding scope and is left intact.
+    """
+    seen: set[str] = set()
+    kept: list[str] = []
+    for line in source.splitlines(keepends=True):
+        key = line.rstrip("\r\n").rstrip()
+        if _IMPORT_LINE.match(key):
+            if key in seen:
+                continue  # exact duplicate top-level import → drop the later one
+            seen.add(key)
+        kept.append(line)
+    return "".join(kept)
+
 
 def _has_assert(test_code: str) -> bool:
     """True if ``test_code`` parses and contains at least one ``assert``."""
@@ -140,7 +172,15 @@ async def validate_tool_code(
     fails before the expensive sandbox smoke. Returns a
     :class:`ToolCodeValidation` whose ``reason`` names the first failing gate;
     on success ``passed`` is ``True`` and the layer dicts are populated.
+
+    Pre-gate: drop exact-duplicate top-level imports (F811) so a handler the
+    model emits with ``import json`` twice passes lint on the first attempt —
+    the retry-feedback loop otherwise never converges on this defect. The
+    dedupe is deterministic (not a prompt nudge); see :func:`dedupe_imports`.
     """
+    handler_code = dedupe_imports(handler_code)
+    test_code = dedupe_imports(test_code)
+
     # Gate 1: test_code present and asserts something.
     if not test_code.strip():
         return ToolCodeValidation(

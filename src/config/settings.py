@@ -851,6 +851,20 @@ class EvolutionSettings(BaseSettings):
     # ``.git``) never blocks promotion — the live pointer is the source of truth.
     # Env: EVOLUTION_PROMOTE_TO_VCS.
     evolution_promote_to_vcs: bool = False
+    # Phase 2 C1 — curve regression-guard on PROMPT promotion (opt-in, default
+    # off). When true, the engine's Phase-8 promotion path reads the nightly
+    # capability-curve verdict (``CapabilityCurve.detect_regression``) BEFORE
+    # calling ``promotion_gate.promote`` and SKIPS the promotion when the battery
+    # curve is regressed — so a mutation does not go live during a known capability
+    # regression window. Only ``regressed`` blocks: ``inconclusive`` (too few
+    # nightly battery points — the cold-start case) is allowed through, since the
+    # single-goal ``GoldenCanary`` still gates each mutation and starving a fresh
+    # deploy of all promotion until the battery has run enough nights would be
+    # counter-productive. Fail-open: a curve-read error never blocks promotion
+    # (the curve is observability-only; the canary is authoritative). Off by
+    # default ⇒ byte-identical behavior until toggled. Env:
+    # EVOLUTION_REQUIRE_CURVE_CLEAR.
+    evolution_require_curve_clear: bool = False
     # Phase 4 E — evolve→execute edge for deployed TOOL mutations (opt-in,
     # default off). When true, after a TOOL mutation deploys (it has already
     # passed the engine's safety + sandbox + post-deploy smoke gates), the

@@ -915,6 +915,54 @@ class SelfEvolutionEngine:
                 False,
             )
 
+    async def _curve_verdict(self) -> dict[str, Any]:
+        """Phase 2 C1 — capability-curve regression verdict (observability-only read).
+
+        Mirrors ``optimizer/engine.py`` ``_curve_verdict`` 1:1: a fresh
+        ``CapabilityCurve(EvalStore()).detect_regression()`` (the nightly battery
+        trend), NOT ``CurveRegressionGate.run`` (which may auto-rollback — an
+        undesired side effect from this per-mutation call site).
+        """
+        from src.eval.curve import CapabilityCurve  # noqa: PLC0415
+        from src.eval.store import EvalStore  # noqa: PLC0415
+
+        return await CapabilityCurve(EvalStore()).detect_regression()
+
+    async def _curve_blocks_promotion(self) -> bool:
+        """Phase 2 C1 — should the curve regression-guard skip this promotion?
+
+        True iff ``EVOLUTION_REQUIRE_CURVE_CLEAR`` is on AND the nightly
+        capability curve is ``regressed``. Only ``regressed`` blocks —
+        ``inconclusive`` (too few nightly battery points — the cold-start case)
+        is allowed through, since the single-goal ``GoldenCanary`` still gates
+        each mutation and starving a fresh deploy of all promotion until the
+        battery has run enough nights would be counter-productive. Fail-open on
+        ANY error (returns False): the curve is observability-only and the
+        canary is authoritative (mirrors the CostTracker / curve resilience in
+        ``curve_gate.py`` and the optimizer's ``require_curve_clear``).
+        """
+        try:
+            from src.config import get_settings  # noqa: PLC0415
+
+            if not get_settings().evolution.evolution_require_curve_clear:
+                return False
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            logger.debug(f"Curve-guard config read failed (failing open): {exc}")
+            return False
+        try:
+            verdict = await self._curve_verdict()
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            logger.warning(f"Curve verdict read failed (failing open → promote): {exc}")
+            return False
+        if verdict.get("regressed"):
+            logger.warning(
+                f"Curve regression detected — skipping PROMPT promotion "
+                f"(current={verdict.get('current')}, delta={verdict.get('delta')}, "
+                f"n_points={verdict.get('n_points')})"
+            )
+            return True
+        return False
+
     async def run_cycle(
         self,
         execution_history: list[dict[str, Any]],
@@ -1158,11 +1206,19 @@ class SelfEvolutionEngine:
             except Exception:
                 promote_on = False
             if promote_on:
-                try:
-                    promotion = await promotion_gate.promote(proposal)
-                except Exception as e:
-                    logger.warning(f"Promotion gate errored: {e}")
-                    promotion = {"promoted": False, "reason": f"gate error: {e}"}
+                # Phase 2 C1 — curve regression-guard (default-off; only
+                # ``regressed`` blocks; fail-open on any error). Skips the
+                # promotion when the nightly capability curve is regressed so a
+                # mutation does not go live during a known regression window.
+                # Mirrors the optimizer's ``require_curve_clear`` pre-flight.
+                if await self._curve_blocks_promotion():
+                    promotion = {"promoted": False, "reason": "curve guard: regressed"}
+                else:
+                    try:
+                        promotion = await promotion_gate.promote(proposal)
+                    except Exception as e:
+                        logger.warning(f"Promotion gate errored: {e}")
+                        promotion = {"promoted": False, "reason": f"gate error: {e}"}
 
         # Persist the final mutation + terminal outcome.
         if self._persister is not None:

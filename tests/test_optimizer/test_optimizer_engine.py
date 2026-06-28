@@ -382,9 +382,12 @@ async def test_candidate_beats_baseline_is_promoted(monkeypatch: pytest.MonkeyPa
     assert resp.suffixes == ["candidate instruction"]
 
     # The candidate LM was built with cache disabled (candidates change each
-    # trial) and the cost-accounting callback scoped to it.
+    # trial) and the cost-accounting callback scoped to it. The model string is
+    # the provider-prefixed litellm id (no 'litellm/' prefix — litellm rejects
+    # that); the fake 'fake-model' key has no registered spec so _litellm_id
+    # passes it through unchanged.
     assert opt.lm_seen is not None
-    assert opt.lm_seen.kwargs["model"] == "litellm/fake-model"
+    assert opt.lm_seen.kwargs["model"] == "fake-model"
     assert opt.lm_seen.kwargs["cache"] is False
     assert len(opt.lm_seen.kwargs["callbacks"]) == 1
 
@@ -417,33 +420,106 @@ async def test_promoted_proposal_is_parse_prompt_payload_parseable(
 
 
 def test_cost_accounting_callback_records_usage() -> None:
-    """on_lm_start/on_lm_end capture (model, provider, in, out) per dspy.LM call."""
-    cb = CostAccountingCallback(provider_for=lambda _m: "openai")
+    """on_lm_start/on_lm_end capture (model, provider, in, out) per dspy.LM call.
+
+    dspy 3.x: on_lm_end's ``outputs`` is a list of {text, reasoning_content}
+    dicts with NO usage; the token usage is read from the captured LM
+    instance's ``history[-1]['usage']`` (a litellm ``Usage``). The provider-
+    prefixed litellm id maps to the bare registry key via litellm_to_key (a
+    leading 'litellm/' prefix is NOT used — litellm rejects it).
+    """
+    import types
+
+    cb = CostAccountingCallback(
+        provider_for=lambda _m: "openai",
+        litellm_to_key={"openai/gpt-4o-mini-2024-07-18": "gpt-4o-mini-2024-07-18"},
+    )
 
     class _Instance:
-        model = "litellm/gpt-4o-mini-2024-07-18"
+        model = "openai/gpt-4o-mini-2024-07-18"
+        history = [{"usage": types.SimpleNamespace(prompt_tokens=12, completion_tokens=7)}]
 
     cb.on_lm_start("call-1", _Instance(), inputs={})
-    cb.on_lm_end(
-        "call-1",
-        outputs={"usage": {"prompt_tokens": 12, "completion_tokens": 7}},
-    )
+    cb.on_lm_end("call-1", outputs=[{"text": "ok"}])
 
     assert cb.records == [("gpt-4o-mini-2024-07-18", "openai", 12, 7)]
 
 
-def test_cost_accounting_callback_strips_litellm_prefix_and_skips_errors() -> None:
-    """The ``litellm/`` prefix is stripped; exceptions/empty outputs record nothing."""
-    cb = CostAccountingCallback(provider_for=lambda _m: "deepseek")
+def test_cost_accounting_callback_reads_dict_form_usage() -> None:
+    """Regression: dspy stores ``history[-1]['usage']`` as ``dict(response.usage)``
+    — a PLAIN dict (keys prompt_tokens/completion_tokens/total_tokens), NOT the
+    raw litellm ``Usage`` object. The prior ``getattr``-based read returned 0 for
+    every real GEPA call (``getattr`` on a dict returns the default), so the cost
+    ledger showed 6 calls / 0 tokens. The form-agnostic ``_read_usage`` must
+    extract tokens from a dict (the live dspy 3.x shape, proven via
+    ``dict(litellm.types.utils.Usage(...))``)."""
+    cb = CostAccountingCallback(
+        provider_for=lambda _m: "zai",
+        litellm_to_key={"zai/glm-4.7": "glm-4.7"},
+    )
 
     class _Instance:
-        model = "litellm/deepseek-v4-flash"
+        model = "zai/glm-4.7"
+        # The EXACT shape dspy 3.x stores: dict(getattr(response, "usage", {})).
+        history = [
+            {
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 16,
+                    "total_tokens": 23,
+                    "completion_tokens_details": None,
+                    "prompt_tokens_details": None,
+                }
+            }
+        ]
+
+    cb.on_lm_start("call-dict", _Instance(), inputs={})
+    cb.on_lm_end("call-dict", outputs=[{"text": "ok"}])
+
+    assert cb.records == [("glm-4.7", "zai", 7, 16)]
+
+
+
+def test_cost_accounting_callback_maps_litellm_id_and_skips_errors() -> None:
+    """The litellm id maps to the bare registry key; exceptions/empty skip; an
+    instance with no usage history records zeros (never raises); an unknown id
+    (no map entry) passes through unchanged."""
+    import types
+
+    cb = CostAccountingCallback(
+        provider_for=lambda _m: "deepseek",
+        litellm_to_key={"deepseek/deepseek-v4-flash": "deepseek-v4-flash"},
+    )
+
+    class _Instance:
+        model = "deepseek/deepseek-v4-flash"
+        history = [{"usage": types.SimpleNamespace(prompt_tokens=5, completion_tokens=9)}]
 
     cb.on_lm_start("ok", _Instance(), inputs={})
-    cb.on_lm_end("ok", outputs={"usage": {"input_tokens": 5, "output_tokens": 9}})
+    cb.on_lm_end("ok", outputs=[{"text": "ok"}])
     cb.on_lm_end("err", None, exception=RuntimeError("boom"))  # skipped
 
     assert cb.records == [("deepseek-v4-flash", "deepseek", 5, 9)]
+
+    # A captured instance whose history has no usage records zeros (observability-
+    # only: a provider that omits Usage never breaks the run).
+    class _NoUsage:
+        model = "deepseek/deepseek-v4-flash"
+        history = [{"text": "x"}]
+
+    cb.on_lm_start("no-usage", _NoUsage(), inputs={})
+    cb.on_lm_end("no-usage", outputs=[{"text": "x"}])
+    assert cb.records[-1] == ("deepseek-v4-flash", "deepseek", 0, 0)
+
+    # An id with no map entry passes through verbatim (defensive: a stray
+    # instance.model never KeyErrors — the engine maps its two LMs).
+    class _Unknown:
+        model = "some/unmapped-model"
+        history = [{"usage": types.SimpleNamespace(prompt_tokens=1, completion_tokens=1)}]
+
+    cb.on_lm_start("other", _Unknown(), inputs={})
+    cb.on_lm_end("other", outputs=[{"text": "x"}])
+    assert cb.records[-1] == ("some/unmapped-model", "deepseek", 1, 1)
 
 
 # ── Canary spec routing (_pick_goal_ids) ────────────────────────────────────
@@ -498,3 +574,38 @@ class TestPickGoalIds:
         opt = self._opt(spec_limit=1)
         ids = self._optimizer(opt)._pick_goal_ids(opt, "classify")
         assert ids == ["battery04_classify_simple"]  # tagged first, truncated to the limit
+
+
+# ── reflection-model guard (inline-comment leak) ────────────────────────────
+
+
+class TestReflectionModelGuard:
+    """``_reflection_model_or_none`` treats a non-plausible reflection_model as unset.
+
+    Guards the pydantic-settings inline-comment leak: ``OPTIMIZER_REFLECTION_MODEL=
+    # comment`` parses as the comment *text* (pydantic-settings 2.x does not strip
+    inline comments — verified), which would otherwise reach ``dspy.LM`` as an
+    invalid model id and fail GEPA/MIPROv2/COPRO. A valid id is a single
+    whitespace-free, registered token; anything else falls back to routing.
+    """
+
+    def _optimizer(self, reflection_model: str) -> _TestOptimizer:
+        opt = _make_opt(reflection_model=reflection_model)
+        return _TestOptimizer(_FakeSettings(opt))
+
+    def test_empty_is_unset(self) -> None:
+        assert self._optimizer("")._reflection_model_or_none() is None
+
+    def test_inline_comment_leak_is_treated_as_unset(self) -> None:
+        # The exact shape a blank .env.example line carries as a trailing comment.
+        leaked = "# blank routes a COMPLEX-tier model (e.g. glm-4.7); a literal id pins it"
+        assert self._optimizer(leaked)._reflection_model_or_none() is None
+
+    def test_internal_whitespace_is_treated_as_unset(self) -> None:
+        assert self._optimizer("glm 4.7")._reflection_model_or_none() is None
+
+    def test_unregistered_single_token_is_treated_as_unset(self) -> None:
+        assert self._optimizer("banana")._reflection_model_or_none() is None
+
+    def test_valid_registered_id_is_honored(self) -> None:
+        assert self._optimizer("glm-4.7")._reflection_model_or_none() == "glm-4.7"

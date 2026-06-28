@@ -65,6 +65,30 @@ _ANTHROPIC_BASE = "https://api.anthropic.com"
 _ALIBABA_BASE = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
 
+def _read_usage(usage: Any, *keys: str) -> Any:
+    """Read the first present value from a usage record (dict OR object).
+
+    dspy 3.x stores ``history[-1]["usage"]`` as ``dict(response.usage)`` — a
+    PLAIN dict (keys ``prompt_tokens``/``completion_tokens``/``total_tokens``)
+    — NOT the raw litellm ``Usage`` object. ``getattr`` on that dict silently
+    returns the default and under-reports tokens (the bug that flushed 0 tokens
+    for real GEPA calls); dict access is correct here. Attribute access is kept
+    as a fallback so a future dspy that stops dictifying can't silently zero
+    the ledger again.
+    """
+    if isinstance(usage, dict):
+        for key in keys:
+            value = usage.get(key)
+            if value:
+                return value
+        return 0
+    for key in keys:
+        value = getattr(usage, key, None)
+        if value:
+            return value
+    return 0
+
+
 class CostAccountingCallback(BaseCallback):
     """Capture DSPy ``dspy.LM`` call usage for cost-ledger attribution.
 
@@ -77,36 +101,75 @@ class CostAccountingCallback(BaseCallback):
     :meth:`CostTracker.record_usage` on the async loop after ``compile``.
     """
 
-    def __init__(self, *, provider_for: Callable[[str], str]) -> None:
+    def __init__(
+        self,
+        *,
+        provider_for: Callable[[str], str],
+        litellm_to_key: dict[str, str] | None = None,
+    ) -> None:
         super().__init__()
         self._provider_for = provider_for
+        # dspy.LM is given the provider-prefixed litellm id (e.g.
+        # 'deepseek/deepseek-v4-flash'); the cost ledger / get_model_spec key on
+        # the BARE registry id ('deepseek-v4-flash'), so map each litellm id back
+        # to its bare key on call start. (A leading 'litellm/' prefix is NOT used
+        # — litellm itself rejects 'litellm/<provider>/<model>' as 'LLM Provider
+        # NOT provided'; the engine passes the provider-prefixed id verbatim.)
+        self._litellm_to_key: dict[str, str] = litellm_to_key or {}
         self._models: dict[str, str] = {}
+        # dspy 3.x: token usage lives on the LM instance's `history`, not in the
+        # on_lm_end `outputs` (a bare list of {text, reasoning_content}). Capture
+        # the instance at on_lm_start so on_lm_end can read usage back.
+        self._instances: dict[str, Any] = {}
         self.records: list[tuple[str, str, int, int]] = []
 
     def on_lm_start(self, call_id: str, instance: Any, inputs: dict[str, Any]) -> None:
         model = str(getattr(instance, "model", "") or "")
-        # dspy.LM stores the model as "litellm/<id>"; strip the prefix so
-        # CostTracker.calculate_cost / get_model_spec look it up by the bare
-        # registry id (MODEL_REGISTRY keys are the litellm model id).
-        if model.startswith("litellm/"):
-            model = model[len("litellm/") :]
+        # Resolve the provider-prefixed litellm model id back to the bare
+        # registry key the cost ledger / get_model_spec know (e.g.
+        # 'deepseek/deepseek-v4-flash' → 'deepseek-v4-flash'). An unknown id
+        # (no map entry) passes through unchanged.
+        model = self._litellm_to_key.get(model, model)
         self._models[call_id] = model
+        self._instances[call_id] = instance
 
     def on_lm_end(
         self,
         call_id: str,
-        outputs: dict[str, Any] | None,
+        outputs: Any,
         exception: Exception | None = None,
     ) -> None:
+        # dspy 3.x: `outputs` is a list of {text, reasoning_content} dicts (NO
+        # usage). On exception/empty there is nothing to attribute.
         if exception is not None or not outputs:
             return
         model = self._models.get(call_id, "")
         if not model:
             return
-        usage = outputs.get("usage") or {}
-        in_t = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
-        out_t = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        in_t, out_t = self._usage_for(call_id)
         self.records.append((model, self._provider_for(model), in_t, out_t))
+
+    def _usage_for(self, call_id: str) -> tuple[int, int]:
+        """Best-effort token usage from the captured LM instance's history.
+
+        dspy 3.x appends each LM call to ``instance.history`` (a list of dicts);
+        the latest record carries token usage under ``"usage"``. Sequential GEPA
+        student/reflection calls make ``history[-1]`` the just-completed call.
+        Observability-only — a missing history/usage records zeros and never
+        raises (the cost ledger is best-effort, the CostTracker-resilience
+        pattern). See ``_read_usage`` for why the dict-vs-object form matters.
+        """
+        instance = self._instances.get(call_id)
+        history = getattr(instance, "history", None)
+        if not isinstance(history, list) or not history:
+            return 0, 0
+        last = history[-1]
+        usage = last.get("usage") if isinstance(last, dict) else None
+        if usage is None:
+            return 0, 0
+        in_t = int(_read_usage(usage, "prompt_tokens", "input_tokens") or 0)
+        out_t = int(_read_usage(usage, "completion_tokens", "output_tokens") or 0)
+        return in_t, out_t
 
 
 class PromptOptimizer:
@@ -191,11 +254,26 @@ class PromptOptimizer:
                     node=node, promoted=False, reason="no eval signal", usage=usage
                 )
 
-            # ── DSPy student LM (cheap tier) + provider credentials.
+            # ── DSPy student LM (cheap tier) + reflection LM (stronger). Both are
+            # built with the provider-prefixed litellm id — dspy.LM passes the
+            # ``model`` string straight to litellm, which routes by the leading
+            # provider segment, so a bare registry key ('deepseek-v4-flash') makes
+            # litellm raise 'LLM Provider NOT provided'; a 'litellm/' prefix is
+            # rejected for the same reason. _resolve_credentials keeps returning
+            # the bare key (provider/pricing lookups key on it); _litellm_id
+            # expands it to 'deepseek/deepseek-v4-flash' for the call.
             model_id, lm_kwargs = self._resolve_lm(node)
-            cb = CostAccountingCallback(provider_for=self._provider_for)
+            rmodel_id, rlm_kwargs = self._resolve_reflection_model(node)
+            student_litellm = self._litellm_id(model_id)
+            reflection_litellm = self._litellm_id(rmodel_id)
+            cb = CostAccountingCallback(
+                provider_for=self._provider_for,
+                # Map each litellm id back to its bare registry key so the cost
+                # callback's get_model_spec/pricing lookup succeeds.
+                litellm_to_key={student_litellm: model_id, reflection_litellm: rmodel_id},
+            )
             lm = dspy.LM(
-                model=f"litellm/{model_id}",
+                model=student_litellm,
                 cache=False,  # candidate prompts change between trials
                 callbacks=[cb],
                 max_tokens=opt.max_tokens,
@@ -203,13 +281,12 @@ class PromptOptimizer:
                 **lm_kwargs,
             )
 
-            # ── Reflection/proposal LM (stronger than the student). GEPA REQUIRES
-            # one (its probe raises "requires a reflection language model"
-            # without it); MIPROv2/COPRO propose instructions with it. Shares the
-            # cost callback so student + reflection attribute to one run_id/budget.
-            rmodel_id, rlm_kwargs = self._resolve_reflection_model(node)
+            # ── GEPA REQUIRES a reflection_lm (its probe raises "requires a
+            # reflection language model" without it); MIPROv2/COPRO propose
+            # instructions with it. Shares the cost callback so student +
+            # reflection attribute to one run_id/budget.
             reflection_lm = dspy.LM(
-                model=f"litellm/{rmodel_id}",
+                model=reflection_litellm,
                 cache=False,
                 callbacks=[cb],
                 max_tokens=opt.max_tokens,
@@ -382,6 +459,23 @@ class PromptOptimizer:
         model_id = ModelRouter(self._settings).route(TaskComplexity.SIMPLE, node=node)
         return self._resolve_credentials(model_id)
 
+    def _reflection_model_or_none(self) -> str | None:
+        """A pinned reflection model id, or None to fall back to COMPLEX-tier routing.
+
+        Guards the pydantic-settings inline-comment leak: ``KEY=   # comment`` parses
+        as the comment *text* (pydantic-settings 2.x does not strip inline comments),
+        so a blank ``OPTIMIZER_REFLECTION_MODEL`` line that carries a trailing comment
+        would otherwise reach ``dspy.LM`` as an invalid model id. A valid id is a single
+        non-empty token (no whitespace, no leading ``#``) that resolves to a registered
+        model spec; anything else is treated as unset.
+        """
+        from src.config.model_registry import get_model_spec
+
+        raw = self._settings.optimizer.reflection_model.strip()
+        if not raw or raw.startswith("#") or any(ch.isspace() for ch in raw):
+            return None
+        return raw if get_model_spec(raw) is not None else None
+
     def _resolve_reflection_model(self, node: str) -> tuple[str, dict[str, Any]]:
         """Resolve the reflection/proposal model (stronger than the student).
 
@@ -393,8 +487,7 @@ class PromptOptimizer:
         """
         from src.llm.model_router import ModelRouter
 
-        opt = self._settings.optimizer
-        model_id = opt.reflection_model.strip() or ModelRouter(self._settings).route(
+        model_id = self._reflection_model_or_none() or ModelRouter(self._settings).route(
             TaskComplexity.COMPLEX, node=node
         )
         return self._resolve_credentials(model_id)
@@ -409,6 +502,23 @@ class PromptOptimizer:
         if base:
             lm_kwargs["api_base"] = base
         return model_id, lm_kwargs
+
+    def _litellm_id(self, model_id: str) -> str:
+        """The provider-prefixed litellm model id for a (bare) registry key.
+
+        dspy.LM hands ``model`` straight to litellm, which routes by the leading
+        provider segment — so the bare registry key ('deepseek-v4-flash') MUST be
+        expanded to its provider-prefixed litellm id ('deepseek/deepseek-v4-flash');
+        a bare key makes litellm raise ``BadRequestError: LLM Provider NOT
+        provided. You passed model=deepseek-v4-flash`` (verified against
+        litellm/dspy: a leading ``litellm/`` prefix is rejected for the same
+        reason). An unknown key (no registered spec) falls through unchanged so
+        litellm surfaces the error visibly rather than a silent mis-route.
+        """
+        from src.config.model_registry import get_model_spec
+
+        spec = get_model_spec(model_id)
+        return spec.model_id if spec else model_id
 
     def _provider_for_id(self, model_id: str) -> str:
         from src.config.model_registry import get_model_spec

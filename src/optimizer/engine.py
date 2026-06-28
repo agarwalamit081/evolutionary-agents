@@ -203,6 +203,20 @@ class PromptOptimizer:
                 **lm_kwargs,
             )
 
+            # ── Reflection/proposal LM (stronger than the student). GEPA REQUIRES
+            # one (its probe raises "requires a reflection language model"
+            # without it); MIPROv2/COPRO propose instructions with it. Shares the
+            # cost callback so student + reflection attribute to one run_id/budget.
+            rmodel_id, rlm_kwargs = self._resolve_reflection_model(node)
+            reflection_lm = dspy.LM(
+                model=f"litellm/{rmodel_id}",
+                cache=False,
+                callbacks=[cb],
+                max_tokens=opt.max_tokens,
+                temperature=1.0,  # reflection/instruction-proposal favors higher temp
+                **rlm_kwargs,
+            )
+
             # ── GEPA/MIPROv2/COPRO compile against the proxy metric (sync → thread).
             logger.info(
                 f"Optimizer compiling '{node}' via {backend} "
@@ -211,7 +225,9 @@ class PromptOptimizer:
             )
             compile_exc: Exception | None = None
             try:
-                optimized = await asyncio.to_thread(self._compile, backend, opt, lm, profile)
+                optimized = await asyncio.to_thread(
+                    self._compile, backend, opt, lm, reflection_lm, profile
+                )
             except Exception as exc:  # noqa: BLE001 — surface as a structured skip
                 compile_exc = exc
                 optimized = ""
@@ -364,6 +380,27 @@ class PromptOptimizer:
         from src.llm.model_router import ModelRouter
 
         model_id = ModelRouter(self._settings).route(TaskComplexity.SIMPLE, node=node)
+        return self._resolve_credentials(model_id)
+
+    def _resolve_reflection_model(self, node: str) -> tuple[str, dict[str, Any]]:
+        """Resolve the reflection/proposal model (stronger than the student).
+
+        GEPA requires a ``reflection_lm`` and MIPROv2/COPRO a ``prompt_model``;
+        all three benefit from a stronger model than the cheap student. An
+        explicit ``OptimizerSettings.reflection_model`` pins one; otherwise a
+        COMPLEX-tier model is routed (genuinely stronger than the SIMPLE student
+        — e.g. glm-4.7 — and not anthropic-blocked).
+        """
+        from src.llm.model_router import ModelRouter
+
+        opt = self._settings.optimizer
+        model_id = opt.reflection_model.strip() or ModelRouter(self._settings).route(
+            TaskComplexity.COMPLEX, node=node
+        )
+        return self._resolve_credentials(model_id)
+
+    def _resolve_credentials(self, model_id: str) -> tuple[str, dict[str, Any]]:
+        """Resolve provider key + api_base for a model id (shared by both LMs)."""
         lm_kwargs: dict[str, Any] = {}
         api_key = self._settings.llm.get_provider_key(self._provider_for_id(model_id))
         if api_key:
@@ -399,9 +436,16 @@ class PromptOptimizer:
         backend: str,
         opt: Any,
         lm: Any,
+        reflection_lm: Any,
         profile: NodeProfile,
     ) -> str:
-        """Run the teleprompter and return the optimized instruction string."""
+        """Run the teleprompter and return the optimized instruction string.
+
+        ``lm`` is the cheap student (set as DSPy's global default for the
+        predictor); ``reflection_lm`` is the stronger proposal/reflection model
+        passed explicitly to each teleprompter — GEPA needs ``reflection_lm``,
+        MIPROv2/COPRO need ``prompt_model`` (GEPA raises without one).
+        """
         dspy.configure(lm=lm)
         student = dspy.Predict(profile.signature_def)
         # Anchor the search at the current node prompt. GEPA rewrites the
@@ -416,13 +460,17 @@ class PromptOptimizer:
         if backend == "dspy-gepa":
             tele = dspy.GEPA(
                 metric=profile.metric,
+                reflection_lm=reflection_lm,
                 auto=("light" if (opt.max_trials or 0) <= 0 else None),
                 max_full_evals=(opt.max_trials if (opt.max_trials or 0) > 0 else None),
             )
             compiled = tele.compile(student, trainset=trainset)
         elif backend == "dspy-mipro":
             tele = dspy.MIPROv2(
-                metric=profile.metric, num_candidates=opt.max_candidates, auto="light"
+                metric=profile.metric,
+                prompt_model=reflection_lm,
+                num_candidates=opt.max_candidates,
+                auto="light",
             )
             compiled = tele.compile(
                 student,
@@ -432,7 +480,7 @@ class PromptOptimizer:
             )
         elif backend == "dspy-copro":
             tele = dspy.COPRO(
-                prompt_model=lm, metric=profile.metric, breadth=opt.max_candidates
+                prompt_model=reflection_lm, metric=profile.metric, breadth=opt.max_candidates
             )
             compiled = tele.compile(student, trainset=trainset, eval_kwargs={})
         else:  # pragma: no cover — guarded by the entry checks

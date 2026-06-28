@@ -218,7 +218,19 @@ class _TestOptimizer(PromptOptimizer):
     def _resolve_lm(self, _node: str) -> tuple[str, dict[str, Any]]:
         return self._model_id, {}
 
-    def _compile(self, _backend: str, _opt: Any, lm: Any, _profile: NodeProfile) -> str:
+    def _resolve_reflection_model(self, _node: str) -> tuple[str, dict[str, Any]]:
+        # Real optimize() now resolves a reflection LM before _compile (GEPA
+        # needs one); the unit fake supplies one so the 5-arg _compile below runs.
+        return "fake-reflection-model", {}
+
+    def _compile(
+        self,
+        _backend: str,
+        _opt: Any,
+        lm: Any,
+        _reflection_lm: Any,
+        _profile: NodeProfile,
+    ) -> str:
         self.compile_calls += 1
         self.lm_seen = lm
         if self._compile_raises is not None:

@@ -1826,6 +1826,14 @@ class OptimizerSettings(BaseSettings):
     # LM call params for the DSPy student module AND the reflection/proposal LM.
     max_tokens: int = 1024  # Env: OPTIMIZER_MAX_TOKENS
     temperature: float = 0.7  # Env: OPTIMIZER_TEMPERATURE
+    # Reflection/proposal model for the teleprompter search — GEPA's
+    # ``reflection_lm`` (REQUIRED — its probe raises "requires a reflection
+    # language model" without one); MIPROv2's & COPRO's ``prompt_model``. All
+    # three benefit from a STRONGER model than the cheap student. Empty → route a
+    # COMPLEX-tier model via ModelRouter (genuinely stronger than the SIMPLE
+    # student, e.g. glm-4.7; NOT anthropic-blocked). A literal model id pins one.
+    # Env: OPTIMIZER_REFLECTION_MODEL.
+    reflection_model: str = ""  # Env: OPTIMIZER_REFLECTION_MODEL
     # Nightly trigger. Default 03:30 UTC — between the 02:00 battery and the
     # 05:00 curve-gate, so the optimizer runs on a fresh night then the gate
     # re-reads the trend next morning. Env: OPTIMIZER_CRON.

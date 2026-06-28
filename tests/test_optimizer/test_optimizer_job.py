@@ -35,8 +35,15 @@ def test_default_optimizer_cron_is_a_valid_crontab() -> None:
     assert next_fire is not None
 
 
-def test_optimizer_disabled_by_default() -> None:
-    """``OPTIMIZER_ENABLED`` defaults False — the daemon registers nothing unless opted in."""
+def test_optimizer_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``OPTIMIZER_ENABLED`` defaults False — the daemon registers nothing unless opted in.
+
+    Hermetic: the e2e modules call ``load_dotenv()`` at collection time, which
+    populates ``os.environ`` from the live ``.env`` for the whole session — so
+    ``delenv`` the knob before asserting the class default (``_env_file=None``
+    blocks the file read but not the process env).
+    """
+    monkeypatch.delenv("OPTIMIZER_ENABLED", raising=False)
     assert OptimizerSettings(_env_file=None).enabled is False
 
 

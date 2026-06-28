@@ -203,6 +203,12 @@ class _IntegrationOptimizer(PromptOptimizer):
     def _resolve_lm(self, _node: str) -> tuple[str, dict[str, Any]]:
         return "fake-model", {}
 
+    def _resolve_reflection_model(self, _node: str) -> tuple[str, dict[str, Any]]:
+        # Real optimize() now resolves a reflection LM (GEPA raises without one);
+        # the integration fake supplies one so the REAL _compile runs without a
+        # deep ModelRouter+settings read.
+        return "fake-reflection-model", {}
+
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -246,6 +252,40 @@ async def test_candidate_score_guard_promote_end_to_end(
     node, suffixes = parsed
     assert node == "classify"
     assert suffixes == ["OPTIMIZED INSTRUCTION"]
+
+
+@pytest.mark.asyncio
+async def test_gepa_receives_reflection_lm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: GEPA raises "requires a reflection language model" unless
+    ``reflection_lm=`` is wired; the real _compile() must pass it (MIPROv2/COPRO
+    likewise take ``prompt_model=``). Captures the GEPA constructor kwargs."""
+    captured: dict[str, Any] = {}
+
+    class _Capturing(_FakeTeleprompter):
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            super().__init__(**kwargs)
+
+    _wire_base(monkeypatch)
+    monkeypatch.setattr("src.optimizer.engine.dspy", _CompileFakeDspy)
+    # GEPA is the default backend; swap in the capturing subclass so the real
+    # _compile()'s GEPA(...) construction is observable.
+    monkeypatch.setattr(_CompileFakeDspy, "GEPA", _Capturing)
+    _wire_gate(monkeypatch, result={"promoted": True, "canary_score": 0.9})
+
+    async def _clear(_self: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr("src.eval.curve.CapabilityCurve.detect_regression", _clear)
+
+    canary = _FakeCanary(baseline=0.5, candidate=0.9)
+    opt = _IntegrationOptimizer(
+        _FakeSettings(_make_opt(require_curve_clear=False)), canary
+    )
+    await opt.optimize(OptimizeRequest())  # default backend → GEPA path
+
+    assert "reflection_lm" in captured, f"GEPA missing reflection_lm: {captured}"
+    assert captured["reflection_lm"] is not None
 
 
 @pytest.mark.asyncio

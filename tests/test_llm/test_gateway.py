@@ -621,6 +621,54 @@ class TestAcompletion:
         assert mock_litellm.acompletion.call_args.kwargs["timeout"] == 200.0
 
     @pytest.mark.asyncio
+    async def test_retry_call_hard_timeout_caps_unresponsive_provider(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """Bug T1 regression: asyncio.wait_for enforces the per-call timeout even
+        when the underlying client IGNORES it and hangs (observed live: 90s
+        timeout → 264s wall on a degraded Z.AI glm-4.7 call, which let one call
+        burn the entire retry/fallback budget and stalled the run for ~13 min).
+        A hanging mock (2s sleep) must be capped near the configured timeout —
+        not allowed to run the full 2s sleep per attempt."""
+        import asyncio
+        import time
+
+        # Tighten the grace so the wait_for cap == the configured timeout, and
+        # collapse tenacity to a single attempt (no inter-retry backoff) so the
+        # measured wall-clock isolates the backstop, not the backoff ladder.
+        gateway._WAIT_FOR_GRACE = 0.0
+        gateway._settings.resilience.llm_max_retries = 1
+        attempts = 0
+
+        async def hanging_completion(**_kw: Any) -> Any:
+            nonlocal attempts
+            attempts += 1
+            await asyncio.sleep(2.0)  # provider ignores the per-call timeout
+            return _make_litellm_response()
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = hanging_completion
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+
+            start = time.monotonic()
+            with pytest.raises(asyncio.TimeoutError):
+                await gateway._retry_call(
+                    simple_messages,
+                    provider="zai",
+                    timeout=0.05,
+                )
+            elapsed = time.monotonic() - start
+
+        # The backstop must cap the single attempt at ~0.05s — well under the
+        # 2.0s the hanging sleep would take without it. (3 retries × 2s would
+        # be ~6s without the fix.)
+        assert attempts == 1, f"expected exactly one attempt, got {attempts}"
+        assert elapsed < 0.5, f"hard-timeout backstop did not cap the hang: {elapsed:.2f}s"
+
+    @pytest.mark.asyncio
     async def test_tool_choice_conflict_deepseek_retries_with_thinking_disabled(
         self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
     ) -> None:

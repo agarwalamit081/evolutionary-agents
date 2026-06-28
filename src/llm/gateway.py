@@ -53,6 +53,11 @@ _TRANSIENT_ERRORS = (
     litellm.Timeout,  # type: ignore[attr-defined]
     litellm.ServiceUnavailableError,  # type: ignore[attr-defined]
     litellm.APIConnectionError,  # type: ignore[attr-defined]
+    # Hard asyncio.wait_for backstop raised when the per-call timeout is not
+    # enforced by the underlying client (see ``_retry_call``). Treated as
+    # transient so the tenacity layer retries — and the fallback chain moves
+    # on to the next provider once the budget exhausts.
+    asyncio.TimeoutError,
 )
 
 # Tier ordering for cheaper fallback selection
@@ -168,6 +173,12 @@ class LLMGateway:
             complexity=TaskComplexity.SIMPLE,
         )
     """
+
+    # Grace (seconds) added to the configured per-call timeout when wrapping
+    # the litellm call in ``asyncio.wait_for`` (Bug T1 hard backstop). Lets the
+    # cleaner in-library timeout fire first when the client honors it; the
+    # wait_for is the guaranteed cap when it does not.
+    _WAIT_FOR_GRACE: float = 5.0
 
     def __init__(self, settings: Settings, *, pinned_model: str | None = None) -> None:
         self._settings = settings
@@ -982,7 +993,34 @@ class LLMGateway:
                         f"rate limiter acquire failed for {provider}; "
                         f"proceeding best-effort"
                     )
-                return await litellm.acompletion(messages=messages, **kwargs)
+                # Hard per-call backstop (Bug T1): litellm/httpx occasionally
+                # IGNORE the ``timeout`` kwarg on a hanging provider (observed
+                # live: 90s timeout → 264s wall on a degraded Z.AI glm-4.7
+                # call). That lets one call burn the entire tenacity budget
+                # (~13 min before fallback) and stalls the run.
+                # ``asyncio.wait_for`` enforces the cap regardless of the
+                # underlying client: it cancels the litellm task at the cap and
+                # raises ``asyncio.TimeoutError`` (a member of
+                # ``_TRANSIENT_ERRORS``), so tenacity retries and the fallback
+                # chain advances promptly. A small grace (``_WAIT_FOR_GRACE``)
+                # over the configured timeout lets the cleaner in-library
+                # timeout fire first when it works.
+                call_timeout = float(
+                    kwargs.get("timeout") or self._settings.llm.request_timeout
+                )
+                try:
+                    return await asyncio.wait_for(
+                        litellm.acompletion(messages=messages, **kwargs),
+                        timeout=call_timeout + self._WAIT_FOR_GRACE,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Hard timeout backstop fired for {provider} after "
+                        f"{call_timeout + self._WAIT_FOR_GRACE:.0f}s "
+                        f"(litellm timeout={call_timeout:.0f}s was not "
+                        f"enforced); retrying/falling back"
+                    )
+                    raise
         raise RuntimeError("unreachable")  # pragma: no cover
 
     def _parse_response(self, response: Any, model: str, provider: str) -> LLMResponse:

@@ -193,7 +193,18 @@ async def validate_tool_code(
         )
 
     # Gate 2: lint the handler+test together (the test references the handler).
-    lint_result = _lint_code(f"{handler_code}\n\n{test_code}")
+    # Dedupe ACROSS the handler/test boundary: the per-file dedupe above cannot
+    # see a top-level import the test re-states from the handler (e.g. both
+    # ``import asyncio``). Python tolerates the re-import at runtime, but ruff
+    # flags the second binding F811 on the combined source — and the model
+    # reliably re-emits the duplicate in the test, so the retry loop never
+    # converged (observed live: ecommerce_event_cleaner rejected 3× on F811 for
+    # ``asyncio``/``json`` present in both handler and test). Dropping the later
+    # cross-file duplicate makes the lint gate match runtime behavior; only
+    # column-0 import lines are touched (function/class redefinitions — real
+    # F811s — are left intact), so this never masks a genuine bug.
+    combined = dedupe_imports(f"{handler_code}\n\n{test_code}")
+    lint_result = _lint_code(combined)
     if not lint_result["passed"]:
         return ToolCodeValidation(
             passed=False,

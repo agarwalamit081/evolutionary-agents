@@ -586,6 +586,38 @@ class TestDedupeImportsF811:
         assert result.lint_result.get("passed") is True
 
     @pytest.mark.asyncio
+    async def test_validate_tool_code_accepts_cross_file_duplicate_import(self) -> None:
+        # The within-handler dedupe (test above) cannot catch a top-level import
+        # the TEST re-states from the handler: both files independently import
+        # ``asyncio``. Each file is clean alone, but the combined source piped to
+        # ruff has two column-0 ``import asyncio`` → F811 "redefinition of unused
+        # asyncio". Observed live: ``ecommerce_event_cleaner`` was rejected 3× on
+        # this and the retry loop never converged (the model reliably re-emits the
+        # shared import in the test). The fix dedupes ACROSS the handler/test
+        # boundary (only column-0 import lines — a genuine function redefinition
+        # F811 is left intact), so the lint gate matches runtime behavior.
+        result = await validate_tool_code(
+            handler_code=(
+                "import json\n"
+                "import asyncio\n"
+                "\n"
+                "async def clean_events(events: list) -> str:\n"
+                "    '''Re-emit the event list as JSON.'''\n"
+                "    return json.dumps(events)\n"
+            ),
+            test_code=(
+                "import asyncio\n"  # cross-file duplicate of handler's asyncio import
+                "\n"
+                "result = asyncio.run(clean_events([]))\n"
+                "assert isinstance(result, str)\n"
+            ),
+            tool_name="clean_events",
+            safety_pipeline=SafetyPipeline(),
+        )
+        assert result.passed, result.reason
+        assert result.lint_result.get("passed") is True
+
+    @pytest.mark.asyncio
     async def test_validate_and_register_persists_deduped_handler(self) -> None:
         # The registry persists ``tool.handler_code`` directly, so the generator
         # must dedupe the field before register — the stored handler ends up clean.

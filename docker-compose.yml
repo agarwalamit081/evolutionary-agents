@@ -323,7 +323,17 @@ services:
       dockerfile: Dockerfile
     image: self-evolving-agent:latest
     command: ["python", "-m", "src.scheduler"]
+    # env_file so the Phase-5 I1 cron-consumer knobs (AGENT_CRON_ENABLED /
+    # AGENT_CRON_*) + the rest of the app config reach this service at runtime.
+    # The scheduler RUNS the cron consumer (src/scheduler/__main__.py), which
+    # reads `scheduled_tasks` from the DB → it needs DATABASE_URL + the
+    # AGENT_CRON_* knobs the hand-rolled `environment:` below did NOT carry.
+    # (The `${SCHEDULER_*}` interpolations already resolve via compose's own
+    # .env reading, but pydantic-settings reads AGENT_CRON_* from the CONTAINER
+    # env, hence env_file. Mirrors the optimizer sidecar's *agent-common path.)
+    env_file: .env
     environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/turing_agent
       REDIS_URL: redis://redis:6379/0
       SCHEDULER_ENABLED: "true"
       SCHEDULER_CRON: ${SCHEDULER_CRON:-0 2 * * *}

@@ -867,6 +867,18 @@ class EvolutionSettings(BaseSettings):
     # ``.git``) never blocks promotion — the live pointer is the source of truth.
     # Env: EVOLUTION_PROMOTE_TO_VCS.
     evolution_promote_to_vcs: bool = False
+    # #8 / G1 — record a deployed CODE mutation as a *shadow-only* promotion
+    # candidate (opt-in, default off). When true, after a CODE mutation deploys
+    # AND passes the engine's graph-invariant + post-deploy sandbox gates, the
+    # Phase-8 promotion path calls ``PromotionGate.promote_code``: it re-runs the
+    # invariant shadow-verification and writes a versioned candidate artifact +
+    # pointer under ``evolved/code/`` for operator review. The candidate NEVER
+    # reaches live core ``src/`` — merging it into live source is intentionally
+    # deferred (a safe merge needs a reviewed runner-based apply + live reload);
+    # ``GoldenCanary`` is not invoked because it splices PROMPT suffixes into the
+    # live builder and cannot exercise shadow-repo code. Off by default ⇒
+    # byte-identical behavior until toggled. Env: EVOLUTION_PROMOTE_CODE_TO_CORE.
+    evolution_promote_code_to_core: bool = False
     # Phase 2 C1 — curve regression-guard on PROMPT promotion (opt-in, default
     # off). When true, the engine's Phase-8 promotion path reads the nightly
     # capability-curve verdict (``CapabilityCurve.detect_regression``) BEFORE

@@ -1220,6 +1220,37 @@ class SelfEvolutionEngine:
                         logger.warning(f"Promotion gate errored: {e}")
                         promotion = {"promoted": False, "reason": f"gate error: {e}"}
 
+        # #8 / G1 — record a CODE mutation as a *shadow-only* promotion candidate
+        # (default-off; the PROMPT gate above is a no-op for CODE). After a CODE
+        # mutation deploys AND passes the engine's invariant + sandbox gates, this
+        # separate path captures it as a versioned, reviewable candidate under
+        # ``evolved/code/``. The candidate NEVER touches live core ``src/`` (the
+        # merge mechanism is deferred); the PROMPT canary is not reused because it
+        # cannot exercise shadow-repo code. ``EVOLUTION_PROMOTE_CODE_TO_CORE`` gates
+        # the recording; off ⇒ byte-identical. Never aborts the cycle (telemetry).
+        code_promotion: dict[str, Any] = {}
+        if (
+            effective_deploy
+            and promotion_gate is not None
+            and proposal.get("mutation_type") == MutationType.CODE
+        ):
+            try:
+                from src.config import get_settings
+
+                promote_code_on = (
+                    get_settings().evolution.evolution_promote_code_to_core
+                )
+            except Exception:
+                promote_code_on = False
+            if promote_code_on:
+                try:
+                    code_promotion = await promotion_gate.promote_code(
+                        proposal, git_tracker
+                    )
+                except Exception as e:
+                    logger.warning(f"CODE promotion-candidate gate errored: {e}")
+                    code_promotion = {"recorded": False, "reason": f"gate error: {e}"}
+
         # Persist the final mutation + terminal outcome.
         if self._persister is not None:
             mutation_id = await self._persister.record_mutation(
@@ -1277,6 +1308,7 @@ class SelfEvolutionEngine:
             "smoke_result": smoke_result,
             "rollback": rollback_info,
             "promotion": promotion,
+            "code_promotion": code_promotion,
             "mutations_proposed": 1,
             "mutations_deployed": 1 if effective_deploy else 0,
             "chain_id": chain_id,

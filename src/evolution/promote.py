@@ -49,6 +49,11 @@ Canary = Callable[[str, list[str]], Awaitable[float | None]]
 VcsCommit = Callable[[str, str], Awaitable[str]]
 
 _PROMPTS_SUBDIR = "prompts"
+# CODE promotion candidates are recorded under a parallel sub-tree, mirroring the
+# prompts layout: ``evolved/code/<slug>.<sha>.json`` (immutable versions) +
+# ``evolved/code/current.json`` (the candidate pointer). They NEVER reach live
+# core ``src/`` (merge-to-live is deferred; see ``promote_code``).
+_CODE_SUBDIR = "code"
 _POINTER_NAME = "current.json"
 # The heuristic + LLM PROMPT payload targets the execute node by default (the
 # dominant deployed target). Used when a payload omits ``target_node``.
@@ -80,6 +85,27 @@ def _node_from_target_path(target_path: str | None) -> str:
         if token in name:
             return node
     return _DEFAULT_TARGET_NODE
+
+
+def _slugify_target(target_path: str) -> str:
+    """Flatten a CODE mutation target path into a safe artifact filename stem.
+
+    ``graph/nodes/execute.py`` -> ``graph-nodes-execute-py``. Path separators and
+    punctuation collapse to single ``-``; non-alphanumerics map to ``-`` too, so
+    the versioned artifact name is filesystem-safe and collision-free once the
+    content ``sha`` is appended (``<slug>.<sha>.json``).
+    """
+    cleaned: list[str] = []
+    prev_dash = False
+    for ch in target_path.strip().lower():
+        if ch.isalnum():
+            cleaned.append(ch)
+            prev_dash = False
+        elif not prev_dash:
+            cleaned.append("-")
+            prev_dash = True
+    slug = "".join(cleaned).strip("-")
+    return slug or "code"
 
 
 def _utc_now_iso() -> str:
@@ -157,6 +183,43 @@ def parse_prompt_payload(
     if not isinstance(node, str) or not node.strip():
         node = _DEFAULT_TARGET_NODE
     return node.strip(), clean
+
+
+def parse_code_payload(
+    proposal: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Extract ``(target_path, mutated_content)`` from a CODE mutation proposal.
+
+    The CODE-promotion counterpart of :func:`parse_prompt_payload`. A CODE
+    candidate carries ``mutated_content`` (the full rewritten module) and a
+    ``target_path`` (the shadow-repo relative path it was applied to, e.g.
+    ``graph/nodes/execute.py``). A missing ``target_path`` falls back to the
+    same placeholder ``deploy()`` uses (``evolution/latest_mutation.py``) so a
+    candidate is never dropped purely for omitting its path.
+
+    Returns ``None`` for a non-CODE mutation or empty content. Unlike PROMPT
+    payloads there is no free-text-vs-JSON split: a CODE mutation IS its source
+    text by construction (the generator emits a whole module).
+
+    Args:
+        proposal: The evolution mutation proposal (carries ``mutation_type`` +
+            ``mutated_content`` + ``target_path``).
+
+    Returns:
+        ``(target_path, content)`` or ``None`` when the proposal is not a
+        promotable CODE candidate.
+    """
+    if proposal.get("mutation_type") != MutationType.CODE:
+        return None
+    content = proposal.get("mutated_content", "")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    target_path = proposal.get("target_path")
+    if not isinstance(target_path, str) or not target_path.strip():
+        # Mirrors deploy()'s fallback write path so a pathless candidate is
+        # still recorded rather than silently dropped.
+        target_path = "evolution/latest_mutation.py"
+    return target_path.strip(), content
 
 
 class PromotionGate:
@@ -373,6 +436,173 @@ class PromotionGate:
             }
 
         return await self._install(node, suffixes, score, proposal)
+
+    async def _shadow_invariants(self, git_tracker: Any | None) -> dict[str, Any]:
+        """Re-run the stage-1 graph-invariant checks over the deployed shadow repo.
+
+        Reuses :func:`evolution.invariants.verify_graph_invariants` — the same
+        AST checks the engine's ``_verify_invariants`` runs at deploy (every
+        ``.py`` compiles, imports resolve, every ``route_*`` return-literal is a
+        registered node, no ``add_edge(X, X)`` self-loop). This is the
+        authoritative gate for a CODE candidate: it inspects the ACTUAL deployed
+        snapshot, unlike the PROMPT canary which only exercises prompt suffixes.
+
+        Fails OPEN: a missing tracker / no ``repo_dir`` / any error ⇒ ``passed``.
+        ``promote_code`` is independently callable + testable without a full
+        engine context; the engine's own invariant pass (run earlier, with the
+        live ``AgentState`` baseline) is the upstream authoritative barrier.
+
+        Returns:
+            ``{"passed": bool}`` (+ ``reason`` when it failed or was skipped).
+        """
+        repo_dir = getattr(git_tracker, "repo_dir", None)
+        if repo_dir is None:
+            return {"passed": True, "reason": "no shadow repo (invariants skipped)"}
+        try:
+            from src.evolution.invariants import verify_graph_invariants
+
+            report = verify_graph_invariants(Path(repo_dir))
+            if report.passed:
+                return {"passed": True}
+            detail = "; ".join(f"{c.name}: {c.detail}" for c in report.failures)
+            return {"passed": False, "reason": detail or "invariant check failed"}
+        except Exception as exc:  # noqa: BLE001 — fail-open; verifier bug never blocks
+            logger.debug(f"promote_code invariant re-check skipped (fail-open): {exc}")
+            return {"passed": True, "reason": "invariant re-check error (fail-open)"}
+
+    async def promote_code(
+        self,
+        proposal: dict[str, Any],
+        git_tracker: Any | None = None,
+    ) -> dict[str, Any]:
+        """Gate a CODE mutation and record it as a *shadow-only* promotion candidate.
+
+        The CODE counterpart of :meth:`promote` (#8 / G1). A deployed CODE
+        mutation that passed the engine's safety + sandbox + invariant gates is
+        recorded as a versioned, reviewable candidate under
+        ``evolved/code/<slug>.<sha>.json`` with a ``current.json`` pointer.
+
+        Two deliberate differences from the PROMPT gate make this a scaffold, not
+        a live-write path:
+
+        * **The canary is not invoked.** ``GoldenCanary`` splices candidate
+          PROMPT *suffixes* into the LIVE prompt builder — it cannot exercise
+          shadow-repo CODE, because the live agent runs from live ``src/``, not
+          the shadow repo. Calling it for a CODE candidate would bill a
+          synchronous benchmark to the live run that cannot reflect the
+          candidate. The authoritative CODE gate is therefore the invariant
+          shadow-verification (above), plus the upstream post-deploy sandbox
+          smoke the engine already ran.
+        * **The target is the evolved tree, NEVER live core ``src/``.** Recording
+          the candidate is genuine (a real artifact + pointer an operator reviews
+          and diffs against the shadow repo); merging it into live ``src/`` is
+          intentionally deferred — a safe merge needs a reviewed runner-based
+          apply + live reload, which is future work.
+
+        Returns:
+            ``{"recorded": bool}``. ``recorded=True`` carries ``target_path``,
+            ``version``, ``sha`` and a ``deferred`` note (it is NOT a live
+            promotion); ``recorded=False`` carries a ``reason``.
+        """
+        parsed = parse_code_payload(proposal)
+        if parsed is None:
+            return {"recorded": False, "reason": "not a promotable CODE mutation"}
+        target_path, content = parsed
+
+        # Gate — graph-invariant shadow verification (fail-open without a repo).
+        invariant_result = await self._shadow_invariants(git_tracker)
+        if not invariant_result.get("passed"):
+            return {
+                "recorded": False,
+                "reason": f"invariant gate failed: {invariant_result.get('reason')}",
+                "target_path": target_path,
+            }
+
+        return await self._install_code(target_path, content, proposal)
+
+    async def _install_code(
+        self,
+        target_path: str,
+        content: str,
+        proposal: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Write the versioned CODE candidate artifact + pointer (shadow-only).
+
+        Mirrors :meth:`_install` for prompts: an immutable per-version artifact
+        recording the candidate content + provenance, and a ``current.json``
+        pointer keyed by ``target_path`` with a per-target history (so re-recording
+        identical content dedups, and a retracted candidate can be rolled back to
+        the prior one). Nothing here touches live ``src/``.
+        """
+        promoted_at = _utc_now_iso()
+        version_record: dict[str, Any] = {
+            "kind": "code",
+            "target_path": target_path,
+            "mutated_content": content,
+            "promoted_at": promoted_at,
+            "reason": proposal.get("rationale") or proposal.get("description", ""),
+            "source": proposal.get("model_used") or "heuristic",
+            # Explicit, machine-readable scope: this is a review candidate, NOT a
+            # live promotion. Merge-to-live-src is deferred (see ``promote_code``).
+            "live": False,
+            "scope": "shadow-candidate",
+        }
+        sha = _sha8(version_record)
+        version_record["sha"] = sha
+        slug = _slugify_target(target_path)
+        version_name = f"{slug}.{sha}.json"
+
+        code_dir = self._handlers_dir / _CODE_SUBDIR
+        code_dir.mkdir(parents=True, exist_ok=True)
+        (code_dir / version_name).write_text(
+            json.dumps(version_record, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        # Pointer manifest keyed by target_path, with per-target history.
+        pointer_path = code_dir / _POINTER_NAME
+        try:
+            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+            if not isinstance(pointer, dict):
+                pointer = {}
+        except (json.JSONDecodeError, OSError):
+            pointer = {}
+        entry = pointer.get(target_path)
+        if not isinstance(entry, dict):
+            entry = {}
+        raw_history = entry.get("history")
+        history: list[dict[str, Any]] = (
+            [h for h in raw_history if isinstance(h, dict)]
+            if isinstance(raw_history, list)
+            else []
+        )
+        if not history or history[-1].get("sha") != sha:
+            history.append({
+                "sha": sha,
+                "version": version_name,
+                "promoted_at": promoted_at,
+            })
+        entry.update({"active": version_name, "active_sha": sha, "history": history})
+        pointer[target_path] = entry
+        pointer_path.write_text(
+            json.dumps(pointer, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+        logger.info(
+            f"CODE mutation promotion candidate RECORDED (shadow-only, NOT live "
+            f"src/): {target_path} -> {version_name}"
+        )
+        return {
+            "recorded": True,
+            "promoted": False,  # never a live promotion; honesty over telemetry symmetry
+            "kind": "code",
+            "scope": "shadow-candidate",
+            "live": False,
+            "target_path": target_path,
+            "version": version_name,
+            "sha": sha,
+            "deferred": "merge-to-live-src deferred (candidate recorded for review)",
+        }
 
     async def _install(
         self,

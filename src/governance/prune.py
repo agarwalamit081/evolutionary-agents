@@ -173,6 +173,86 @@ class GovernancePruner:
         return int(await enforcer(self._retire_unused_days) or 0)
 
 
+async def enforce_caps_now(settings: AgentSettings | None = None) -> dict[str, Any]:
+    """Run the same nightly governance prune immediately, mid-run (#4).
+
+    Thin async wrapper over ``GovernancePruner(settings).run()`` — 100% reuse of
+    the nightly retire/redundancy/unused/cap-enforce pipeline (no duplicated
+    logic). Called by the ``tool_create`` / ``agent_spawn`` nodes after a creation
+    round, gated by ``should_enforce_caps_now`` + ``MID_RUN_CAP_ENFORCE_ENABLED``,
+    so a long-lived worker that accumulates the active population across runs can
+    free DB-side headroom mid-run instead of saturating and looping until a
+    restart. Never raises (``GovernancePruner.run`` is observability-only), so a
+    DB hiccup can never break the creation round — the cap gate +
+    ``consecutive_cap_blocks`` loop-break still bound the worst case.
+
+    Returns ``GovernancePruner.run``'s report (``total_freed`` etc.).
+    """
+    return await GovernancePruner(settings).run()
+
+
+def should_enforce_caps_now(
+    current_iter: int,
+    last_enforced_iter: int,
+    settings: AgentSettings | None = None,
+) -> bool:
+    """Cadence gate for mid-run cap enforcement (#4).
+
+    True iff ``MID_RUN_CAP_ENFORCE_ENABLED`` is on AND at least
+    ``mid_run_cap_enforce_interval`` iterations have elapsed since the last
+    mid-run enforce (``current_iter - last_enforced >= interval``). ``0`` for
+    ``last_enforced_iter`` means "never enforced" → the first eligible creation
+    round always fires (0 + interval >= interval). The interval is clamped to a
+    minimum of 1 so a misconfigured ``<= 0`` can never divide-by-zero or fire on
+    every single round. Pure (no I/O) so it is pinned without a DB/gateway.
+    """
+    s = settings or get_settings().agent
+    if not s.mid_run_cap_enforce_enabled:
+        return False
+    interval = max(1, int(s.mid_run_cap_enforce_interval or 1))
+    return (int(current_iter) - int(last_enforced_iter)) >= interval
+
+
+async def maybe_enforce_caps_mid_run(
+    *,
+    current_iter: int,
+    last_enforced_iter: int,
+    fire: bool,
+    settings: AgentSettings | None = None,
+) -> int | None:
+    """Cadence-gated mid-run cap enforcement for the creation nodes (#4).
+
+    The single entry point ``tool_create`` / ``agent_spawn`` call after a
+    creation round. ``fire`` is the per-node trigger — the node wants to enforce
+    only after a meaningful round (a capability was created, growing the
+    population, OR the cap was hit, signaling saturation). The cadence gate
+    (``should_enforce_caps_now``) is the cross-round bound so a churny creation
+    loop can't fire the prune every round.
+
+    Returns ``current_iter`` (the new ``mid_run_cap_last_enforced_iter``) when the
+    prune ran, so the caller stamps it into state; ``None`` when the trigger was
+    off or the cadence gate did not allow it (no state write). Never raises —
+    ``enforce_caps_now`` is observability-only.
+    """
+    if not fire or not should_enforce_caps_now(current_iter, last_enforced_iter, settings):
+        return None
+    report = await enforce_caps_now(settings)
+    if report.get("pruned"):
+        logger.info(
+            "Mid-run capability-cap enforcement at iter {} freed {} slot(s)",
+            current_iter,
+            report.get("total_freed", 0),
+        )
+    else:
+        logger.warning(
+            "Mid-run capability-cap enforcement at iter {} reported "
+            "non-success (observability-only): {}",
+            current_iter,
+            report.get("error"),
+        )
+    return current_iter
+
+
 def add_governance_prune_job(
     scheduler: Any,
     pruner: GovernancePruner,

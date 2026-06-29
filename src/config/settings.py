@@ -1076,6 +1076,28 @@ class AgentSettings(BaseSettings):
     # facing ToolResult is never mutated by this — only the recorded metric.
     # Env: TOOL_SUCCESS_CONTRACT_ENABLED.
     tool_success_contract_enabled: bool = True
+    # Mid-run capability-cap enforcement (#4). Governance already prunes at
+    # worker-boot load AND on the nightly schedule (GovernancePruner). But a
+    # long-lived worker accumulates the active tool/sub-agent population ACROSS
+    # runs, and a single run can create up to 3 tools + 3 sub-agents — so a run
+    # that arrives near the cap (25 tools / 60 sub-agents) may saturate it
+    # mid-run and then be unable to create a needed capability, looping
+    # spawn↔create until a worker restart. When ON, the tool_create /
+    # agent_spawn nodes re-run the SAME nightly governance prune
+    # (``enforce_caps_now`` ⇒ ``GovernancePruner.run``) after a creation round,
+    # freeing DB-side headroom (retire redundant + underperforming + unused +
+    # over-cap) for the NEXT creation. Default OFF: it is extra DB work per
+    # creation round and the load-time + nightly prune + run-control loop-break
+    # (consecutive_cap_blocks) already bound the worst case. The interval
+    # bounds it to once per N iterations so a churny creation loop can't hammer
+    # the DB. Note: the prune frees PERSISTED slots (helping future creation
+    # rounds + cross-run saturation); it does NOT evict the current run's
+    # already-loaded in-memory registry. Env: MID_RUN_CAP_ENFORCE_ENABLED.
+    mid_run_cap_enforce_enabled: bool = False
+    # The cadence (#4): a creation round fires the prune only if at least this
+    # many iterations have elapsed since the last mid-run enforce (>= 1).
+    # Env: MID_RUN_CAP_ENFORCE_INTERVAL.
+    mid_run_cap_enforce_interval: int = 10
     # Tool retrieval-before-selection (findings-05; default OFF). When true,
     # execute/plan no longer inject EVERY active tool into the prompt — instead
     # they keep the built-in tools (always) plus the top-k dynamically-created

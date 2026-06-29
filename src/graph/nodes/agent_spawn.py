@@ -160,6 +160,22 @@ async def agent_spawn_node(
     if converted_tool_gaps:
         result["pending_tool_gaps"] = converted_tool_gaps
 
+    # #4 mid-run capability-cap enforcement (opt-in, cadence-gated). Mirrors
+    # tool_create_node: fires the nightly governance prune (DB-side) after a
+    # meaningful round — an agent was spawned (population grew) OR the cap was
+    # hit (saturation) — freeing PERSISTED headroom for the next creation. The
+    # prune does NOT evict this run's already-loaded in-memory sub-agent registry;
+    # the pre-spawn active-population gate (above) is what bounds THIS run.
+    from src.governance.prune import maybe_enforce_caps_mid_run
+
+    new_last_enforced = await maybe_enforce_caps_mid_run(
+        current_iter=int(state.get("iteration_count", 0) or 0),
+        last_enforced_iter=int(state.get("mid_run_cap_last_enforced_iter", 0) or 0),
+        fire=bool(spawned or cap_blocked),
+    )
+    if new_last_enforced is not None:
+        result["mid_run_cap_last_enforced_iter"] = new_last_enforced
+
     return result
 
 

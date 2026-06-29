@@ -130,6 +130,17 @@ class AgentState(TypedDict, total=False):
     # the per-round boolean the nodes stamp (observability).
     cap_blocked: bool
     consecutive_cap_blocks: int
+    # #4 mid-run cap-enforce cadence. ``iteration_count`` at the LAST creation
+    # round that fired ``enforce_caps_now`` (the same nightly governance prune,
+    # DB-side). ``should_enforce_caps_now`` gates on
+    # ``current_iter - last_enforced >= mid_run_cap_enforce_interval`` so a
+    # churny creation loop can't hammer the DB every round. Overwrite (no
+    # reducer): the creating node computes the full new value. ``0`` (unset)
+    # means "never enforced" — the first eligible creation round always fires
+    # (0 + interval >= interval). The prune frees PERSISTED slots (future
+    # creation rounds + cross-run saturation); it does NOT evict the current
+    # run's already-loaded in-memory registry.
+    mid_run_cap_last_enforced_iter: int
 
     # ─── Goal & Planning ────────────────────────────────────────────────
     current_goal: Goal

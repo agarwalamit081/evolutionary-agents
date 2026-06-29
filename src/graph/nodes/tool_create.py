@@ -184,7 +184,7 @@ async def tool_create_node(
     else:
         cap_count = prev_cap_blocks
 
-    return {
+    result: dict[str, Any] = {
         "phase": Phase.PLAN if created_tools else Phase.EXECUTE,
         "pending_tool_gaps": [],
         "attempted_tool_gaps": list(pending_gaps),  # record all attempted to prevent re-detection
@@ -192,6 +192,26 @@ async def tool_create_node(
         "cap_blocked": cap_blocked,
         "consecutive_cap_blocks": cap_count,
     }
+
+    # #4 mid-run capability-cap enforcement (opt-in, cadence-gated). Fires the
+    # SAME nightly governance prune (DB-side) after a meaningful creation round —
+    # a tool was created (population grew) OR the cap was hit (saturation) — so a
+    # long-lived worker that accumulated the active population across runs frees
+    # headroom for the NEXT creation instead of saturating and looping. The prune
+    # frees PERSISTED slots; it does NOT evict this run's already-loaded in-memory
+    # registry (the in-memory cap check is separate). When it fires, stamp the new
+    # ``mid_run_cap_last_enforced_iter`` so the cadence gate bounds it.
+    from src.governance.prune import maybe_enforce_caps_mid_run
+
+    new_last_enforced = await maybe_enforce_caps_mid_run(
+        current_iter=int(state.get("iteration_count", 0) or 0),
+        last_enforced_iter=int(state.get("mid_run_cap_last_enforced_iter", 0) or 0),
+        fire=bool(created_tools or cap_blocked),
+    )
+    if new_last_enforced is not None:
+        result["mid_run_cap_last_enforced_iter"] = new_last_enforced
+
+    return result
 
 
 async def _create_single_tool(

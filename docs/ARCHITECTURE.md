@@ -746,6 +746,16 @@ The shipped topology is **container-first, role-split** (see [`docs/design-docs/
 
 A deployed worker can never churn forever: **(A)** wall-clock timeout (`asyncio.timeout` → terminal `TIMEOUT`, resumable); **(B)** capability-cap gap-loop break (when spawn/create saturates caps with no progress, routers stop re-routing into them — on by default); **(C)** periodic governance prune (`GovernancePruner` re-runs semantic-dedup + cap + redundancy/performance/unused retirement between restarts, without raising the 25/60 caps); **(D)** budget hard-stop (`BudgetExhaustedError` → terminal `BUDGET_EXHAUSTED`, resumable); **(E)** graceful cancel (Redis flag → `RunCancelled` within ~1 iteration). The immutable `submitted_goal` anchor decouples the objective from memory recall, and a convergence early-exit accepts a stably-unchanged partial once the plan is exhausted instead of burning to the hard cap.
 
+### Run-Status Model (Redis-only — no `runs` table)
+
+A run's lifecycle status (`queued → running → completed/failed/timeout/budget_exhausted/cancelled`) lives **only** in a Redis hash — there is **intentionally no durable `runs` table** in Postgres:
+
+- **`RunStatusStore`** (`src/worker/status.py`) writes each status to `turing:run:{run_id}` (`HSET`), TTL-bounded by `WorkerSettings.status_ttl_s` so the store self-cleans (Redis rule: never unbounded growth). `GET /runs/{run_id}` reads it so a client can poll without the worker holding an open connection.
+- **Cancel** is a bare key `turing:runs:cancel:{run_id}` whose *presence* is the signal (`request_cancel` / fail-open `is_cancelled`); a repeat POST is an idempotent no-op.
+- **Best-effort by design** — `put` / `get` / `request_cancel` **never raise**: status is observability, so a Redis hiccup must never break a run (the run-level timeout + budget hard-stop are the ultimate bounds).
+
+**Operational implication.** Status is *ephemeral*: after `status_ttl_s` the hash expires, so historical run status is **not queryable from Postgres** and is lost on a Redis flush. The durable per-run records that *are* reconstructable are: `AsyncPostgresSaver` checkpoints (keyed by `thread_id = f"{cli|api}-{run_id}"`), the `cost_ledger` (keyed by `run_id`), `eval_results`, and the `results/<run_id>/` artifacts. To retain status longer, raise `status_ttl_s` (or persist the terminal status into those durable tables) — do **not** add a `runs` table to the hot path for what is observability-only state.
+
 ### Reasoning Search (opt-in)
 
 - **LATS/MCTS** (`src/graph/search/lats.py`) — per-call single-trajectory MCTS lookahead that commits the UCB-best next step; engages only on CRITICAL low-confidence retries; stateless and fail-safe.

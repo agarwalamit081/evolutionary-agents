@@ -91,7 +91,21 @@ TOOL_ANNOTATIONS: dict[str, dict[str, object]] = {
     "file_reader": {"tags": ["read", "filesystem"], "mcp_hints": {"readOnlyHint": True}},
     "file_writer": {"tags": ["write", "filesystem"], "mcp_hints": {}},
     "get_current_time": {"tags": ["read", "system"], "mcp_hints": {"readOnlyHint": True, "idempotentHint": True}},
-    "git_clone": {"tags": ["code", "fetch", "write"], "mcp_hints": {"openWorldHint": True}},
+    "git_clone": {
+        "tags": ["code", "fetch", "write"],
+        "mcp_hints": {"openWorldHint": True},
+        # #11 — git_clone returns a string on failure rather than raising
+        # ("ERROR: <reason>", "git_clone is disabled ...", "git_clone needs a
+        # non-empty ..."). Without a contract that was recorded as success in
+        # tool_call_metrics → governance retirement + the E2 selection blend
+        # were fooled. The success surface is "Cloned <url> and indexed ...",
+        # which matches no prefix. mode+exclude_prefixes are AND-ed by
+        # evaluate_success; optional regex omitted (file/chunk counts vary).
+        "success_contract": {
+            "mode": "nonempty",
+            "exclude_prefixes": ["ERROR:", "git_clone is disabled", "git_clone needs"],
+        },
+    },
     "http_request": {"tags": ["network"], "mcp_hints": {"destructiveHint": True, "openWorldHint": True}},
     "image_generator": {"tags": ["generate", "write"], "mcp_hints": {"openWorldHint": True}},
     "index_corpus": {"tags": ["search", "write"], "mcp_hints": {"destructiveHint": True}},

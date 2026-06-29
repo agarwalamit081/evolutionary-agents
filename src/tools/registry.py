@@ -28,6 +28,7 @@ class ToolRegistry:
         handler_code: str | None = None,
         tags: list[str] | None = None,
         mcp_hints: dict[str, bool] | None = None,
+        success_contract: dict[str, Any] | None = None,
     ) -> None:
         """Register a tool in the registry.
 
@@ -64,6 +65,15 @@ class ToolRegistry:
                 node routes the invocation through a human-in-the-loop gate
                 (``DESTRUCTIVE_TOOL_HITL_ENABLED``, default off). Unknown/omitted
                 keys are treated as False.
+            success_contract: Optional per-tool success contract (#11) sourced
+                from ``TOOL_ANNOTATIONS`` — declares how to tell a REAL success
+                from a handler that returned without raising but produced an
+                error/empty surface (e.g. ``git_clone`` returns ``"ERROR: …"``
+                on failure). Evaluated by the execute node via
+                ``src.tools.success.evaluate_success`` and recorded to
+                ``tool_call_metrics`` as the REAL success; the model-facing
+                ``ToolResult`` is never mutated. ``None`` (default) = today's
+                behavior (non-raising ⇒ success). In-memory only.
         """
         if name in self._tools:
             logger.warning(f"Tool '{name}' already registered, overwriting")
@@ -78,6 +88,7 @@ class ToolRegistry:
             "handler_code": handler_code if generated else None,
             "tags": list(tags) if tags else [],
             "mcp_hints": dict(mcp_hints) if mcp_hints else {},
+            "success_contract": dict(success_contract) if success_contract else None,
         }
         logger.debug(f"Tool registered: {name}")
 
@@ -128,6 +139,19 @@ class ToolRegistry:
         """
         tool = self._tools.get(name)
         return bool(tool and tool.get("cacheable"))
+
+    def get_success_contract(self, name: str) -> dict[str, Any] | None:
+        """Return the tool's success contract (#11), or ``None``.
+
+        ``None`` for unknown tools and tools registered without a contract —
+        the execute node treats ``None`` as "today's behavior" (a non-raising
+        handler is a success). Only contract-bearing tools (sourced from
+        ``TOOL_ANNOTATIONS`` via ``create_default_registry``) record a REAL
+        success signal.
+        """
+        tool = self._tools.get(name)
+        contract = tool.get("success_contract") if tool else None
+        return dict(contract) if isinstance(contract, dict) else None
 
     def get_handler(self, name: str) -> Callable[..., Any] | None:
         """Get just the handler function for a tool."""

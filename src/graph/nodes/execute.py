@@ -932,18 +932,32 @@ async def _execute_tool_call(
         result = await handler(**args)
         latency_ms = int((time.perf_counter() - start) * 1000)
         out = str(result)
+        # #11 — evaluate the per-tool success contract (additive; None on the
+        # tool = today's behavior). ``real_success`` feeds metrics/governance
+        # ONLY; the model-facing ``ToolResult`` below is NEVER mutated — the
+        # model still sees ``success=True`` + the full surface, so it can react
+        # to an ``"ERROR: …"`` body itself (the agent's reflexes are unchanged).
+        real_success = _evaluate_tool_success(tool_name, out, tools)
         tr = ToolResult(
             tool_name=tool_name,
             success=True,
             output=out[:2000],
         )
-        # Record the invocation outcome (non-fatal; gated by TOOL_METRICS_ENABLED).
-        # A blank success is an empty-output signal; latency is captured for both.
+        # Record the REAL invocation outcome (non-fatal; gated by
+        # TOOL_METRICS_ENABLED). ``real_success`` reflects the per-tool
+        # contract; a blank success is an empty-output signal; latency is
+        # captured for both the contract-pass and contract-fail paths.
         await _record_tool_metric(
-            tool_name, success=True, empty_output=not out.strip(), latency_ms=latency_ms
+            tool_name,
+            success=real_success,
+            empty_output=not out.strip(),
+            latency_ms=latency_ms,
         )
-        # Cache only successful results of cacheable tools (never errors).
-        if cache is not None and tools.is_cacheable(tool_name):
+        # Cache only successful results of cacheable tools (never errors). A
+        # contract failure is a non-success surface (e.g. ``"ERROR: …"``) and is
+        # NOT cached, mirroring the "never errors" intent — so a transient
+        # failure is never served from the cache on a later identical call.
+        if cache is not None and tools.is_cacheable(tool_name) and real_success:
             await cache.set(
                 tool_name,
                 args,
@@ -988,6 +1002,34 @@ async def _record_tool_metric(
         )
     except Exception as exc:  # noqa: BLE001 — metrics must never break a tool call
         logger.debug("Tool metric recording skipped for '{}': {}", tool_name, exc)
+
+
+def _evaluate_tool_success(tool_name: str, output: str, tools: ToolRegistry) -> bool:
+    """Return whether ``output`` satisfies the tool's success contract (#11).
+
+    The contract (sourced from ``TOOL_ANNOTATIONS`` via
+    :meth:`ToolRegistry.get_success_contract`) declares how to tell a REAL
+    success from a handler that returned WITHOUT raising but produced an
+    error/empty surface — e.g. ``git_clone`` returns ``"ERROR: …"`` on failure,
+    which without a contract was recorded as ``success=True`` in
+    ``tool_call_metrics`` (feeding governance retirement + the E2 selection
+    blend). The recorded metric/governance signal now reflects this REAL outcome;
+    the model-facing ``ToolResult`` is never mutated.
+
+    Fail-open by design — the flag off, no contract on the tool, or any
+    evaluation error ⇒ ``True`` (today's behavior, where a non-raising handler
+    is a success). A malformed contract must NEVER break a tool call.
+    """
+    try:
+        from src.config.settings import get_settings
+        from src.tools.success import evaluate_success
+
+        if not get_settings().agent.tool_success_contract_enabled:
+            return True
+        contract = tools.get_success_contract(tool_name)
+        return evaluate_success(contract, output)
+    except Exception:  # noqa: BLE001 — fail-open, never break a tool call
+        return True
 
 
 async def _execute_tool_calls_parallel(

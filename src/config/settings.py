@@ -1065,6 +1065,17 @@ class AgentSettings(BaseSettings):
     # scores. Gated so a DB hiccup in the recorder never breaks a run.
     # Env: TOOL_METRICS_ENABLED.
     tool_metrics_enabled: bool = True
+    # Per-tool SUCCESS CONTRACT (#11). When true (default), the execute node
+    # evaluates each non-raising tool result against the tool's
+    # ``success_contract`` (TOOL_ANNOTATIONS) and records the REAL success —
+    # not just "did not raise". A handler like ``git_clone`` returns
+    # ``"ERROR: <reason>"`` on failure instead of raising, so without a contract
+    # it was recorded as success=True (poisoning the success_rate that feeds
+    # governance retirement). A tool WITHOUT a contract keeps today's behavior
+    # (non-raising ⇒ success); only contract-bearing tools change. The model-
+    # facing ToolResult is never mutated by this — only the recorded metric.
+    # Env: TOOL_SUCCESS_CONTRACT_ENABLED.
+    tool_success_contract_enabled: bool = True
     # Tool retrieval-before-selection (findings-05; default OFF). When true,
     # execute/plan no longer inject EVERY active tool into the prompt — instead
     # they keep the built-in tools (always) plus the top-k dynamically-created

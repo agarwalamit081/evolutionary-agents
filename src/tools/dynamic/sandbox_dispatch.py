@@ -29,13 +29,21 @@ re-open the exact gap this module closes — and an attacker who can influence
 tool creation (prompt injection) could deliberately DoS the runner to force
 the in-process path. The run surfaces the error and re-plans instead.
 
-SUBPROCESS MODE IS UNCHANGED. When ``CODE_EXECUTOR_MODE=subprocess`` (the dev
-default; the whole agent runs on the host with full access anyway) this module
-returns ``None`` and the execute node calls the in-process handler as before —
-zero behavior change for host-run / test / non-isolated deployments. Isolation
-is governed by the single existing ``CODE_EXECUTOR_MODE`` knob: generated code
-is isolated precisely when one-off code is.
+SUBPROCESS MODE IS UNCHANGED FOR THE HOST CLI. When ``CODE_EXECUTOR_MODE=subprocess``
+(the dev default; the whole agent runs on the host with full access anyway) this
+module returns ``None`` and the execute node calls the in-process handler as
+before — zero behavior change for host-run / test / non-isolated deployments.
+
+#2 — WORKER-DEFAULT ISOLATION. A worker can land in subprocess mode (operator
+override, stale image) yet still be the long-lived process accumulating
+generated tools, so isolation there must NOT hinge solely on the mode knob.
+When ``TURING_WORKER_PROCESS`` marks this process as the worker AND
+``ISOLATION_DEFAULT_TO_SANDBOX`` is on, isolation engages even in subprocess
+mode: ``AUTO_PROMOTE_SUBPROCESS_TO_RUNNER`` routes the driver to the runner
+surface (the only no-DinD sandbox available without docker), fail-closed if the
+runner is unreachable. The local CLI sets no worker flag, so it is unaffected.
 """
+
 
 from __future__ import annotations
 
@@ -46,7 +54,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from src.config.settings import get_settings
+from src.config.settings import ToolSandboxSettings, get_settings
 from src.graph.models import ToolResult
 from src.sandbox.executor import SandboxResult, SandboxUnavailable
 from src.tools._paths import results_root
@@ -72,6 +80,12 @@ _RESULT_SLICE_RE = re.compile(
 # one-off ``code_executor`` snippets that also run in a host subprocess.
 _SANDBOXED_MODES = frozenset({"docker", "runner"})
 
+# One-time guard so the subprocess→runner promotion WARNING (#2) logs once per
+# process, not on every generated-tool call. Module-level by design: the
+# promotion is a steady-state condition (the worker is misconfigured), so a
+# single notice is enough; per-call spam would bury real signal in the logs.
+_subprocess_promotion_warned: bool = False
+
 
 def _code_exec_mode() -> str:
     """Call-time read of the code-exec isolation mode (never capture at import)."""
@@ -81,6 +95,57 @@ def _code_exec_mode() -> str:
 def _sandbox_timeout() -> int:
     """Mirror code_executor's sandbox timeout for generated-tool dispatch."""
     return get_settings().tool_sandbox.code_executor_sandbox_timeout
+
+
+def _isolation_settings() -> ToolSandboxSettings:
+    """The ToolSandboxSettings slice governing generated-tool isolation (#2).
+
+    Wrapped so unit tests can stub the worker-default knobs without touching
+    ``.env``. Read at call time (never captured at import) like ``_code_exec_mode``.
+    """
+    return get_settings().tool_sandbox
+
+
+def _is_isolated_runtime() -> bool:
+    """True when a generated tool's invocation should be isolated by default (#2).
+
+    Isolation applies when EITHER:
+
+    * the operator explicitly opted into a sandboxed code-exec mode
+      (``CODE_EXECUTOR_MODE`` ∈ {docker, runner}); OR
+    * this process IS the long-lived worker/runner (``TURING_WORKER_PROCESS``)
+      AND the master ``ISOLATION_DEFAULT_TO_SANDBOX`` switch is on AND
+      ``AUTO_PROMOTE_SUBPROCESS_TO_RUNNER`` can route it to a safe surface — so a
+      worker that lands in subprocess mode (operator override / stale image)
+      STILL isolates untrusted LLM handler code instead of running it in-process
+      with full DB/Redis/FS access (the #288 gap).
+
+    The local host CLI sets none of the worker knobs, so it stays
+    subprocess / in-process — unchanged. Promotion is a hard gate here: without it
+    there is no safe isolation surface in subprocess mode, so the gap is left
+    as-is (an explicit operator choice) rather than failing every call.
+    """
+    if _code_exec_mode() != "subprocess":
+        return True  # explicit opt-in (docker/runner) — today's behavior
+    ts = _isolation_settings()
+    return bool(
+        ts.isolation_default_to_sandbox
+        and ts.auto_promote_subprocess_to_runner
+        and ts.worker_process
+    )
+
+
+def _effective_isolation_mode() -> str:
+    """The sandbox surface to run an isolated generated tool through (#2).
+
+    Reached only after ``_is_isolated_runtime()`` returned True. Returns the
+    configured ``CODE_EXECUTOR_MODE`` when it is itself a sandboxed mode;
+    otherwise '``runner``' — the only no-DinD surface available without docker.
+    A subprocess value here means the worker-process default engaged isolation
+    and ``AUTO_PROMOTE_SUBPROCESS_TO_RUNNER`` promoted it to the runner.
+    """
+    mode = _code_exec_mode()
+    return mode if mode in _SANDBOXED_MODES else "runner"
 
 
 def _extract_async_func_name(handler_code: str) -> str | None:
@@ -190,7 +255,10 @@ async def _run_driver_in_sandbox(driver: str, timeout: int) -> SandboxResult:
 
     sandbox = SandboxExecutor(
         SimpleNamespace(
-            evolution_sandbox_mode=ts.code_executor_mode,
+            # #2: use the EFFECTIVE isolation mode, not the raw configured mode,
+            # so a worker-process default that promoted subprocess→runner routes
+            # the driver to the runner surface (not a host subprocess).
+            evolution_sandbox_mode=_effective_isolation_mode(),
             evolution_sandbox_image=ts.code_executor_sandbox_image,
             evolution_sandbox_memory_mb=ts.code_executor_sandbox_memory_mb,
             evolution_sandbox_timeout=timeout,
@@ -225,8 +293,8 @@ async def invoke_generated_tool(
     Returns:
         A ``ToolResult`` if isolated/dispatched, else ``None``.
     """
-    if _code_exec_mode() not in _SANDBOXED_MODES:
-        return None  # dev default — no isolation concept; caller runs in-process
+    if not _is_isolated_runtime():
+        return None  # not an isolated runtime — caller runs the in-process handler
 
     # Only GENERATED tools are isolated. A hand-written builtin is trusted code
     # (and typically needs gateway/Redis/DB access a sandbox denies), so it runs
@@ -265,9 +333,24 @@ async def invoke_generated_tool(
 
     driver = _build_driver(handler_code, func_name, args)
     timeout = _sandbox_timeout()
+    # #2: the actual surface may differ from the configured mode when the
+    # worker-process default promoted subprocess→runner. Log the EFFECTIVE mode
+    # (what the untrusted code actually ran under), and warn ONCE on promotion
+    # so a misconfigured worker surfaces without per-call spam.
+    effective_mode = _effective_isolation_mode()
+    global _subprocess_promotion_warned
+    if effective_mode != _code_exec_mode() and not _subprocess_promotion_warned:
+        _subprocess_promotion_warned = True
+        logger.warning(
+            "Worker-process default isolation engaged for generated tools in "
+            "subprocess mode — promoting to the '{}' surface "
+            "(AUTO_PROMOTE_SUBPROCESS_TO_RUNNER). Set CODE_EXECUTOR_MODE=runner "
+            "to make isolation explicit.",
+            effective_mode,
+        )
     logger.info(
         "Isolating generated tool '{}' via {} sandbox (handler {} chars)",
-        tool_name, _code_exec_mode(), len(handler_code),
+        tool_name, effective_mode, len(handler_code),
     )
 
     try:
@@ -297,5 +380,5 @@ async def invoke_generated_tool(
         success=success,
         output=output,
         error=error,
-        metadata={"isolated": True, "mode": _code_exec_mode()},
+        metadata={"isolated": True, "mode": effective_mode},
     )

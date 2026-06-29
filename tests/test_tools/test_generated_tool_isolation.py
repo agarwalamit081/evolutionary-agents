@@ -382,6 +382,166 @@ class TestScopedPropagation:
         assert scoped.get_handler_code("normalize_rows") == _HANDLER_SRC
 
 
+# ─── #2 worker-default isolation (#2) ─────────────────────────────────
+
+
+def _iso_settings(
+    *,
+    worker: bool = False,
+    default: bool = True,
+    promote: bool = True,
+) -> Any:
+    """A ToolSandboxSettings stand-in carrying only the #2 isolation knobs.
+
+    Returned by a monkeypatched ``sandbox_dispatch._isolation_settings`` so the
+    gate is exercised without touching ``.env`` (which the host test suite
+    inherits from the live deployment).
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        worker_process=worker,
+        isolation_default_to_sandbox=default,
+        auto_promote_subprocess_to_runner=promote,
+    )
+
+
+class TestIsolationRuntimeGate:
+    """``_is_isolated_runtime`` / ``_effective_isolation_mode`` — pure policy."""
+
+    def test_explicit_runner_is_isolated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "runner")
+        monkeypatch.setattr(sandbox_dispatch, "_isolation_settings", lambda: _iso_settings(worker=False))
+        assert sandbox_dispatch._is_isolated_runtime() is True
+
+    def test_explicit_docker_is_isolated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "docker")
+        assert sandbox_dispatch._is_isolated_runtime() is True
+
+    def test_subprocess_no_worker_not_isolated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Host CLI default: subprocess + no worker flag → in-process."""
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "subprocess")
+        monkeypatch.setattr(sandbox_dispatch, "_isolation_settings", lambda: _iso_settings(worker=False))
+        assert sandbox_dispatch._is_isolated_runtime() is False
+
+    def test_subprocess_worker_default_is_isolated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The #2 gap: a worker in subprocess mode STILL isolates."""
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "subprocess")
+        monkeypatch.setattr(sandbox_dispatch, "_isolation_settings", lambda: _iso_settings(worker=True))
+        assert sandbox_dispatch._is_isolated_runtime() is True
+
+    def test_master_switch_off_disables_worker_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "subprocess")
+        monkeypatch.setattr(
+            sandbox_dispatch, "_isolation_settings", lambda: _iso_settings(worker=True, default=False)
+        )
+        assert sandbox_dispatch._is_isolated_runtime() is False
+
+    def test_promotion_off_disables_worker_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No safe surface without promotion → leave the subprocess gap as-is."""
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "subprocess")
+        monkeypatch.setattr(
+            sandbox_dispatch, "_isolation_settings", lambda: _iso_settings(worker=True, promote=False)
+        )
+        assert sandbox_dispatch._is_isolated_runtime() is False
+
+    def test_explicit_mode_wins_over_worker_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """runner mode isolates even when the worker knobs would say otherwise."""
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "runner")
+        monkeypatch.setattr(
+            sandbox_dispatch,
+            "_isolation_settings",
+            lambda: _iso_settings(worker=False, default=False, promote=False),
+        )
+        assert sandbox_dispatch._is_isolated_runtime() is True
+
+    def test_effective_mode_promotes_subprocess_to_runner(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "subprocess")
+        assert sandbox_dispatch._effective_isolation_mode() == "runner"
+
+    def test_effective_mode_keeps_explicit_runner(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "runner")
+        assert sandbox_dispatch._effective_isolation_mode() == "runner"
+
+    def test_effective_mode_keeps_explicit_docker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "docker")
+        assert sandbox_dispatch._effective_isolation_mode() == "docker"
+
+
+class TestWorkerDefaultDispatch:
+    """End-to-end: a subprocess-mode worker isolates via the runner surface."""
+
+    @pytest.mark.asyncio
+    async def test_subprocess_worker_isolates_via_runner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2: worker + subprocess mode → driver runs under the RUNNER surface."""
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "subprocess")
+        monkeypatch.setattr(
+            sandbox_dispatch, "_isolation_settings", lambda: _iso_settings(worker=True)
+        )
+        captured: dict[str, Any] = {}
+
+        async def _fake_run(driver: str, timeout: int) -> SandboxResult:
+            captured["driver"] = driver
+            captured["timeout"] = timeout
+            return _sandbox_success("worker-promoted")
+
+        monkeypatch.setattr(sandbox_dispatch, "_run_driver_in_sandbox", _fake_run)
+        # Reset the one-time promotion notice so this test is order-independent.
+        monkeypatch.setattr(sandbox_dispatch, "_subprocess_promotion_warned", False)
+        reg = _registry_with_generated()
+
+        result = await sandbox_dispatch.invoke_generated_tool(
+            "normalize_rows", reg, {"path": "seed.jsonl"}
+        )
+
+        assert result is not None
+        assert result.success is True
+        assert result.output == "worker-promoted"
+        # The metadata reports the EFFECTIVE surface (runner), not subprocess.
+        assert result.metadata.get("isolated") is True
+        assert result.metadata.get("mode") == "runner"
+        assert "async def normalize(path):" in captured["driver"]
+        # The promotion fired (one-time flag flipped).
+        assert sandbox_dispatch._subprocess_promotion_warned is True
+
+    @pytest.mark.asyncio
+    async def test_subprocess_worker_fails_closed_on_runner_down(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A promoted worker whose runner is unreachable FAILS CLOSED."""
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "subprocess")
+        monkeypatch.setattr(
+            sandbox_dispatch, "_isolation_settings", lambda: _iso_settings(worker=True)
+        )
+
+        async def _boom(_driver: str, _timeout: int) -> SandboxResult:
+            raise SandboxUnavailable("runner unreachable")
+
+        monkeypatch.setattr(sandbox_dispatch, "_run_driver_in_sandbox", _boom)
+        reg = _registry_with_generated()
+
+        result = await sandbox_dispatch.invoke_generated_tool("normalize_rows", reg, {"path": "x"})
+        assert result is not None and result.success is False
+        assert "sandbox unavailable" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_subprocess_no_worker_still_inproc(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A host CLI in subprocess mode is unaffected — in-process (None)."""
+        monkeypatch.setattr(sandbox_dispatch, "_code_exec_mode", lambda: "subprocess")
+        monkeypatch.setattr(sandbox_dispatch, "_isolation_settings", lambda: _iso_settings(worker=False))
+
+        async def _should_not_run(_d: str, _t: int) -> SandboxResult:
+            raise AssertionError("sandbox must not run for a non-isolated runtime")
+
+        monkeypatch.setattr(sandbox_dispatch, "_run_driver_in_sandbox", _should_not_run)
+        reg = _registry_with_generated()
+        assert await sandbox_dispatch.invoke_generated_tool("normalize_rows", reg, {}) is None
+
+
 # ─── helpers ─────────────────────────────────────────────────────────
 
 

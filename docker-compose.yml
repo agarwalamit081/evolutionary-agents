@@ -37,6 +37,13 @@ x-agent-common: &agent-common
     CODE_EXECUTOR_MODE: runner
     EVOLUTION_SANDBOX_MODE: runner
     RUNNER_URL: http://runner:8090
+    # #2 generated-tool isolation default: mark every role that runs the agent
+    # graph (api/worker) as a worker process so isolation engages by default
+    # EVEN IF a role lands in subprocess mode (stale image / operator override),
+    # auto-promoting to the runner surface (fail-closed if down). Harmless for
+    # the runner role — it executes submitted code, never invokes generated
+    # tools. Overrides .env so the container topology is authoritative.
+    TURING_WORKER_PROCESS: "1"
     # Replicated workers (deploy.replicas: 2 below) MUST each own a UNIQUE Redis
     # consumer name or they share one pending-entries list and break XAUTOCLAIM
     # crash-recovery. Forcing WORKER_CONSUMER_NAME empty here makes every worker

@@ -676,6 +676,33 @@ class ToolSandboxSettings(BaseSettings):
     # mounted host results dir — the same contract the host subprocess honors.
     code_executor_sandbox_workdir_dest: str = "/workspace/results"
 
+    # ── #2 generated-tool isolation default ────────────────────────────
+    # Isolation of LLM-GENERATED tool handlers is otherwise governed SOLELY by
+    # ``code_executor_mode`` (docker/runner isolates; subprocess does not). A
+    # worker that runs in subprocess mode — operator override or a stale image
+    # — would then run untrusted handler code IN-PROCESS with full DB/Redis/FS
+    # access, re-opening the runner-isolation gap (#288). These three knobs make
+    # isolation the DEFAULT inside a worker process regardless of the mode knob,
+    # auto-promoting subprocess→runner (fail-closed if the runner is down). The
+    # local host CLI sets none of them, so it stays subprocess/in-process.
+    # Process identity: True only inside the long-lived worker/runner process
+    # (set via TURING_WORKER_PROCESS=1 in the worker compose service). Env:
+    # TURING_WORKER_PROCESS.
+    worker_process: bool = False
+    # Master switch for the worker-default isolation feature. Off ⇒ isolation
+    # reverts to being governed purely by ``code_executor_mode`` (today's
+    # behavior), so an operator can opt the whole feature out. Env:
+    # ISOLATION_DEFAULT_TO_SANDBOX.
+    isolation_default_to_sandbox: bool = True
+    # When isolation is engaged via the worker-process default in subprocess
+    # mode, promote the generated tool to the RUNNER surface (the only no-DinD
+    # sandbox available without docker) instead of running in-process. This is
+    # also the gate for whether worker-default isolation engages at all: without
+    # promotion there is no safe surface, so the subprocess gap is left as-is
+    # (an explicit operator choice). Fail-closed if the runner is unreachable.
+    # Env: AUTO_PROMOTE_SUBPROCESS_TO_RUNNER.
+    auto_promote_subprocess_to_runner: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

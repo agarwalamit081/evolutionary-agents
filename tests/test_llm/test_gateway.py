@@ -1480,3 +1480,53 @@ class TestGatewayVision:
 
         # Non-vision primary skipped; the vision-capable fallback was attempted.
         assert mock_litellm.acompletion.call_args.kwargs["model"] == "gpt-4o-mini-2024-07-18"
+
+
+# ─── #13 prompt-cache token metrics ───────────────────────────────────
+
+
+class TestParseResponseCacheMetrics:
+    """Provider-native prompt-cache tokens are recorded as Prometheus counters
+    when ``observability.llm_cache_token_metrics_enabled`` is on, skipped when off
+    or when a response reports no cache tokens, and a recorder failure never
+    aborts the parse (observability-only, mirrors the cost-ledger contract)."""
+
+    @staticmethod
+    def _resp_with_cache(read: int, created: int) -> Any:
+        resp = _make_litellm_response()
+        resp.usage._cache_read_input_tokens = read
+        resp.usage._cache_creation_input_tokens = created
+        return resp
+
+    def test_records_cache_tokens_when_enabled(self) -> None:
+        gw = _make_gateway()
+        with patch("src.llm.gateway.record_prompt_cache_tokens") as rec:
+            out = gw._parse_response(self._resp_with_cache(120, 40), "glm-4.7", "zai")
+        rec.assert_called_once_with("glm-4.7", "zai", 120, 40)
+        assert out.cache_read_tokens == 120
+        assert out.cache_creation_tokens == 40
+
+    def test_skips_when_no_cache_tokens(self) -> None:
+        gw = _make_gateway()
+        with patch("src.llm.gateway.record_prompt_cache_tokens") as rec:
+            gw._parse_response(self._resp_with_cache(0, 0), "glm-4.7", "zai")
+        rec.assert_not_called()
+
+    def test_skips_when_flag_disabled(self) -> None:
+        settings = _make_settings()
+        settings.observability.llm_cache_token_metrics_enabled = False
+        gw = _make_gateway(settings)
+        with patch("src.llm.gateway.record_prompt_cache_tokens") as rec:
+            gw._parse_response(self._resp_with_cache(120, 40), "glm-4.7", "zai")
+        rec.assert_not_called()
+
+    def test_recorder_failure_never_aborts_parse(self) -> None:
+        gw = _make_gateway()
+        with patch(
+            "src.llm.gateway.record_prompt_cache_tokens",
+            side_effect=RuntimeError("boom"),
+        ):
+            out = gw._parse_response(self._resp_with_cache(120, 40), "glm-4.7", "zai")
+        # Parse still returns a fully-formed response despite the recorder crash.
+        assert out.cache_read_tokens == 120
+        assert out.cache_creation_tokens == 40

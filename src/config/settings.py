@@ -1347,6 +1347,13 @@ class ObservabilitySettings(BaseSettings):
     prometheus_enabled: bool = False
     prometheus_port: int = 9090
 
+    # Record provider-native prompt-cache token counts (Anthropic cache read /
+    # creation tokens surfaced by litellm on the Usage object) as Prometheus
+    # counters, so cache hit-rate is measurable. Default on; the recorder is a
+    # no-op when prometheus_client is absent or when a response reports no
+    # cache tokens. Env: LLM_CACHE_TOKEN_METRICS_ENABLED
+    llm_cache_token_metrics_enabled: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

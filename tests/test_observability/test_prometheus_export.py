@@ -45,6 +45,8 @@ class TestMetricRegistrySurface:
         assert m.LLM_REQUEST_ERRORS is not None
         assert m.LLM_CACHE_HITS is not None
         assert m.LLM_CACHE_MISSES is not None
+        assert m.LLM_PROMPT_CACHE_READ_TOKENS is not None
+        assert m.LLM_PROMPT_CACHE_CREATION_TOKENS is not None
         assert m.CIRCUIT_BREAKER_STATE_TRANSITIONS is not None
         assert m.GRAPH_NODE_DURATION is not None
         assert m.GRAPH_ITERATIONS is not None
@@ -110,6 +112,25 @@ class TestRecordIncrementsRightCounter:
         after = _samples()
         assert after[("llm_cache_hits_total", frozenset({"model": "cm"}.items()))] == before_hit + 1
         assert after[("llm_cache_misses_total", frozenset({"model": "cm"}.items()))] == before_miss + 1
+
+    def test_record_prompt_cache_tokens_increments_read_and_creation(self) -> None:
+        # #13 — provider-native cache token counts land in their own counters.
+        labels = frozenset({"model": "glm-4.7", "provider": "zai"}.items())
+        before_read = _samples().get(
+            ("llm_prompt_cache_read_tokens_total", labels), 0.0)
+        before_create = _samples().get(
+            ("llm_prompt_cache_creation_tokens_total", labels), 0.0)
+        m.record_prompt_cache_tokens("glm-4.7", "zai", 120, 40)
+        after = _samples()
+        assert after[("llm_prompt_cache_read_tokens_total", labels)] == before_read + 120
+        assert after[("llm_prompt_cache_creation_tokens_total", labels)] == before_create + 40
+
+    def test_record_prompt_cache_tokens_skips_zeros(self) -> None:
+        # Zero cache tokens (caching off / provider doesn't report) ⇒ no child.
+        m.record_prompt_cache_tokens("no-cache-model", "p", 0, 0)
+        labels = frozenset({"model": "no-cache-model", "provider": "p"}.items())
+        assert ("llm_prompt_cache_read_tokens_total", labels) not in _samples()
+        assert ("llm_prompt_cache_creation_tokens_total", labels) not in _samples()
 
     def test_record_tool_call_increments_calls_and_errors_on_failure(self) -> None:
         before_calls = _samples().get(

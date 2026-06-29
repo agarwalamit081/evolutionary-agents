@@ -40,6 +40,7 @@ from src.llm.thinking_control import thinking_params_for
 from src.llm.model_router import ModelRouter
 from src.llm.models import BatchRequest, BatchResponse, LLMResponse, ToolCallResponse
 from src.llm.rate_limiter import RateLimiterRegistry
+from src.observability.metrics import record_prompt_cache_tokens
 from src.llm.structured_output import (
     StructuredOutputManager,
     build_native_response_format,
@@ -1064,6 +1065,19 @@ class LLMGateway:
                 f"Prompt cache ({model}): read={cache_read_tokens} "
                 f"created={cache_creation_tokens} tokens"
             )
+
+        # Record cache token counts as Prometheus counters so hit-rate is
+        # measurable. Observability-only: a failure here must never abort a run
+        # (mirrors the CostTracker resilience contract).
+        if self._settings.observability.llm_cache_token_metrics_enabled and (
+            cache_read_tokens or cache_creation_tokens
+        ):
+            try:
+                record_prompt_cache_tokens(
+                    model, provider, cache_read_tokens, cache_creation_tokens
+                )
+            except Exception:  # noqa: BLE001 — observability must never break a run
+                logger.debug("Failed to record prompt-cache token metrics")
 
         cost = CostTracker.calculate_cost(model, input_tokens, output_tokens)
 

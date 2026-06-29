@@ -77,6 +77,21 @@ LLM_CACHE_MISSES = _counter(
     ["model"],
 )
 
+# Provider-native prompt-cache accounting (e.g. Anthropic cache_control). litellm
+# surfaces these on the Usage object as _cache_read_input_tokens /
+# _cache_creation_input_tokens. Measuring them lets us compute cache hit-rate.
+LLM_PROMPT_CACHE_READ_TOKENS = _counter(
+    "llm_prompt_cache_read_tokens_total",
+    "Provider-native prompt-cache tokens served from cache (read)",
+    ["model", "provider"],
+)
+
+LLM_PROMPT_CACHE_CREATION_TOKENS = _counter(
+    "llm_prompt_cache_creation_tokens_total",
+    "Provider-native prompt-cache tokens written to cache (creation)",
+    ["model", "provider"],
+)
+
 CIRCUIT_BREAKER_STATE_TRANSITIONS = _counter(
     "circuit_breaker_state_transitions_total",
     "Per-provider circuit breaker state transitions",
@@ -172,6 +187,24 @@ def record_cache_lookup(model: str, hit: bool) -> None:
         LLM_CACHE_HITS.labels(model=model).inc()
     elif not hit and LLM_CACHE_MISSES:
         LLM_CACHE_MISSES.labels(model=model).inc()
+
+
+def record_prompt_cache_tokens(
+    model: str, provider: str, read_tokens: int, creation_tokens: int
+) -> None:
+    """Record provider-native prompt-cache token counts for one LLM response.
+
+    ``read_tokens`` are tokens served from the provider's prompt cache; ``creation_tokens``
+    are tokens written into it (a cache-write cost). Both come from litellm's Usage
+    object and are absent/0 when caching is off or the provider does not report them,
+    so this is a no-op for zero values.
+    """
+    if LLM_PROMPT_CACHE_READ_TOKENS and read_tokens:
+        LLM_PROMPT_CACHE_READ_TOKENS.labels(model=model, provider=provider).inc(read_tokens)
+    if LLM_PROMPT_CACHE_CREATION_TOKENS and creation_tokens:
+        LLM_PROMPT_CACHE_CREATION_TOKENS.labels(
+            model=model, provider=provider
+        ).inc(creation_tokens)
 
 
 def record_node_duration(node_name: str, duration_seconds: float) -> None:

@@ -2231,6 +2231,42 @@ class ExperimentalTechniqueSettings(BaseSettings):
     )
 
 
+class Lean4Settings(BaseSettings):
+    """Lean 4 formal-verification builtin runner (Phase 2 #17, default-OFF).
+
+    An opt-in builtin (``lean4_runner``) that type-checks Lean 4 code against the
+    host's local Lean toolchain — a formal-verification substrate for goals that
+    demand machine-checked proofs. Default-off: until ``LEAN4_ENABLED`` is on the
+    handler is a no-op returning a clear disabled message (mirrors ``git_clone``).
+    When enabled, the handler still requires the ``lean`` binary on PATH (probed
+    via ``shutil.which``) — its absence degrades to a disabled message rather than
+    crashing on import or at call time.
+
+    The check writes the supplied code to a confined ``TemporaryDirectory`` and
+    runs ``lean`` under a hard ``timeout_s`` ceiling, so a runaway elaboration can
+    never hang the worker. NOTE: Lean tactics/meta-programs EXECUTE during
+    elaboration, so running ``lean`` on agent-supplied code is a code-execution
+    trust equivalent to ``code_executor`` — enable only on a host/runner you trust
+    to run agent code (production hardening routes it through the no-DinD runner
+    sandbox; the scaffold runs it in-process with temp-dir + timeout confinement).
+    """
+
+    # Master opt-in. Default False. Env: LEAN4_ENABLED.
+    enabled: bool = False  # Env: LEAN4_ENABLED
+    # Hard ceiling (seconds) on a single `lean` type-check. Env: LEAN4_TIMEOUT_S.
+    timeout_s: int = 120  # Env: LEAN4_TIMEOUT_S
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps LEAN4_* vars to these fields, mirroring the git_clone
+        # opt-in pattern.
+        env_prefix="lean4_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class Settings(BaseSettings):
     """Root settings class that composes all settings groups."""
 
@@ -2269,6 +2305,7 @@ class Settings(BaseSettings):
     aflow: AflowSettings = AflowSettings()  # type: ignore[assignment]
     neo4j: Neo4jSettings = Neo4jSettings()  # type: ignore[assignment]
     experimental_techniques: ExperimentalTechniqueSettings = ExperimentalTechniqueSettings()  # type: ignore[assignment]
+    lean4: Lean4Settings = Lean4Settings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

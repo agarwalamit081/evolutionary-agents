@@ -109,7 +109,7 @@ rationale.
 | LLM gateway (litellm, circuit breaker, rate limiter) | [`13-llm-gateway.md`](docs/design-docs/13-llm-gateway.md) |
 | Workflow / StateGraph nodes | [`06-workflow-design.md`](docs/design-docs/06-workflow-design.md) |
 | 3-tier memory (Hot/Warm/Cold + folding) | [`08-memory-system.md`](docs/design-docs/08-memory-system.md) |
-| Tools (22 built-ins + runtime generation) | [`14-tool-system.md`](docs/design-docs/14-tool-system.md) |
+| Tools (23 built-ins + runtime generation) | [`14-tool-system.md`](docs/design-docs/14-tool-system.md) |
 | Sub-agent delegation | [`18-sub-agent-system.md`](docs/design-docs/18-sub-agent-system.md) |
 | Self-evolution engine | [`07-self-evolution-engine.md`](docs/design-docs/07-self-evolution-engine.md) |
 | Safety guardrails (7-layer) | [`10-safety-guardrails.md`](docs/design-docs/10-safety-guardrails.md) |
@@ -147,6 +147,24 @@ All configuration is loaded via **pydantic-settings** `BaseSettings` classes fro
 (or environment variables) — no `os.environ` in application code. The complete template is
 in [`.env.example`](.env.example); every settings class and validator is documented in
 [`docs/design-docs/03-environment-config.md`](docs/design-docs/03-environment-config.md).
+
+### Opt-in capability flags
+
+These ship with the shown defaults so production behavior is unchanged until toggled. Most
+are **off by default**; the few on-by-default are marked. Set them in `.env`.
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `TOOL_SUCCESS_CONTRACT_ENABLED` | `true` | Record a tool's **real** success (non-empty output, no `ERROR:`-style prefix) in metrics + governance retirement, instead of "didn't raise" (#11). |
+| `LLM_CACHE_TOKEN_METRICS_ENABLED` | `true` | Export LLM prompt-cache read/creation token Prometheus counters (#13). |
+| `MID_RUN_CAP_ENFORCE_ENABLED` + `MID_RUN_CAP_ENFORCE_INTERVAL` | `false` / `10` | Re-run the nightly capability cap-prune mid-run, after a creation round, so a long-lived worker frees persisted tool/sub-agent headroom instead of saturating mid-run (#4). |
+| `EVOLUTION_PROMOTE_CODE_TO_CORE` | `false` | Promote a shadow-verified CODE mutation toward core-`src/` (candidate path only; never live until set) (#8). |
+| `EXPERIMENTAL_TECHNIQUES_ENABLED` + 5 `EXPERIMENTAL_TECHNIQUE_*_ENABLED` | `false` | Opt into experimental prompting techniques (self-debugging, Godel-agent, Web-Dreamer, Absolute-Zero, adversarial-debate) behind a master + per-technique gate (#18). |
+| `LEAN4_ENABLED` + `LEAN4_TIMEOUT_S` | `false` / `120` | Lean 4 formal-verification builtin (auto-detects `lake`/`elan`); bounded `lean` type-check in a confined dir (#17). |
+
+Operational scripts added this sweep: `scripts/cve_sweep.py` (non-fatal `pip-audit` CVE sweep
+over `requirements*.txt`, JSON to `logs/`, #19) and `scripts/analyze_vector_queries.py`
+(read-only `EXPLAIN ANALYZE` over the HNSW-backed tables, #20).
 
 ---
 

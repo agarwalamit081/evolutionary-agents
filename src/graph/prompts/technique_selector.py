@@ -299,6 +299,38 @@ TECHNIQUE_REGISTRY: list[Technique] = [
 JSON_SCHEMA_MARKER = "Respond with a JSON object"
 
 
+def _experimental_techniques() -> list[Technique]:
+    """Enabled experimental techniques, gated behind default-OFF flags (#18).
+
+    Returns ``[]`` unless ``EXPERIMENTAL_TECHNIQUES_ENABLED`` is on, so the base
+    registry — and therefore selection — is byte-identical to the curated set on a
+    host run with the flags off. The technique modules are imported lazily here
+    (NOT at module load) so there is no import cycle (this module never imports
+    ``src.graph.techniques`` at its top level) and the import cost is paid only
+    when a flag is on. Fail-safe: any settings/resolution error returns ``[]`` so
+    the registry — and the run — can never break on an experimental feature.
+    """
+    try:
+        from src.config.settings import get_settings
+
+        from src.graph.techniques import ENABLED_BY_FLAG
+
+        settings = get_settings().experimental_techniques
+    except Exception:  # noqa: BLE001 — never let an experiment break selection
+        logger.debug("Experimental-technique settings unavailable; using base registry only")
+        return []
+    if not settings.enabled:
+        return []
+    return [technique for flag_attr, technique in ENABLED_BY_FLAG if getattr(settings, flag_attr)]
+
+
+def _effective_registry() -> list[Technique]:
+    """The curated base registry plus any enabled experimental techniques."""
+    registry = list(TECHNIQUE_REGISTRY)
+    registry.extend(_experimental_techniques())
+    return registry
+
+
 class TechniqueSelector:
     """Select prompting techniques for a single node call.
 
@@ -308,7 +340,7 @@ class TechniqueSelector:
     """
 
     def __init__(self, registry: list[Technique] | None = None) -> None:
-        self._registry = registry if registry is not None else TECHNIQUE_REGISTRY
+        self._registry = registry if registry is not None else _effective_registry()
 
     @staticmethod
     def infer_goal_pattern(goal_text: str | None) -> str | None:

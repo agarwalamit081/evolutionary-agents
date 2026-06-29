@@ -2185,6 +2185,52 @@ class Neo4jSettings(BaseSettings):
     )
 
 
+class ExperimentalTechniqueSettings(BaseSettings):
+    """Experimental reasoning techniques (Phase 2 #18, default-OFF scaffolds).
+
+    Five research reasoning frameworks surfaced as selectable prompting *bodies*
+    in the :class:`TechniqueSelector` registry, each behind its own flag (and a
+    master switch). When disabled (the default) the registry is byte-identical to
+    the curated base — the technique modules are imported lazily and only when a
+    flag is on, so a host run never changes selection unless explicitly opted in.
+    The flag injects only the prompting ``body``; the full multi-turn controller
+    for each technique is deferred (raises :class:`TechniqueDeferredError` if its
+    ``apply`` entry is invoked).
+
+    Env-var names use the ``EXPERIMENTAL_TECHNIQUES_*`` prefix (env_prefix below),
+    mirroring the LATS/AFlow opt-in convention.
+    """
+
+    # Master opt-in. Default False so a host run's technique selection is
+    # byte-identical to the curated base. Env: EXPERIMENTAL_TECHNIQUES_ENABLED.
+    enabled: bool = False  # Env: EXPERIMENTAL_TECHNIQUES_ENABLED
+    # Self-Debugging (generate→execute→debug→fix). Env:
+    # EXPERIMENTAL_TECHNIQUES_SELF_DEBUGGING_ENABLED.
+    self_debugging_enabled: bool = False
+    # Gödel-Agent (self-referential strategy rewrite). Env:
+    # EXPERIMENTAL_TECHNIQUES_GODEL_AGENT_ENABLED.
+    godel_agent_enabled: bool = False
+    # WebDreamer (world-model lookahead over actions). Env:
+    # EXPERIMENTAL_TECHNIQUES_WEB_DREAMER_ENABLED.
+    web_dreamer_enabled: bool = False
+    # Absolute-Zero (proposer↔solver↔verifier self-play). Env:
+    # EXPERIMENTAL_TECHNIQUES_ABSOLUTE_ZERO_ENABLED.
+    absolute_zero_enabled: bool = False
+    # Adversarial-Debate (proponent↔critic↔judge). Env:
+    # EXPERIMENTAL_TECHNIQUES_ADVERSARIAL_DEBATE_ENABLED.
+    adversarial_debate_enabled: bool = False
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps EXPERIMENTAL_TECHNIQUES_* vars to these fields,
+        # mirroring the LATS/AFlow pattern (a missing prefix silently ignores).
+        env_prefix="experimental_techniques_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class Settings(BaseSettings):
     """Root settings class that composes all settings groups."""
 
@@ -2222,6 +2268,7 @@ class Settings(BaseSettings):
     lats: LatsSettings = LatsSettings()  # type: ignore[assignment]
     aflow: AflowSettings = AflowSettings()  # type: ignore[assignment]
     neo4j: Neo4jSettings = Neo4jSettings()  # type: ignore[assignment]
+    experimental_techniques: ExperimentalTechniqueSettings = ExperimentalTechniqueSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

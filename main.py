@@ -140,6 +140,30 @@ from src.runner import _create_gateway, execute_run
     help="Model name to smoke with --verify-models (repeatable; default "
     "qwen3.5-flash + qwen3.7-plus if none named).",
 )
+@click.option(
+    "--cost",
+    "run_cost",
+    is_flag=True,
+    help="Print a spend breakdown from the cost_ledger and exit (CostTracker is "
+    "write-only; this is the aggregate READ path). No secrets — only call counts, "
+    "spend, and tokens. Filters: --cost-run-id/--cost-model/--cost-since/--cost-today; "
+    "--cost-by-model collapses across runs.",
+)
+@click.option("--cost-run-id", "cost_run_id", default=None, help="With --cost: filter to a single run_id.")
+@click.option("--cost-model", "cost_model", default=None, help="With --cost: filter to a single model id.")
+@click.option(
+    "--cost-since",
+    "cost_since",
+    default=None,
+    help="With --cost: only rows on/after DATE (YYYY-MM-DD, UTC).",
+)
+@click.option("--cost-today", "cost_today", is_flag=True, help="With --cost: only rows from today (UTC).")
+@click.option(
+    "--cost-by-model",
+    "cost_by_model",
+    is_flag=True,
+    help="With --cost: collapse the breakdown across runs (one row per model).",
+)
 def main(
     goal_text: str | None,
     interactive: bool,
@@ -169,6 +193,12 @@ def main(
     score_deliverables: tuple[str, ...],
     verify_models: bool,
     verify_model_names: tuple[str, ...],
+    run_cost: bool,
+    cost_run_id: str | None,
+    cost_model: str | None,
+    cost_since: str | None,
+    cost_today: bool,
+    cost_by_model: bool,
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -220,6 +250,26 @@ def main(
     # cost, and a sanitized error category. Exit 0=all healthy, 1=any failed.
     if verify_models:
         sys.exit(asyncio.run(_run_verify_models(list(verify_model_names))))
+
+    # --cost: read-only spend breakdown from the cost_ledger (CostTracker is
+    # write-only; this is the aggregate READ path). No agent run, no secrets —
+    # only call counts, spend, and tokens. --cost-today and --cost-since are
+    # mutually exclusive (both filter the same created_at column).
+    if run_cost:
+        if cost_today and cost_since:
+            click.echo("--cost-today and --cost-since are mutually exclusive")
+            sys.exit(2)
+        sys.exit(
+            asyncio.run(
+                _run_cost_report(
+                    run_id=cost_run_id or "",
+                    model=cost_model or "",
+                    by_model=cost_by_model,
+                    today=cost_today,
+                    since=cost_since or "",
+                )
+            )
+        )
 
     # --capability-curve: read-only inspection of the nightly battery trend +
     # regression verdict (the measured-self-improvement evidence). No LLM/DB writes.
@@ -543,6 +593,37 @@ async def _run_verify_models(names: list[str]) -> int:
     click.echo("-" * 60)
     click.echo(f"{healthy}/{len(models)} healthy")
     return rc
+
+
+async def _run_cost_report(
+    *, run_id: str, model: str, by_model: bool, today: bool, since: str
+) -> int:
+    """Print a spend breakdown from the cost_ledger and exit (read-only).
+
+    Delegates the ORM aggregates to ``src.llm.cost_queries.cost_breakdown`` (the
+    READ counterpart to the write-only ``CostTracker``) and renders the result
+    via the pure ``format_cost_breakdown``. No agent run; NO secrets — only call
+    counts, spend, and token totals. Always returns 0 (a read-only report, even
+    when zero rows match).
+    """
+    from src.db.session import get_session
+    from src.llm.cost_queries import cost_breakdown, format_cost_breakdown
+
+    click.echo("=" * 60)
+    click.echo("💰 Cost-ledger spend breakdown")
+    click.echo("=" * 60)
+    async with get_session() as session:
+        breakdown = await cost_breakdown(
+            run_id=run_id,
+            model=model,
+            by_model=by_model,
+            today=today,
+            since=since,
+            session=session,
+        )
+    click.echo(format_cost_breakdown(breakdown))
+    click.echo("-" * 60)
+    return 0
 
 
 async def _run_eval_suite(model: str | None = None) -> None:

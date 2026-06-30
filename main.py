@@ -13,6 +13,7 @@ module is the thin CLI surface over it.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -109,6 +110,21 @@ from src.runner import _create_gateway, execute_run
     help="With --backfill-embeddings: report the NULL-row count WITHOUT calling the "
     "embedding API (no spend); nothing is persisted.",
 )
+@click.option(
+    "--score-spec",
+    "score_spec_id",
+    default=None,
+    help="Score on-disk deliverables against a golden GoalSpec (the recomputation "
+    "ground-truth engine used by --eval), then exit. Requires --deliverable path(s).",
+)
+@click.option(
+    "--deliverable",
+    "score_deliverables",
+    multiple=True,
+    help="Deliverable file path to score with --score-spec (repeatable: "
+    "--deliverable p1 --deliverable p2). Spec-expected deliverables are added "
+    "automatically.",
+)
 def main(
     goal_text: str | None,
     interactive: bool,
@@ -134,6 +150,8 @@ def main(
     backfill_embeddings: str | None,
     backfill_concurrency: int,
     backfill_dry_run: bool,
+    score_spec_id: str | None,
+    score_deliverables: tuple[str, ...],
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -163,6 +181,17 @@ def main(
                     concurrency=backfill_concurrency,
                     dry_run=backfill_dry_run,
                 )
+            )
+        )
+
+    # --score-spec: score on-disk deliverables against a golden GoalSpec via the
+    # same recomputation engine --eval uses (anti-fabrication ground truth).
+    # Read-only host CLI op — no agent run, no API key needed. Exit code:
+    # 0 if the spec passed, 1 if it failed, 2 if the spec id is unknown.
+    if score_spec_id:
+        sys.exit(
+            asyncio.run(
+                _run_score_spec(score_spec_id, list(score_deliverables))
             )
         )
 
@@ -355,6 +384,66 @@ async def _run_backfill_embeddings(
     if dry_run:
         click.echo("(dry-run: nothing persisted; no embedding API spend)")
     return 1 if stats.scanned and stats.stored == 0 else 0
+
+
+def _evidence_str(ev: object) -> str:
+    """Render a check's evidence compactly — JSON for dict/list, else str()."""
+    if not ev:
+        return ""
+    if isinstance(ev, (dict, list)):
+        return json.dumps(ev, sort_keys=True, default=str)
+    return str(ev)
+
+
+async def _run_score_spec(spec_id: str, deliverables: list[str]) -> int:
+    """Score on-disk deliverables against a golden ``GoalSpec`` and exit.
+
+    Resolves ``GOLDEN_SPECS[spec_id]`` and runs ``run_checks`` — the same
+    recomputation ground-truth engine the verify node and ``--eval`` use, so a
+    passing score means every structural/execution/golden constraint
+    *recomputes* from the deliverable content (not that the agent merely claimed
+    it). No agent run, no LLM call, no API key needed — pure host-side scoring.
+
+    Returns 0 if the spec passed, 1 if it failed, 2 if ``spec_id`` is unknown.
+    """
+    from src.eval.checks import run_checks
+    from src.eval.golden import GOLDEN_SPECS
+
+    click.echo("=" * 60)
+    click.echo(f"🎯 Score spec — {spec_id}  deliverables={len(deliverables)}")
+    click.echo("=" * 60)
+
+    if spec_id not in GOLDEN_SPECS:
+        click.echo(f"Unknown spec id: {spec_id}")
+        click.echo(f"Available: {', '.join(sorted(GOLDEN_SPECS))}")
+        return 2
+
+    spec = GOLDEN_SPECS[spec_id]
+    if spec.goal_text:
+        click.echo(f"goal: {spec.goal_text}")
+    for path in deliverables:
+        click.echo(f"  • {path}")
+
+    result = await run_checks(spec, deliverables, {})
+
+    click.echo("-" * 60)
+    click.echo(
+        f"\n>>> {spec_id}: OVERALL SCORE {result.overall_score:.3f}  "
+        f"passed={result.passed}\n"
+    )
+    for check in result.checks:
+        flag = "PASS" if check.passed else "FAIL"
+        skip = " (skipped)" if getattr(check, "skipped", False) else ""
+        err = f"  ERR={check.error}" if getattr(check, "error", None) else ""
+        click.echo(
+            f"  [{flag}]{skip} {check.check_name:38s} "
+            f"score={check.score:.2f}{err}"
+        )
+        evidence = _evidence_str(check.evidence)
+        if evidence:
+            click.echo(f"        {evidence}")
+    click.echo("=" * 60)
+    return 0 if result.passed else 1
 
 
 async def _run_eval_suite(model: str | None = None) -> None:

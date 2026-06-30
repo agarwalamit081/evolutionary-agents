@@ -199,6 +199,16 @@ class ResilienceSettings(BaseSettings):
     # explicitly. Sits ABOVE spec.max_output in min() so it also bounds models
     # that over-declare (e.g. deepseek-v4-flash ~384K).
     llm_max_output_cap: int = 16384  # Env: LLM_MAX_OUTPUT_CAP
+    # #1b — opt-in ``tool_choice="required"`` intermediate fallback. When a
+    # NON-DeepSeek model rejects a forced-FUNCTION tool_choice (400), retry once
+    # with ``tool_choice="required"`` (call ANY tool) before the final
+    # drop-tool_choice stage. Grounded by the 2026-06-30 probe: glm-4.7 REJECTS
+    # forced-function ("Invalid API parameter") but ACCEPTS "required"
+    # (tool_called=True); gpt-4o-mini accepts both. DeepSeek is excluded — it
+    # rejects "required" too (its conflict is thinking-mode, handled by the
+    # already-shipped thinking-disable path). OFF: today's behavior (drop on
+    # non-DeepSeek conflict). ``drop_params=True`` remains the prod net.
+    tool_choice_force_hardening: bool = False  # Env: TOOL_CHOICE_FORCE_HARDENING
 
     model_config = SettingsConfigDict(
         env_file=".env",

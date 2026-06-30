@@ -904,8 +904,41 @@ class LLMGateway:
                             )
                             last_error = retry_exc
 
-                    # Fallback (non-deepseek, or thinking-disable didn't work):
-                    # drop tool_choice and rely on the write-nudge system prompt.
+                    # Stage 1.5 (#1b) — ``tool_choice="required"`` fallback for
+                    # NON-DeepSeek (gated, default off). glm-4.7 rejects a
+                    # forced-FUNCTION tool_choice ("Invalid API parameter") but
+                    # ACCEPTS "required" (probe 2026-06-30: forced→400,
+                    # required→tool_called=True); gpt-4o-mini accepts both.
+                    # DeepSeek is excluded here — it rejects "required" too (its
+                    # conflict is thinking-mode, Stage 1's domain). On failure,
+                    # fall through to the drop below. ``drop_params=True`` stays
+                    # the prod net if a provider rejects "required" outright.
+                    elif self._settings.resilience.tool_choice_force_hardening:
+                        logger.warning(
+                            f"{attempt_model} rejects forced tool_choice; "
+                            f"retrying same model with tool_choice='required'"
+                        )
+                        retry_kwargs = dict(kwargs)
+                        retry_kwargs["tool_choice"] = "required"
+                        try:
+                            response = await self._retry_call(
+                                call_messages, provider=attempt_provider, **retry_kwargs
+                            )
+                            await self._circuit_breaker.record_success(attempt_provider)
+                            return self._parse_response(
+                                response, attempt_model, attempt_provider
+                            )
+                        except Exception as retry_exc:
+                            logger.warning(
+                                f"tool_choice='required' retry for {attempt_model} "
+                                f"also failed: {retry_exc.__class__.__name__}: "
+                                f"{retry_exc}"
+                            )
+                            last_error = retry_exc
+
+                    # Stage 2 — Fallback (non-deepseek, or thinking-disable /
+                    # required didn't work): drop tool_choice and rely on the
+                    # write-nudge system prompt.
                     logger.warning(
                         f"{attempt_model} tool_choice conflict unresolved; "
                         f"retrying same model with tool_choice dropped"

@@ -773,6 +773,155 @@ class TestAcompletion:
         assert seen_tc[1] is None  # dropped (fallback)
 
     @pytest.mark.asyncio
+    async def test_tool_choice_conflict_non_deepseek_required_fallback_when_hardening_on(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """#1b — with ``tool_choice_force_hardening`` ON, a non-deepseek model
+        that rejects a forced-FUNCTION tool_choice (e.g. glm-4.7's "Invalid API
+        parameter") is retried with ``tool_choice='required'`` BEFORE the
+        generic drop. Probe 2026-06-30: glm-4.7 forced→400, required→
+        tool_called=True. Same inputs as the OFF-case test directly above —
+        only the flag flips, so the second call goes from dropped(None) to
+        'required'. ``drop_params=True`` stays the prod net regardless.
+        """
+
+        class _FakeBadRequest(Exception):
+            pass
+
+        mock_resp = _make_litellm_response(content="ok")
+        seen_tc: list[Any] = []
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            seen_tc.append(kwargs.get("tool_choice"))
+            if len(seen_tc) == 1:
+                raise _FakeBadRequest("invalid tool_choice")
+            return mock_resp
+
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+        # Flag ON (default OFF) — opt into the ``required`` intermediate stage.
+        gateway._settings.resilience.tool_choice_force_hardening = True
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            mock_litellm.AuthenticationError = _FakeBadRequest
+            mock_litellm.BadRequestError = _FakeBadRequest
+
+            result = await gateway.acompletion(
+                messages=simple_messages,
+                model="gpt-4.1-mini-2025-04-14",  # non-deepseek
+                tool_choice={"type": "function", "function": {"name": "file_writer"}},
+            )
+
+        assert result.content == "ok"
+        assert len(seen_tc) == 2  # forced(400), then 'required' — no drop
+        assert seen_tc[0] is not None
+        assert seen_tc[1] == "required"  # intermediate fallback, NOT dropped
+
+    @pytest.mark.asyncio
+    async def test_required_fallback_failure_falls_through_to_drop(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """#1b — when the ``required`` retry ALSO 400s (a provider that rejects
+        both forced-function and 'required'), the gateway must still fall
+        through to the Stage-2 drop so the call never hard-fails. Call
+        sequence: forced(400) → 'required'(400) → dropped(success).
+        """
+
+        class _FakeBadRequest(Exception):
+            pass
+
+        mock_resp = _make_litellm_response(content="ok")
+        seen_tc: list[Any] = []
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            seen_tc.append(kwargs.get("tool_choice"))
+            if len(seen_tc) <= 2:
+                raise _FakeBadRequest("invalid tool_choice")
+            return mock_resp
+
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+        gateway._settings.resilience.tool_choice_force_hardening = True
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            mock_litellm.AuthenticationError = _FakeBadRequest
+            mock_litellm.BadRequestError = _FakeBadRequest
+
+            result = await gateway.acompletion(
+                messages=simple_messages,
+                model="gpt-4.1-mini-2025-04-14",
+                tool_choice={"type": "function", "function": {"name": "file_writer"}},
+            )
+
+        assert result.content == "ok"
+        assert len(seen_tc) == 3
+        assert seen_tc[0] is not None  # forced
+        assert seen_tc[1] == "required"  # Stage 1.5
+        assert seen_tc[2] is None  # Stage 2 drop
+
+    @pytest.mark.asyncio
+    async def test_required_fallback_not_tried_for_deepseek_even_when_hardening_on(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """#1b — even with hardening ON, a DeepSeek model must take the
+        thinking-disable path (Stage 1), NOT the ``required`` stage (Stage 1.5).
+        The ``elif`` sits behind the ``if "deepseek-v4-flash"`` branch — DeepSeek
+        rejects 'required' too (its conflict is thinking-mode), so 'required'
+        must never be sent to it. Probe 2026-06-30: deepseek forced→400,
+        required→400 (same thinking-mode error). With the flag ON this still
+        resolves in 2 calls via thinking-disable, exactly like the OFF path.
+        """
+
+        class _FakeBadRequest(Exception):
+            pass
+
+        mock_resp = _make_litellm_response(content="ok")
+        seen_tc: list[Any] = []
+        seen_eb: list[Any] = []
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            seen_tc.append(kwargs.get("tool_choice"))
+            seen_eb.append(kwargs.get("extra_body"))
+            if len(seen_tc) == 1:
+                raise _FakeBadRequest(
+                    'DeepseekException - {"error":{"message":'
+                    '"Thinking mode does not support this tool_choice"}}'
+                )
+            return mock_resp
+
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+        gateway._settings.resilience.tool_choice_force_hardening = True
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            mock_litellm.AuthenticationError = _FakeBadRequest
+            mock_litellm.BadRequestError = _FakeBadRequest
+
+            result = await gateway.acompletion(
+                messages=simple_messages,
+                model="deepseek-v4-flash",
+                tool_choice={"type": "function", "function": {"name": "file_writer"}},
+            )
+
+        assert result.content == "ok"
+        assert len(seen_tc) == 2
+        assert "required" not in seen_tc  # never sent to deepseek
+        assert seen_tc[1] is not None  # tool_choice KEPT
+        assert seen_eb[1] == {"thinking": {"type": "disabled"}}  # thinking off
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "model_key",
         [

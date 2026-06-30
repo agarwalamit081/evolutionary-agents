@@ -82,6 +82,11 @@ Use **provider-specific** keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK
 | `--capability-curve` | Print the nightly capability curve + regression verdict (read-only). `--since`/`--until`/`--export`/`--plot` refine it |
 | `--retrieval-eval` | Measure memory recall quality (precision@k + MRR). `--retrieval-k` sets top-k |
 | `--aflow` | Offline AFlow workflow-topology optimizer (per-category technique-policy search) |
+| `--backfill-embeddings [--table capability\|cold\|all] [--concurrency N] [--dry-run]` | Backfill NULL embedding columns from the live DB (the data half of the capability/cold-memory migrations). `--dry-run` reports the NULL count without calling the embedding API |
+| `--score-spec <id> --deliverables <p1> [<p2> …]` | Score on-disk deliverables against a golden `GoalSpec` via the same recomputation engine `--eval` uses. Exit 0=pass, 1=fail, 2=unknown spec |
+| `--verify-models [name …]` | Smoke each model over the gateway's real routing; prints pass/fail + tokens, NO secrets. Exit 0=all healthy, 1=any failed |
+| `--cost [--cost-run-id X] [--cost-model M] [--cost-by-model] [--cost-today\|--cost-since DATE]` | Read-only spend breakdown from `cost_ledger` (`CostTracker` is write-only). `--cost-today`/`--cost-since` are mutually exclusive |
+| `--inspect-mutation [--mutation-id ID] [--inspect-full]` | Print a stored evolution mutation row + whether the promotion gate will parse it (JSON-vs-free-text shape). Latest row if no id; short-prefix or full-UUID match |
 
 Example: `python main.py --goal "…" --run-id my-task --clean`
 

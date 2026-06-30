@@ -400,6 +400,7 @@ class TestCheckBudgetPerRunTokenCap:
         settings.budget.budget_warn_threshold = 0.7
         settings.budget.budget_critical_threshold = 0.9
         settings.budget.per_task_token_limit = per_task_token_limit
+        settings.budget.per_run_cost_limit = 0.0
         tracker = CostTracker(session=MagicMock(), settings=settings)
         tracker.get_daily_spend = AsyncMock(return_value=0.5)
         return tracker
@@ -475,6 +476,7 @@ class TestCheckBudgetBaselineDelta:
         settings.budget.budget_warn_threshold = 0.7
         settings.budget.budget_critical_threshold = 0.9
         settings.budget.per_task_token_limit = per_task_token_limit
+        settings.budget.per_run_cost_limit = 0.0
         tracker = CostTracker(session=MagicMock(), settings=settings)
         tracker.get_daily_spend = AsyncMock(return_value=0.5)
         return tracker
@@ -532,6 +534,188 @@ class TestCheckBudgetBaselineDelta:
         is_ok, _ = await tracker.check_budget(run_id="api-x")
 
         assert is_ok is False  # clamped to 0 -> spent 250K >= 200K
+
+
+# ─── check_budget — per-run USD cost cap (roadmap #1) ─────────────────────
+
+
+class TestCheckBudgetPerRunCostCap:
+    """The per-run USD cost cap (``per_run_cost_limit``) — the $-complement to
+    the per-run token cap. Bounds a single run's DOLLAR spend independent of the
+    daily ``max_cost_usd`` pool, so one runaway run on an expensive model cannot
+    drain the day. Attempt-relative like the token cap (cumulative
+    ``get_run_spend`` minus the cost baseline). ``0`` (default) = DISABLED.
+
+    Mirrors the token-cap baseline tests one tier over: trips on attempt delta,
+    the cost baseline shifts the window for a resumed run, and the cap is inert
+    when unset or when no run_id is bound.
+    """
+
+    @staticmethod
+    def _make_tracker(per_run_cost_limit: float) -> CostTracker:
+        settings = MagicMock()
+        settings.budget.max_cost_usd = 10.0
+        settings.budget.budget_warn_threshold = 0.7
+        settings.budget.budget_critical_threshold = 0.9
+        # Token cap disabled so only the cost cap is exercised here.
+        settings.budget.per_task_token_limit = 0
+        settings.budget.per_run_cost_limit = per_run_cost_limit
+        tracker = CostTracker(session=MagicMock(), settings=settings)
+        tracker.get_daily_spend = AsyncMock(return_value=0.5)
+        return tracker
+
+    @pytest.mark.asyncio
+    async def test_cap_trips_when_attempt_spend_exceeds_limit(self) -> None:
+        """A $3 this-attempt spend trips a $2 cap; the message reports the
+        attempt spend (not cumulative) and the configured limit."""
+        tracker = self._make_tracker(per_run_cost_limit=2.0)
+        tracker.get_run_spend = AsyncMock(return_value=3.0)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-expensive")
+
+        assert is_ok is False
+        assert "Per-run cost cap" in msg
+        assert "$2.0000" in msg  # the configured limit
+        assert "$3.0000" in msg  # this attempt's spend
+
+    @pytest.mark.asyncio
+    async def test_under_cap_is_within_budget(self) -> None:
+        """A $0.50 spend against a $2 cap is within budget."""
+        tracker = self._make_tracker(per_run_cost_limit=2.0)
+        tracker.get_run_spend = AsyncMock(return_value=0.5)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-cheap")
+
+        assert is_ok is True
+        assert "Per-run cost cap" not in msg
+
+    @pytest.mark.asyncio
+    async def test_cost_baseline_shifts_window_for_resumed_run(self) -> None:
+        """spent_cost = cumulative - baseline. A resumed run with $5 prior spend
+        baselined at $5 starts at $0 this attempt — NOT over a $2 cap (the resume
+        scenario the token cap's baseline already protects; the $ cap mirrors it)."""
+        tracker = self._make_tracker(per_run_cost_limit=2.0)
+        tracker.set_run_cost_baseline(5.0)
+        tracker.get_run_spend = AsyncMock(return_value=5.0)  # no new spend yet
+
+        is_ok, _ = await tracker.check_budget(run_id="api-resumed")
+
+        assert is_ok is True  # spent_cost = 0, not 5
+
+    @pytest.mark.asyncio
+    async def test_cap_trips_on_attempt_delta_not_cumulative(self) -> None:
+        """With a $5 baseline, a $1-this-attempt spend is under a $2 cap (would
+        be $6 cumulative without the baseline); a $3-this-attempt spend trips it
+        and the message reports the attempt spend, not cumulative."""
+        tracker = self._make_tracker(per_run_cost_limit=2.0)
+        tracker.set_run_cost_baseline(5.0)
+
+        tracker.get_run_spend = AsyncMock(return_value=6.0)  # $1 new
+        is_ok, _ = await tracker.check_budget(run_id="api-resumed")
+        assert is_ok is True
+
+        tracker.get_run_spend = AsyncMock(return_value=8.0)  # $3 new
+        is_ok, msg = await tracker.check_budget(run_id="api-resumed")
+        assert is_ok is False
+        assert "Per-run cost cap" in msg
+        assert "$3.0000" in msg  # attempt spend reported
+        assert "$8.0000" not in msg  # cumulative prior debt never shown as spent
+
+    @pytest.mark.asyncio
+    async def test_disabled_by_default_when_zero(self) -> None:
+        """per_run_cost_limit=0 disables the cap entirely — get_run_spend is
+        never even consulted."""
+        tracker = self._make_tracker(per_run_cost_limit=0.0)
+        tracker.get_run_spend = AsyncMock(return_value=999.0)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-uncapped")
+
+        assert is_ok is True
+        assert "Budget OK" in msg
+        tracker.get_run_spend.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_run_id_skips_cap(self) -> None:
+        """Without a bound run_id the cap is not enforced (no attribution to
+        measure) — get_run_spend is never consulted."""
+        tracker = self._make_tracker(per_run_cost_limit=2.0)
+        tracker.get_run_spend = AsyncMock(return_value=999.0)
+
+        is_ok, msg = await tracker.check_budget(run_id=None)
+
+        assert is_ok is True
+        assert "Budget OK" in msg
+        tracker.get_run_spend.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_negative_cost_baseline_clamped_to_zero(self) -> None:
+        """A bogus negative cost baseline never grants a larger budget than
+        earned — mirrors the token baseline clamp."""
+        tracker = self._make_tracker(per_run_cost_limit=2.0)
+        tracker.set_run_cost_baseline(-5.0)
+        tracker.get_run_spend = AsyncMock(return_value=3.0)
+
+        is_ok, _ = await tracker.check_budget(run_id="api-x")
+
+        assert is_ok is False  # clamped to 0 -> spent $3 >= $2
+
+    @pytest.mark.asyncio
+    async def test_cost_cap_independent_of_daily_pool(self) -> None:
+        """A run under the DAILY cap ($0.50 / $10) but over its PER-RUN cap ($2
+        spend / $2 limit) still trips — the per-run cap bounds the run regardless
+        of how much daily headroom remains."""
+        tracker = self._make_tracker(per_run_cost_limit=2.0)
+        tracker.get_daily_spend = AsyncMock(return_value=0.5)  # plenty of daily headroom
+        tracker.get_run_spend = AsyncMock(return_value=2.0)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-runaway")
+
+        assert is_ok is False
+        assert "Per-run cost cap" in msg
+
+
+class TestSetRunCostBaseline:
+    """``set_run_cost_baseline`` clamps to ``>= 0`` so a coerce-failure can never
+    grant a larger budget than intended — mirrors ``set_run_baseline``."""
+
+    def test_clamps_negative_to_zero(self) -> None:
+        settings = MagicMock()
+        settings.budget.max_cost_usd = 10.0
+        settings.budget.budget_warn_threshold = 0.7
+        settings.budget.budget_critical_threshold = 0.9
+        settings.budget.per_task_token_limit = 0
+        settings.budget.per_run_cost_limit = 0.0
+        tracker = CostTracker(session=MagicMock(), settings=settings)
+
+        tracker.set_run_cost_baseline(-1.5)
+
+        assert tracker._run_baseline_cost == 0.0
+
+    def test_clamps_none_to_zero(self) -> None:
+        settings = MagicMock()
+        settings.budget.max_cost_usd = 10.0
+        settings.budget.budget_warn_threshold = 0.7
+        settings.budget.budget_critical_threshold = 0.9
+        settings.budget.per_task_token_limit = 0
+        settings.budget.per_run_cost_limit = 0.0
+        tracker = CostTracker(session=MagicMock(), settings=settings)
+
+        tracker.set_run_cost_baseline(None)  # type: ignore[arg-type]
+
+        assert tracker._run_baseline_cost == 0.0
+
+    def test_records_positive_value(self) -> None:
+        settings = MagicMock()
+        settings.budget.max_cost_usd = 10.0
+        settings.budget.budget_warn_threshold = 0.7
+        settings.budget.budget_critical_threshold = 0.9
+        settings.budget.per_task_token_limit = 0
+        settings.budget.per_run_cost_limit = 0.0
+        tracker = CostTracker(session=MagicMock(), settings=settings)
+
+        tracker.set_run_cost_baseline(2.25)
+
+        assert tracker._run_baseline_cost == 2.25
 
 
 # ─── get_daily_spend ──────────────────────────────────────────────────────

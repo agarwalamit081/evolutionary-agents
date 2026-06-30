@@ -104,6 +104,24 @@ class TestBudgetSettings:
                 budget_critical_threshold=0.70,
             )
 
+    def test_per_run_cost_limit_defaults_to_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The per-run $ cap defaults to 0.0 (DISABLED — opt-in safety bound)."""
+        monkeypatch.delenv("PER_RUN_COST_LIMIT", raising=False)
+        budget = BudgetSettings(_env_file=None)
+        assert budget.per_run_cost_limit == 0.0
+
+    def test_per_run_cost_limit_accepts_positive(self) -> None:
+        """A positive per-run $ cap is accepted and stored verbatim."""
+        budget = BudgetSettings(per_run_cost_limit=2.5, _env_file=None)
+        assert budget.per_run_cost_limit == 2.5
+
+    def test_per_run_cost_limit_rejects_negative(self) -> None:
+        """A negative per-run $ cap is rejected — a cap must never underflow."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="non-negative"):
+            BudgetSettings(per_run_cost_limit=-1.0, _env_file=None)
+
 
 # ─── Agent Settings Tests (§7: single source of truth for run caps) ──
 

@@ -808,6 +808,15 @@ class BudgetSettings(BaseSettings):
     # The downgrade path (``gateway.py``) still engages when budget_hard_stop is
     # OFF. Env: PER_TASK_TOKEN_LIMIT.
     per_task_token_limit: int = 500000
+    # Per-run USD cost cap (findings-001 roadmap #1) — bounds a single run's
+    # DOLLAR spend independent of the daily ``max_cost_usd`` pool, so one runaway
+    # run on an expensive model cannot drain the day. The natural $-complement to
+    # ``per_task_token_limit`` (which bounds tokens, not cost). Attempt-relative
+    # like the token cap: measures THIS attempt's run spend (cumulative minus the
+    # cost baseline captured at attempt start), so a resumed/re-enqueued run does
+    # NOT inherit its prior $ debt and trip before doing work. ``0`` (default) =
+    # DISABLED — opt-in hard safety bound. Env: PER_RUN_COST_LIMIT.
+    per_run_cost_limit: float = 0.0
     max_cost_usd: float = 10.0
     budget_warn_threshold: float = 0.70
     budget_critical_threshold: float = 0.90
@@ -837,6 +846,14 @@ class BudgetSettings(BaseSettings):
         """Ensure thresholds are between 0 and 1."""
         if not 0.0 < v <= 1.0:
             raise ValueError(f"Threshold must be between 0 and 1. Got: {v}")
+        return v
+
+    @field_validator("per_run_cost_limit", "max_cost_usd")
+    @classmethod
+    def validate_non_negative_cost(cls, v: float) -> float:
+        """Cost caps must be non-negative — ``0`` disables the per-run cap."""
+        if v < 0:
+            raise ValueError(f"Cost cap must be non-negative. Got: {v}")
         return v
 
     @model_validator(mode="after")

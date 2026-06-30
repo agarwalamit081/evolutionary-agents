@@ -424,22 +424,25 @@ async def execute_run(
             tracker = CostTracker(cost_session, settings)
             gateway.set_cost_tracker(tracker)
             logger.info("Cost tracker wired (budget gate active)")
-            # Baseline the per-run token cap at this attempt's start: the cap
+            # Baseline the per-run caps at this attempt's start: each cap
             # measures THIS attempt's spend (cumulative - baseline), so a
-            # re-enqueued or resumed run_id does NOT inherit its prior token
-            # debt and trip the cap before doing any work (battery-04 q09
-            # re-enqueue inherited 407K tokens -> instant trip). On any failure
-            # the baseline stays 0 -> today's cumulative behavior (safe; never
-            # over-grants budget).
+            # re-enqueued or resumed run_id does NOT inherit its prior debt and
+            # trip the cap before doing any work (battery-04 q09 re-enqueue
+            # inherited 407K tokens -> instant trip). Both the TOKEN cap and the
+            # USD COST cap are baselined together. On any failure the baselines
+            # stay 0 -> today's cumulative behavior (safe; never over-grants
+            # budget).
             try:
                 baseline = await tracker.get_run_token_usage(thread_id)
                 tracker.set_run_baseline(baseline)
+                baseline_cost = await tracker.get_run_spend(thread_id)
+                tracker.set_run_cost_baseline(baseline_cost)
                 logger.info(
-                    f"Run token baseline: {baseline} "
+                    f"Run baselines: {baseline} tokens, ${baseline_cost:.4f} "
                     f"(attempt budget measured from here)"
                 )
             except Exception as e:  # noqa: BLE001 — baseline is best-effort
-                logger.debug(f"Could not capture run token baseline: {e}")
+                logger.debug(f"Could not capture run baselines: {e}")
         except Exception as e:
             logger.debug(f"Cost tracker not available: {e}")
             cost_session_cm = None

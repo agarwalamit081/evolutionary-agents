@@ -28,6 +28,13 @@ class CostTracker:
         # instantly over the 200K cap). Default 0 (fresh run_id / pre-
         # attribution / baseline-capture failure) preserves today's behavior.
         self._run_baseline_tokens: int = 0
+        # Per-attempt $ baseline: cumulative USD already attributed to this
+        # run_id BEFORE this attempt started — mirrors ``_run_baseline_tokens``
+        # so the per-run COST cap (``per_run_cost_limit``) measures THIS
+        # attempt's $ spend and a resumed/re-enqueued run does not inherit its
+        # prior $ debt. Default 0.0 (fresh run_id / pre-attribution / capture
+        # failure) preserves today's behavior.
+        self._run_baseline_cost: float = 0.0
 
     def set_run_baseline(self, tokens: int) -> None:
         """Record the cumulative tokens spent for this run before this attempt.
@@ -37,6 +44,17 @@ class CostTracker:
         negative/coerce-failure can never grant a larger budget than intended.
         """
         self._run_baseline_tokens = max(0, int(tokens or 0))
+
+    def set_run_cost_baseline(self, cost: float) -> None:
+        """Record the cumulative USD spent for this run before this attempt.
+
+        Captured once at attempt start alongside ``set_run_baseline`` so the
+        per-run COST cap (``per_run_cost_limit``) measures only THIS attempt's $
+        spend (cumulative - baseline), mirroring the token cap's resume-safe
+        semantics. Clamped to ``>= 0`` so a negative/coerce-failure can never
+        grant a larger budget than intended.
+        """
+        self._run_baseline_cost = max(0.0, float(cost or 0.0))
 
     async def record_usage(
         self,
@@ -110,7 +128,7 @@ class CostTracker:
     async def check_budget(self, run_id: str | None = None) -> tuple[bool, str]:
         """Check if the budget allows another LLM call.
 
-        Enforces two independent caps (findings.md Fact 1 / A2·B2):
+        Enforces three independent caps (findings.md Fact 1 / A2·B2 / roadmap #1):
 
         1. **Daily cost** cap (``max_cost_usd``) — the historical pool, checked
            against ``get_daily_spend()``. At the critical/warn thresholds the
@@ -119,15 +137,21 @@ class CostTracker:
            runaway run independent of the daily pool, so one hard query cannot
            consume the whole day. Only enforced when a ``run_id`` is bound
            (the gateway binds it from the graph ``thread_id``).
+        3. **Per-run USD cost** cap (``per_run_cost_limit``) — the $-complement
+           to (2): bounds a single run's DOLLAR spend (vs tokens), so a run on
+           an expensive model cannot drain the daily pool. Attempt-relative like
+           (2) (cumulative ``get_run_spend`` minus the cost baseline). Only
+           enforced when a ``run_id`` is bound AND the limit is ``> 0`` (default
+           ``0`` = disabled — opt-in safety bound).
 
-        Both caps reuse the gateway's existing not-within-budget path: it
+        All caps reuse the gateway's existing not-within-budget path: it
         downgrades to a cheaper model, and only hard-``raise``s when no cheaper
         fallback remains — so a capped run is pushed onto the cheapest tier and
         then stops, rather than aborting abruptly.
 
         Args:
             run_id: Optional per-run correlation key (the graph ``thread_id``).
-                When provided, the per-run token cap is also enforced.
+                When provided, the per-run token + cost caps are also enforced.
 
         Returns:
             Tuple of (is_within_budget, message).
@@ -154,6 +178,23 @@ class CostTracker:
                     f"Per-run token cap reached: {spent} / {per_run_limit} "
                     f"tokens this attempt (run {run_id}; "
                     f"baseline {self._run_baseline_tokens})",
+                )
+
+        per_run_cost_limit = self._budget.per_run_cost_limit
+        if run_id is not None and per_run_cost_limit > 0:
+            # The $-complement to the per-run token cap: bounds this attempt's
+            # DOLLAR spend on the run_id (cumulative get_run_spend minus the cost
+            # baseline), so a run on an expensive model cannot drain the daily
+            # pool. Same attempt-relative baseline logic as the token cap so a
+            # resumed/re-enqueued run does not inherit its prior $ debt.
+            cumulative_cost = await self.get_run_spend(run_id)
+            spent_cost = max(0.0, cumulative_cost - self._run_baseline_cost)
+            if spent_cost >= per_run_cost_limit:
+                return (
+                    False,
+                    f"Per-run cost cap reached: ${spent_cost:.4f} / "
+                    f"${per_run_cost_limit:.4f} this attempt (run {run_id}; "
+                    f"baseline ${self._run_baseline_cost:.4f})",
                 )
 
         if daily_total >= daily_limit * self._budget.budget_critical_threshold:

@@ -358,6 +358,80 @@ class TestResolveExisting:
         ).resolve()
 
 
+class TestResolveDeliverable:
+    """``resolve_deliverable`` scores on the run cell ONLY when isolated.
+
+    Distinct from ``resolve_existing`` (the agent's own read path, which keeps a
+    flat fallback so legacy deliverables recall): this is the SCORING resolver
+    shared by verify + eval, where a stale cross-run deliverable at the flat
+    root must never be counted as the current run's output.
+    """
+
+    def test_isolated_rejects_stale_flat_deliverable(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The battery-04 q01 regression.
+
+        With a run_id bound, a prior run's ``normalized.csv`` lingering at the
+        flat results root must NOT be returned when the live run's own cell is
+        empty. ``resolve_existing`` returns it (flat fallback) → false 1.0;
+        ``resolve_deliverable`` rejects it (under flat root, outside the cell).
+        """
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("battery04_q01-20260630")
+        root = _paths.results_root()
+        (root / "q01").mkdir(parents=True)
+        (root / "q01" / "normalized.csv").write_text("STALE")  # prior run, flat
+        assert _paths.resolve_deliverable("q01/normalized.csv") is None
+
+    def test_isolated_returns_cell_deliverable(self, monkeypatch, tmp_path) -> None:
+        """The live run's own deliverable (under its cell) is returned."""
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("battery04_q01-20260630")
+        root = _paths.results_root()
+        fresh = root / "battery04_q01-20260630" / "q01" / "normalized.csv"
+        fresh.parent.mkdir(parents=True)
+        fresh.write_text("FRESH")
+        assert _paths.resolve_deliverable("q01/normalized.csv") == fresh.resolve()
+
+    def test_isolated_rejects_absolute_flat_citation(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """An absolute path into the flat root is rejected too — the guard
+        fires regardless of how the candidate was constructed (covers the
+        absolute ``results/...`` citations the q01 golden spec emitted)."""
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("battery04_q01-20260630")
+        root = _paths.results_root()
+        (root / "q01").mkdir(parents=True)
+        stale = root / "q01" / "normalized.csv"
+        stale.write_text("STALE")
+        assert _paths.resolve_deliverable(str(stale)) is None
+
+    def test_isolated_workspace_deliverable_recalls(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Shared workspace inputs/fixtures are NOT run-scoped and still recall
+        under isolation (only the flat *results* root is fenced off)."""
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id("battery04_q01-20260630")
+        ws = _paths.workspace_root()
+        ws.mkdir(parents=True)
+        (ws / "fixture.csv").write_text("d")
+        assert _paths.resolve_deliverable("fixture.csv") == (
+            ws / "fixture.csv"
+        ).resolve()
+
+    def test_not_isolated_reads_flat(self, monkeypatch, tmp_path) -> None:
+        """No run_id bound → flat results root is used (host-CLI / pre-subdir)."""
+        _install_roots(monkeypatch, tmp_path)
+        _paths.set_active_run_id(None)
+        root = _paths.results_root()
+        root.mkdir(parents=True)
+        (root / "f.md").write_text("d")
+        assert _paths.resolve_deliverable("f.md") == (root / "f.md").resolve()
+
+
 class TestConcurrentRunIdIsolation:
     """The run_id ``ContextVar`` must isolate concurrent runs in one loop.
 

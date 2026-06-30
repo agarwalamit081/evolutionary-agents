@@ -272,6 +272,95 @@ def resolve_existing(path: str, *, base: str | Path = "results") -> Path:
     return primary
 
 
+def isolated_results_root() -> Path | None:
+    """Active run's results cell, or ``None`` when per-run isolation is off.
+
+    Returns ``run_subdir_path(get_active_run_id())`` when a run_id is bound and
+    ``results_per_run_subdir`` is on; ``None`` otherwise — and on an unsafe
+    run_id, so a poisoned id can never widen the read scope. ``None`` tells
+    callers (e.g. ``resolve_deliverable``) to consult the shared flat results
+    root instead. Distinct from ``resolve_existing``'s implicit cell: this is
+    the read scope for *scoring*, where the flat root must be excluded.
+    """
+    run_id = get_active_run_id()
+    if run_id is None:
+        return None
+    try:
+        if not _subdir_active():
+            return None
+        return run_subdir_path(run_id)
+    except ValueError:
+        return None
+
+
+def resolve_deliverable(raw: str) -> Path | None:
+    """Resolve a declared deliverable to its on-disk path, or ``None``.
+
+    Single source of truth shared by the verify node and the eval layer
+    (``checks._resolve_deliverable`` and ``verify._resolve_deliverable``
+    delegate here) so completion-decisioning and scoring can never disagree on
+    deliverable existence.
+
+    Deliberately NOT ``resolve_existing``: that helper falls back to the shared
+    flat results root when the per-run cell is empty — correct for the agent's
+    own tool reads (recall of older / cross-run deliverables) but fatal for
+    scoring. Battery-04 q01 regressed exactly this way: with per-run isolation
+    on, ``deliverables_exist`` returned the prior run's ``normalized.csv`` from
+    the flat root (the live run's cell held only a ``.gitkeep``) and scored a
+    false 1.0, while the live run had produced no ``normalized.csv`` at all —
+    corrupting the capability-curve point for that date.
+
+    When isolation is active, the ONLY ``results`` location that counts is the
+    active run's cell: any candidate resolving under the flat results root but
+    outside the cell is rejected (stale cross-run deliverable). Shared
+    ``workspace`` inputs/fixtures and a literal path remain valid fallbacks.
+    When isolation is off, the original flat ``results`` → ``workspace`` →
+    literal order is preserved (host-CLI / pre-subdir recall unchanged).
+    """
+    flat_root = _results_root()
+    cell = isolated_results_root()
+
+    candidates: list[Path] = []
+    # Primary results candidate: the run cell when isolated, else flat root.
+    results_base: str | Path = cell if cell is not None else "results"
+    try:
+        candidates.append(normalize(raw, base=results_base))
+    except ValueError:
+        pass
+    # Shared workspace inputs/fixtures (never run-scoped) — always recallable.
+    try:
+        candidates.append(normalize(raw, base="workspace"))
+    except ValueError:
+        pass
+    # De-nested relative + literal citations (e.g. an absolute results/-path).
+    parts = strip_results_prefix(Path(raw).parts)
+    if parts:
+        candidates.append(Path(*parts))
+    candidates.append(Path(raw))
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            if not candidate.exists():
+                continue
+        except OSError:
+            continue
+        resolved = candidate.resolve()
+        if cell is not None:
+            # Isolation active: reject anything under the flat results root but
+            # outside THIS run's cell — a stale deliverable from another run.
+            try:
+                if resolved.is_relative_to(flat_root) and not resolved.is_relative_to(cell):
+                    continue
+            except OSError:
+                continue
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            return resolved
+    return None
+
+
 def _strip(parts: tuple[str, ...], *extra: str) -> tuple[str, ...]:
     """Shared de-nest loop. ``extra`` adds names (e.g. an explicit base root)."""
     names = _strip_names(*extra)

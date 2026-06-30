@@ -17,7 +17,7 @@ from src.graph.enums import Confidence, Phase, TaskComplexity
 from src.graph.iteration_cap import effective_max_iterations
 from src.graph.state import AgentState, current_blocking_errors, objective_goal_text
 from src.llm.exceptions import BudgetExhaustedError
-from src.tools._paths import resolve_existing, results_root, strip_results_prefix
+from src.tools._paths import resolve_existing, resolve_deliverable, results_root
 
 if TYPE_CHECKING:
     from src.eval.models import GoalSpec
@@ -1138,34 +1138,15 @@ def _build_adhoc_spec(deliverable_paths: list[str]) -> GoalSpec | None:
 def _resolve_deliverable(raw: str) -> Path | None:
     """Resolve a declared deliverable to its on-disk path, or None if absent.
 
-    De-nesting is delegated to the shared resolver so the strip set matches
-    ``file_writer`` exactly. We then check, in order: ``results_root`` (where
-    ``file_writer`` lands), ``workspace_root`` (inputs/fixtures), and a literal
-    path. Returns the first existing match.
+    Delegates to the shared ``src.tools._paths.resolve_deliverable`` — the
+    single source of truth — so the verify node and the eval layer
+    (``checks._resolve_deliverable``) never disagree on deliverable existence.
+    When per-run isolation is active the flat results root is excluded, so a
+    stale deliverable from another run cannot be mistaken for this run's output
+    (battery-04 q01 false-1.0 regression). When isolation is off, the original
+    flat ``results`` → ``workspace`` → literal order is preserved.
     """
-    candidates: list[Path] = []
-    for base in ("results", "workspace"):
-        try:
-            candidates.append(resolve_existing(raw, base=base))
-        except ValueError:
-            continue
-    parts = strip_results_prefix(Path(raw).parts)
-    if parts:
-        candidates.append(Path(*parts))
-    candidates.append(Path(raw))
-
-    seen: set[str] = set()
-    for candidate in candidates:
-        try:
-            if candidate.exists():
-                resolved = candidate.resolve()
-                key = str(resolved)
-                if key not in seen:
-                    seen.add(key)
-                    return resolved
-        except OSError:
-            continue
-    return None
+    return resolve_deliverable(raw)
 
 
 # ─── Template-placeholder leak (F-j) ──────────────────────────────────

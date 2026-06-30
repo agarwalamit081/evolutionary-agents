@@ -32,12 +32,9 @@ from loguru import logger
 
 from src.eval.models import CheckConfig, CheckResult, CorrectnessResult, GoalSpec
 from src.tools._paths import (
-    _subdir_active,
-    get_active_run_id,
-    resolve_existing,
+    isolated_results_root,
+    resolve_deliverable,
     results_root,
-    run_subdir_path,
-    strip_results_prefix,
 )
 
 if TYPE_CHECKING:
@@ -51,34 +48,14 @@ if TYPE_CHECKING:
 def _resolve_deliverable(raw: str) -> Path | None:
     """Resolve a declared deliverable to its on-disk path, or ``None``.
 
-    Checks ``results_root`` then ``workspace_root`` then a literal path,
-    returning the first existing match. Kept in sync with
-    ``src/graph/nodes/verify._resolve_deliverable`` so the eval layer and the
-    verify node never disagree on deliverable existence.
+    Delegates to the shared ``src.tools._paths.resolve_deliverable`` — the
+    single source of truth — so the eval layer and the verify node
+    (``verify._resolve_deliverable``) never disagree on deliverable existence.
+    Per-run isolation is enforced there: when a run_id is bound the flat
+    results root is excluded, so a stale cross-run deliverable is never scored
+    as this run's output (battery-04 q01 false-1.0 regression).
     """
-    candidates: list[Path] = []
-    for base in ("results", "workspace"):
-        try:
-            candidates.append(resolve_existing(raw, base=base))
-        except ValueError:
-            continue
-    parts = strip_results_prefix(Path(raw).parts)
-    if parts:
-        candidates.append(Path(*parts))
-    candidates.append(Path(raw))
-
-    seen: set[str] = set()
-    for candidate in candidates:
-        try:
-            if candidate.exists():
-                resolved = candidate.resolve()
-                key = str(resolved)
-                if key not in seen:
-                    seen.add(key)
-                    return resolved
-        except OSError:
-            continue
-    return None
+    return resolve_deliverable(raw)
 
 
 def _effective_results_root() -> Path:
@@ -97,14 +74,7 @@ def _effective_results_root() -> Path:
     run_id falls back to the flat root — never raises (the probe treats
     ``_RESULTS_ROOT`` as advisory).
     """
-    run_id = get_active_run_id()
-    if run_id:
-        try:
-            if _subdir_active():
-                return run_subdir_path(run_id)
-        except ValueError:
-            pass  # unsafe run_id -> flat fallback (probes stay advisory)
-    return results_root()
+    return isolated_results_root() or results_root()
 
 
 def _select_target(target: str | None, deliverables: list[str]) -> Path | None:

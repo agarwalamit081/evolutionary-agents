@@ -281,6 +281,22 @@ def _write_bootstrap(
     (the default) rebinds it to a plain alias of the real builtin (byte-
     identical to the pre-D8 shim); the host caller wires the roots, docker/runner
     modes pass none (already confined).
+
+    Additionally (CWD-leak fix), every variant rebinds ``io.open`` to the SAME
+    ``_turing_open`` wrapper as ``builtins.open``. ``pathlib.Path.write_text`` /
+    ``Path.write_bytes`` and a direct ``io.open`` call dispatch through ``io.open``
+    (a SEPARATE name from ``builtins.open`` — rebinding only ``builtins.open`` left
+    them writing to the host cwd). Routing them through the wrapper relocates their
+    bare relative writes into the results tree too. This is import-safe:
+    ``importlib`` uses the C-level ``_io.FileIO``, NOT ``io.open``, so rebinding
+    ``io.open`` cannot break module loading. Residual: ``pathlib.Path.touch`` /
+    ``os.open`` / shell redirects (``os.system``, ``subprocess(..., shell=True)``)
+    bypass Python file APIs entirely and resolve to the subprocess cwd; in the
+    default ``project_root`` cwd they can still reach the repo root. Full
+    confinement of those vectors is the ``code_executor_host_cwd="results_subdir"``
+    + run-id opt-in (cwd = the results cell) or the docker/runner sandbox — both
+    already supported; the default stays ``project_root`` to preserve the cross-tool
+    ``results/<file>`` resolution contract.
     """
     # Absolute-path + read-mode opens are never touched; only relative writes
     # are mkdir'd and (when a results root is given) relocated.
@@ -297,6 +313,8 @@ def _write_bootstrap(
             "            _turing_os.makedirs(_d, exist_ok=True)\n"
             "    return _turing_open_orig(p, m, *a, **k)\n"
             "_turing_b.open = _turing_open\n"
+            "import io as _turing_io  # pathlib.Path.write_text + io.open dispatch via open()\n"
+            "_turing_io.open = _turing_open\n"
         )
     # Escape injected literals so an odd config (backslash/quote) cannot break
     # out of the generated string. POSIX paths/run_ids have neither, but stay safe.
@@ -325,6 +343,8 @@ def _write_bootstrap(
             "            p = _s\n"
             "    return _turing_open_orig(p, m, *a, **k)\n"
             "_turing_b.open = _turing_open\n"
+            "import io as _turing_io\n"
+            "_turing_io.open = _turing_open\n"
         )
     # Run-subdir-aware shim: writes AND reads relocate under
     # <results_root_abs>/<run_subdir>/ (traversal-guarded to that cell). Mirrors
@@ -379,6 +399,8 @@ def _write_bootstrap(
         "                _p = _flat\n"
         "    return _turing_open_orig(_p, _m, *_a, **_k)\n"
         "_turing_b.open = _turing_open\n"
+        "import io as _turing_io\n"
+        "_turing_io.open = _turing_open\n"
         + _listing_relocation_shim()
     )
 

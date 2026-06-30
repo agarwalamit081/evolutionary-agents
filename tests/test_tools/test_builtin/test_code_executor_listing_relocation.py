@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import builtins as _builtins
 import glob as _glob
+import io as _io
 import os
 from pathlib import Path
 from typing import Any
@@ -37,14 +38,15 @@ from src.tools.builtin.code_executor import _write_bootstrap
 
 @pytest.fixture(autouse=True)
 def restore_listings() -> Any:
-    """Snapshot/restore builtins.open + os.listdir/scandir + glob.glob/iglob.
+    """Snapshot/restore builtins.open + io.open + os.listdir/scandir + glob.*.
 
-    The run-subdir shim rebinds all five on the REAL process modules (builtins,
-    os, glob). exec in a fresh namespace does NOT isolate module-attribute
+    The run-subdir shim rebinds all six on the REAL process modules (builtins,
+    io, os, glob). exec in a fresh namespace does NOT isolate module-attribute
     rebinds — they are process-global — so each test MUST restore them or the
     patched versions leak into sibling tests (incl. the path-guard module).
     """
     real_open = _builtins.open
+    real_io_open = _io.open
     real_listdir = os.listdir
     real_scandir = os.scandir
     real_glob = _glob.glob
@@ -53,6 +55,7 @@ def restore_listings() -> Any:
         yield
     finally:
         _builtins.open = real_open
+        _io.open = real_io_open  # type: ignore[assignment]
         os.listdir = real_listdir  # type: ignore[assignment]
         os.scandir = real_scandir  # type: ignore[assignment]
         _glob.glob = real_glob  # type: ignore[assignment]

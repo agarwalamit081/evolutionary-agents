@@ -22,6 +22,7 @@ the real builtin and traversal is NOT blocked.
 from __future__ import annotations
 
 import builtins as _builtins
+import io as _io
 import os
 from pathlib import Path
 from typing import Any
@@ -33,21 +34,23 @@ from src.tools.builtin.code_executor import _guard_open_def, _write_bootstrap
 
 @pytest.fixture(autouse=True)
 def restore_builtins_open() -> Any:
-    """Snapshot/restore ``builtins.open`` around EVERY test in this module.
+    """Snapshot/restore ``builtins.open`` + ``io.open`` around EVERY test.
 
-    The generated shim rebinds the PROCESS-GLOBAL ``builtins.open``
-    (``_turing_b.open = _turing_open`` where ``_turing_b = builtins``). exec'ing
-    it in a fresh namespace does NOT isolate that — the real process builtins
-    module is mutated, and a prior test's ``_turing_open`` would leak into the
-    next test's shim (infinite recursion + wrong guard roots). This autouse
-    fixture snapshots the real ``open`` before each test and restores it after,
-    so the rebind is confined to one test.
+    The generated shim rebinds the PROCESS-GLOBAL ``builtins.open`` AND
+    ``io.open`` (``_turing_b.open = _turing_open`` + ``_turing_io.open = …``).
+    exec'ing it in a fresh namespace does NOT isolate module-attribute rebinds —
+    the real process ``builtins``/``io`` modules are mutated, and a prior test's
+    ``_turing_open`` would leak into the next test's shim (infinite recursion +
+    wrong guard roots). This autouse fixture snapshots the real ``open`` before
+    each test and restores both after, so the rebinds are confined to one test.
     """
     real_open = _builtins.open
+    real_io_open = _io.open
     try:
         yield
     finally:
         _builtins.open = real_open  # type: ignore[assignment]
+        _io.open = real_io_open  # type: ignore[assignment]
 
 
 def _exec_shim(shim: str) -> dict[str, Any]:
@@ -148,11 +151,15 @@ class TestSymlinkEscapeRejected:
         """A symlink living INSIDE results/ opens through the guard — its PATH is
         in-tree even though its target points outside (documented: the guard is a
         path-confinement check, not a symlink-target resolver)."""
+        outside = workspace.parent / "outside_target.txt"
+        # Write the OUTSIDE fixture BEFORE exec'ing the shim: the guard-ON shim
+        # rebinds io.open too, so a pathlib write_text after exec would route
+        # through the guard and be (correctly) blocked — the guard now covers
+        # pathlib/io.open, closing a prior guard-escape vector.
+        outside.write_text("secret")
         ns = _exec_shim(_shim_on(workspace))
         patched_open = ns["_turing_b"].open
 
-        outside = workspace.parent / "outside_target.txt"
-        outside.write_text("secret")
         link = workspace / "results" / "escape_link.txt"
         try:
             os.symlink(outside, link)

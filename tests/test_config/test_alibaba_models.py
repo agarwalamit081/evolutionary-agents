@@ -3,7 +3,7 @@
 The user requested these DashScope-hosted models be registered to broaden the
 fallback pool (provider exhaustion has been the recurring blocker killing live
 runs). Per project discipline, each was live-verified responsive via
-``scripts/verify_alibaba_models.py`` BEFORE landing here; these deterministic
+``python main.py --verify-models`` BEFORE landing here; these deterministic
 unit tests assert the registration is correct and stays correct (no live calls,
 CI-runnable). The companion ``tests/test_e2e/test_alibaba_models_e2e.py`` makes
 the real billed smoke call.

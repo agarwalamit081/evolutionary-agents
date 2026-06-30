@@ -125,6 +125,21 @@ from src.runner import _create_gateway, execute_run
     "--deliverable p1 --deliverable p2). Spec-expected deliverables are added "
     "automatically.",
 )
+@click.option(
+    "--verify-models",
+    "verify_models",
+    is_flag=True,
+    help="Smoke-test that each named model resolves and responds over the gateway's "
+    "real routing (registry _build_kwargs), then exit. Exit 0 if all healthy, 1 if any "
+    "fail. Use --verify-model to name models (default set if none).",
+)
+@click.option(
+    "--verify-model",
+    "verify_model_names",
+    multiple=True,
+    help="Model name to smoke with --verify-models (repeatable; default "
+    "qwen3.5-flash + qwen3.7-plus if none named).",
+)
 def main(
     goal_text: str | None,
     interactive: bool,
@@ -152,6 +167,8 @@ def main(
     backfill_dry_run: bool,
     score_spec_id: str | None,
     score_deliverables: tuple[str, ...],
+    verify_models: bool,
+    verify_model_names: tuple[str, ...],
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -194,6 +211,15 @@ def main(
                 _run_score_spec(score_spec_id, list(score_deliverables))
             )
         )
+
+    # --verify-models: smoke each named model over the gateway's real routing
+    # (the registry's _build_kwargs — provider-agnostic), then exit. Confirms a
+    # model_id actually resolves + responds before trusting it in a fallback
+    # chain (a 404 burns a retry slot on every failed run). Live provider key
+    # required; prints NO secrets — only pass/fail, provider/model, token counts,
+    # cost, and a sanitized error category. Exit 0=all healthy, 1=any failed.
+    if verify_models:
+        sys.exit(asyncio.run(_run_verify_models(list(verify_model_names))))
 
     # --capability-curve: read-only inspection of the nightly battery trend +
     # regression verdict (the measured-self-improvement evidence). No LLM/DB writes.
@@ -444,6 +470,79 @@ async def _run_score_spec(spec_id: str, deliverables: list[str]) -> int:
             click.echo(f"        {evidence}")
     click.echo("=" * 60)
     return 0 if result.passed else 1
+
+
+_VERIFY_DEFAULT_MODELS: tuple[str, ...] = ("qwen3.5-flash", "qwen3.7-plus")
+_VERIFY_PROMPT = "Reply with exactly one word: pong"
+
+
+def _scrub_secrets(msg: str, *keys: str) -> str:
+    """Strip any provider key value (and sk- tokens) from an error message."""
+    scrubbed = msg.replace("\n", " ").strip()
+    for key in keys:
+        if key:
+            scrubbed = scrubbed.replace(key, "<redacted>")
+    # Generic guard for keys we did not enumerate (never echo a bearer token).
+    if "sk-" in scrubbed:
+        import re
+
+        scrubbed = re.sub(r"sk-[A-Za-z0-9_\-]{6,}", "<redacted>", scrubbed)
+    return scrubbed[:200]
+
+
+async def _run_verify_models(names: list[str]) -> int:
+    """Smoke each model over the gateway's real routing and exit.
+
+    Issues one trivial completion per model via ``gateway.acompletion`` — the
+    same path the agent uses — so a passing ping means the registry's
+    ``_build_kwargs`` routing (provider/api_base/key) is live, not merely
+    unit-tested. Grounds model registration in reality: an unverified
+    ``model_id`` in a ``FALLBACK_CHAIN`` burns a retry slot on every failed run.
+
+    Prints NO secrets — only pass/fail, the resolved provider/model, token
+    counts, cost, and a sanitized error category (keys are scrubbed). Returns 0
+    if every model responded, 1 if any failed (OR of all pings).
+    """
+    from src.llm.gateway import LLMGateway
+
+    settings = get_settings()
+    gateway = LLMGateway(settings)
+    models = tuple(names) or _VERIFY_DEFAULT_MODELS
+
+    click.echo("=" * 60)
+    click.echo(f"🔌 Model smoke — {len(models)} model(s) via gateway routing")
+    click.echo("=" * 60)
+
+    rc = 0
+    healthy = 0
+    for model in models:
+        try:
+            resp = await gateway.acompletion(
+                messages=[{"role": "user", "content": _VERIFY_PROMPT}],
+                model=model,
+                temperature=0.0,
+                max_tokens=16,
+            )
+        except Exception as exc:  # noqa: BLE001 — smoke surfaces any failure
+            rc = 1
+            detail = _scrub_secrets(
+                f"{type(exc).__name__}: {exc}",
+                settings.llm.dashscope_api_key or "",
+                settings.llm.openai_api_key or "",
+                settings.llm.anthropic_api_key or "",
+            )
+            click.echo(f"  [FAIL] {model:28s} {detail}")
+            continue
+        healthy += 1
+        click.echo(
+            f"  [OK]   {model:28s} provider={resp.provider} model={resp.model} "
+            f"tokens(in={resp.input_tokens},out={resp.output_tokens}) "
+            f"cost=${resp.cost_usd:.6f} content={resp.content!r}"
+        )
+
+    click.echo("-" * 60)
+    click.echo(f"{healthy}/{len(models)} healthy")
+    return rc
 
 
 async def _run_eval_suite(model: str | None = None) -> None:

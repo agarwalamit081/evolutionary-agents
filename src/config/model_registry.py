@@ -307,7 +307,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         output_cost_per_1k=0.0006,
     ),
     # ── Qwen (Alibaba DashScope) — expanded flash/turbo/coder pool ────────
-    # Each was live-verified responsive via scripts/verify_alibaba_models.py
+    # Each was live-verified responsive via `python main.py --verify-models`
     # (dashscope-intl OpenAI-compatible endpoint, DASHSCOPE_API_KEY) before
     # landing. Broadening the alibaba pool gives provider-diverse fallback when
     # a single provider caps/burns balance — the recurring blocker that killed

@@ -1201,7 +1201,9 @@ class LLMGateway:
         # bare ``nvidia/`` prefix, so a registered nvidia model_id is rewritten
         # to ``openai/<id>`` against the pinned NIM api_base. Pure + unit-tested
         # (src/llm/nvidia_shim.py); verified live for all 16 registered models.
-        litellm_model, nvidia_kwargs = nvidia_shim_model_id(provider, litellm_model)
+        litellm_model, nvidia_kwargs = nvidia_shim_model_id(
+            provider, litellm_model, api_base=self._settings.llm.nvidia_api_base
+        )
         kwargs.update(nvidia_kwargs)
 
         # Pin the Anthropic endpoint so an ambient ANTHROPIC_BASE_URL inherited

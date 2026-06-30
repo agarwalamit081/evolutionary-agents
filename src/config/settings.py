@@ -54,6 +54,12 @@ class LLMProviderSettings(BaseSettings):
     groq_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
     nvidia_api_key: Optional[str] = None
+    # Explicit NVIDIA NIM endpoint. Registered nvidia model_ids are rewritten to
+    # the ``openai/`` shim against this base (litellm rejects the bare ``nvidia/``
+    # prefix in this build). Defaults to the public NIM endpoint in the shim
+    # (``src/llm/nvidia_shim.py::NVIDIA_API_BASE``); set this only to point at a
+    # private/regional NIM instance.
+    nvidia_api_base: Optional[str] = None
 
     # Default model selection
     default_llm_provider: str = "deepseek"
@@ -335,6 +341,21 @@ class RoutingSettings(BaseSettings):
 
     routing_node_tier_overrides_json: str = "{}"
     routing_complexity_tier_overrides_json: str = "{}"
+    # Defensive default tier for an UNMAPPED TaskComplexity (the ``.get()``
+    # fallback in route()/route_diverse()). Empty (default) → the curated
+    # ``DEFAULT_COMPLEXITY_TIER`` in model_router.py; set to a model_id present
+    # in MODEL_REGISTRY to retune without a code change. Unknown model_id is
+    # ignored (curated default used). Env: ROUTING_DEFAULT_COMPLEXITY_TIER.
+    routing_default_complexity_tier: str = ""
+    # Providers excluded from ALL routing (primary/chain/diverse + gateway
+    # fallback pre-filter). None (default) → the curated
+    # ``_TEMPORARY_DISABLED_PROVIDERS`` baseline (anthropic under a quota cap
+    # until 2026-07-01). When SET to any value it is AUTHORITATIVE: a comma-list
+    # (e.g. ``"anthropic"`` or ``"anthropic,minimax"``); an EMPTY string means
+    # none disabled — so the temporary Anthropic block can be cleared without a
+    # code change by setting ``DISABLED_PROVIDERS=`` once the cap resets. Env:
+    # DISABLED_PROVIDERS.
+    routing_disabled_providers: Optional[str] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

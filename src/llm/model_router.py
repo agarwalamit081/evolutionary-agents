@@ -7,7 +7,7 @@ import json
 from loguru import logger
 
 from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY, ModelTier
-from src.config.settings import Settings
+from src.config.settings import Settings, get_settings
 from src.graph.enums import TaskComplexity
 
 
@@ -31,6 +31,23 @@ from src.graph.enums import TaskComplexity
 # cap-reset date, so this aligns 1:1 with when the funded key recovers.
 # ─────────────────────────────────────────────────────────────────────────────
 _TEMPORARY_DISABLED_PROVIDERS: frozenset[str] = frozenset({"anthropic"})
+
+
+def _resolved_disabled_providers(settings: Settings) -> set[str]:
+    """The effective disabled-provider set used by ALL routing guards.
+
+    ``DISABLED_PROVIDERS`` env is AUTHORITATIVE when set to any value: a
+    comma-list (e.g. ``"anthropic"`` / ``"anthropic,minimax"``); an EMPTY string
+    means none disabled. When the env is UNSET (``None``), the curated
+    ``_TEMPORARY_DISABLED_PROVIDERS`` baseline is used (anthropic under a quota
+    cap until 2026-07-01). Authoritative-when-set (not merge) so the temporary
+    Anthropic block can be cleared without a code change by setting
+    ``DISABLED_PROVIDERS=`` once the cap resets — see the revert note above.
+    """
+    env_dp = settings.routing.routing_disabled_providers
+    if env_dp is None:
+        return set(_TEMPORARY_DISABLED_PROVIDERS)
+    return {p.strip() for p in env_dp.split(",") if p.strip()}
 
 
 # Mapping from TaskComplexity to model tier and fallback chain key — the
@@ -103,11 +120,32 @@ class ModelRouter:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        # TEMPORARY (REVERT BY 2026-07-01): seed anthropic into the excluded set
-        # so the router's absolute-fallback loop (route() :136-139) — the one
-        # path that consults `excluded`, not _has_provider_key — also skips it.
-        # See _TEMPORARY_DISABLED_PROVIDERS.
-        self._exclude_providers: set[str] = set(_TEMPORARY_DISABLED_PROVIDERS)
+        # Seed the runtime excluded set from DISABLED_PROVIDERS (env) when set,
+        # else the curated _TEMPORARY_DISABLED_PROVIDERS baseline. Runtime
+        # mark_provider_unhealthy() additions land here too. Consulted by the
+        # absolute-fallback loop in route() (the one path that uses `excluded`,
+        # not _has_provider_key). See _resolved_disabled_providers.
+        self._exclude_providers: set[str] = _resolved_disabled_providers(settings)
+
+    def _effective_default_tier(self) -> tuple[ModelTier, str]:
+        """Defensive default tier for an UNMAPPED TaskComplexity (the ``.get()``
+        fallback in route()/route_diverse()).
+
+        Operator can retune via ``ROUTING_DEFAULT_COMPLEXITY_TIER`` — a model_id
+        present in MODEL_REGISTRY; its tier is re-derived from the ModelSpec so
+        the absolute-fallback loop stays coherent. Empty/unknown → the curated
+        ``DEFAULT_COMPLEXITY_TIER`` unchanged (routing never breaks on a bad env).
+        """
+        override = self._settings.routing.routing_default_complexity_tier.strip()
+        if override:
+            spec = MODEL_REGISTRY.get(override)
+            if spec is not None:
+                return spec.tier, override
+            logger.warning(
+                f"ROUTING_DEFAULT_COMPLEXITY_TIER='{override}' not in "
+                f"MODEL_REGISTRY; using curated default"
+            )
+        return DEFAULT_COMPLEXITY_TIER
 
     def route(
         self,
@@ -144,7 +182,7 @@ class ModelRouter:
             tier, chain_key = NODE_TIER_MAP[(complexity, node)]
         else:
             tier, chain_key = COMPLEXITY_TIER_MAP.get(
-                complexity, DEFAULT_COMPLEXITY_TIER
+                complexity, self._effective_default_tier()
             )
         # Layer operator env-knob overrides (F2) over the curated tier maps.
         # Reads get_settings().routing.* at call-time; empty/unparseable JSON
@@ -318,7 +356,7 @@ class ModelRouter:
             tier, chain_key = NODE_TIER_MAP[(complexity, node)]
         else:
             tier, chain_key = COMPLEXITY_TIER_MAP.get(
-                complexity, DEFAULT_COMPLEXITY_TIER
+                complexity, self._effective_default_tier()
             )
 
         # Collect one model per provider at the target tier
@@ -430,15 +468,16 @@ class ModelRouter:
         a disabled provider (e.g. anthropic under a quota cap) instead of
         selecting it as the cheaper model and burning the fallback chain on a 400.
         """
-        return provider in _TEMPORARY_DISABLED_PROVIDERS
+        return provider in _resolved_disabled_providers(get_settings())
 
     def _has_provider_key(self, provider: str) -> bool:
         """Check if an API key is available for a provider."""
-        # TEMPORARY (REVERT BY 2026-07-01): report anthropic as key-less so it
-        # is dropped from router primary/chain/diverse selection AND from the
+        # Report a disabled provider (DISABLED_PROVIDERS env when set, else the
+        # curated _TEMPORARY_DISABLED_PROVIDERS baseline) as key-less so it is
+        # dropped from router primary/chain/diverse selection AND from the
         # gateway's fallback-chain pre-filter (gateway.py _execute_with_fallback
-        # filters via this method). See _TEMPORARY_DISABLED_PROVIDERS.
-        if provider in _TEMPORARY_DISABLED_PROVIDERS:
+        # filters via this method). See _resolved_disabled_providers.
+        if provider in _resolved_disabled_providers(self._settings):
             return False
         try:
             return self._settings.llm.has_provider_key(provider)

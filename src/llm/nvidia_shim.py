@@ -20,7 +20,7 @@ NVIDIA_API_BASE = "https://integrate.api.nvidia.com/v1"
 
 
 def nvidia_shim_model_id(
-    provider: str, litellm_model: str
+    provider: str, litellm_model: str, api_base: str | None = None
 ) -> tuple[str, dict[str, str]]:
     """Rewrite a registered NVIDIA model_id for the OpenAI-compatible NIM shim.
 
@@ -33,13 +33,16 @@ def nvidia_shim_model_id(
         provider: The registry provider (``spec.provider``); only ``"nvidia"``
             triggers the rewrite / base pin.
         litellm_model: The resolved litellm model_id (``spec.model_id``).
+        api_base: Optional explicit NIM endpoint (e.g. a private/regional NIM
+            instance) sourced from ``settings.llm.nvidia_api_base`` by the
+            gateway. ``None`` → the curated public NIM base ``NVIDIA_API_BASE``.
 
     Returns:
         The effective model_id to send and the kwargs to merge into the request.
     """
     if provider != "nvidia":
         return litellm_model, {}
-    extra: dict[str, str] = {"api_base": NVIDIA_API_BASE}
+    extra: dict[str, str] = {"api_base": api_base or NVIDIA_API_BASE}
     effective = litellm_model
     # Only a ``nvidia/``-prefixed id needs the rewrite to ``openai/``; a bare id
     # (none registered today) still gets the base pinned so the call lands on NIM.

@@ -656,3 +656,163 @@ class TestCrossProviderFallbackInvariant:
             "Candidate models (promotion targets) whose fallback chain has no "
             f"registered cross-provider fallback: {offenders}"
         )
+
+
+class TestDefaultComplexityTierOverride:
+    """ROUTING_DEFAULT_COMPLEXITY_TIER retunes the defensive default tier for an
+    UNMAPPED TaskComplexity (the .get() fallback in route()/route_diverse()),
+    WITHOUT a code change. Empty/unknown → the curated DEFAULT_COMPLEXITY_TIER.
+
+    ``_effective_default_tier`` is the single source the two .get() call sites
+    now consult; an override's tier is re-derived from its ModelSpec so the
+    absolute-fallback loop stays coherent."""
+
+    @staticmethod
+    def _all_keyed_router(default_tier: str = "") -> ModelRouter:
+        settings = Settings()
+        for field in _PROVIDER_KEY_FIELDS.values():
+            setattr(settings.llm, field, "test-key")
+        settings.routing.routing_default_complexity_tier = default_tier
+        return ModelRouter(settings)
+
+    def test_override_flips_unmapped_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patching the tier map empty makes SIMPLE 'unmapped', so route() falls
+        to the override model (deepseek-v4-pro) instead of the curated default
+        (deepseek-v4-flash)."""
+        from src.llm import model_router as mr
+
+        router = self._all_keyed_router(default_tier="deepseek-v4-pro")
+        monkeypatch.setattr(mr, "COMPLEXITY_TIER_MAP", {})
+        assert router.route(TaskComplexity.SIMPLE) == "deepseek-v4-pro"
+
+    def test_empty_uses_curated_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty override → byte-identical to the curated DEFAULT_COMPLEXITY_TIER."""
+        from src.llm import model_router as mr
+        from src.llm.model_router import DEFAULT_COMPLEXITY_TIER
+
+        router = self._all_keyed_router(default_tier="")
+        monkeypatch.setattr(mr, "COMPLEXITY_TIER_MAP", {})
+        assert router.route(TaskComplexity.SIMPLE) == DEFAULT_COMPLEXITY_TIER[1]
+
+    def test_unknown_model_id_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An override naming a model absent from MODEL_REGISTRY is ignored
+        (logged WARNING) so a typo can't select an unroutable model."""
+        from src.llm import model_router as mr
+        from src.llm.model_router import DEFAULT_COMPLEXITY_TIER
+
+        router = self._all_keyed_router(default_tier="does-not-exist-9000")
+        monkeypatch.setattr(mr, "COMPLEXITY_TIER_MAP", {})
+        assert router.route(TaskComplexity.SIMPLE) == DEFAULT_COMPLEXITY_TIER[1]
+
+    def test_override_rederives_tier_from_override_model(self) -> None:
+        """The resolved tier is re-derived from the override model's ModelSpec so
+        the absolute-fallback loop stays coherent (curated default is CHEAP;
+        overriding to glm-4.7 must report MODERATE)."""
+        from src.config.model_registry import MODEL_REGISTRY, ModelTier
+
+        router = self._all_keyed_router(default_tier="glm-4.7")
+        tier, chain_key = router._effective_default_tier()
+        assert chain_key == "glm-4.7"
+        assert tier == MODEL_REGISTRY["glm-4.7"].tier
+        assert MODEL_REGISTRY["glm-4.7"].tier == ModelTier.MODERATE
+
+    def test_both_get_call_sites_use_resolver(self) -> None:
+        """Regression: route() and route_diverse() BOTH consult
+        _effective_default_tier() — not a duplicated inline literal — so the two
+        cannot silently drift (the dedup the DEFAULT_COMPLEXITY_TIER constant was
+        introduced for)."""
+        import inspect
+
+        from src.llm.model_router import ModelRouter
+
+        route_src = inspect.getsource(ModelRouter.route)
+        route_diverse_src = inspect.getsource(ModelRouter.route_diverse)
+        assert "_effective_default_tier()" in route_src
+        assert "_effective_default_tier()" in route_diverse_src
+
+
+class TestDisabledProvidersEnv:
+    """DISABLED_PROVIDERS is the env-side lever for excluding providers from ALL
+    routing. AUTHORITATIVE-when-set (not merge): None → curated
+    _TEMPORARY_DISABLED_PROVIDERS baseline (anthropic under a quota cap); any set
+    value (incl. empty) → the authoritative comma-list. This is the revert lever
+    that clears the Anthropic block on 2026-07-01 via ``DISABLED_PROVIDERS=``."""
+
+    def test_none_uses_curated_temporary_baseline(self) -> None:
+        """UNSET → the curated _TEMPORARY_DISABLED_PROVIDERS (anthropic) is used,
+        preserving the quota-cap block exactly as before this knob existed."""
+        from src.llm.model_router import _resolved_disabled_providers, _TEMPORARY_DISABLED_PROVIDERS
+
+        settings = Settings()
+        settings.routing.routing_disabled_providers = None
+        assert _resolved_disabled_providers(settings) == set(_TEMPORARY_DISABLED_PROVIDERS)
+        assert "anthropic" in _resolved_disabled_providers(settings)
+
+    def test_empty_string_clears_all(self) -> None:
+        """EMPTY string (=) means NONE disabled — the 2026-07-01 Anthropic revert
+        path. Without a code change, setting DISABLED_PROVIDERS= unfetters the
+        provider set that the temporary baseline was blocking."""
+        from src.llm.model_router import _resolved_disabled_providers
+
+        settings = Settings()
+        settings.routing.routing_disabled_providers = ""
+        assert _resolved_disabled_providers(settings) == set()
+        assert "anthropic" not in _resolved_disabled_providers(settings)
+
+    def test_explicit_list_is_authoritative(self) -> None:
+        """A set comma-list REPLACES the curated baseline — it is not merged. So a
+        deliberate ``"minimax"`` unblocks anthropic even though the baseline names
+        anthropic."""
+        from src.llm.model_router import _resolved_disabled_providers
+
+        settings = Settings()
+        settings.routing.routing_disabled_providers = "minimax"
+        resolved = _resolved_disabled_providers(settings)
+        assert resolved == {"minimax"}
+        assert "anthropic" not in resolved
+
+    def test_comma_list_parses_with_whitespace(self) -> None:
+        """A multi-entry comma-list trims whitespace around each member."""
+        from src.llm.model_router import _resolved_disabled_providers
+
+        settings = Settings()
+        settings.routing.routing_disabled_providers = " anthropic , minimax , "
+        assert _resolved_disabled_providers(settings) == {"anthropic", "minimax"}
+
+    def test_disabled_provider_has_no_key(self) -> None:
+        """A disabled provider reports key-less via _has_provider_key so it is
+        dropped from primary/chain/diverse selection AND the gateway's fallback
+        pre-filter — regardless of whether an actual key is present in settings."""
+        settings = Settings()
+        settings.routing.routing_disabled_providers = "openai"
+        settings.llm.openai_api_key = "real-but-disabled-key"
+        router = ModelRouter(settings)
+        assert router._has_provider_key("openai") is False
+
+    def test_non_disabled_provider_key_check_unaffected(self) -> None:
+        """A provider NOT in the disabled set still gets its real key checked."""
+        settings = Settings()
+        settings.routing.routing_disabled_providers = "anthropic"  # disable anthropic only
+        settings.llm.openai_api_key = "real-key"
+        router = ModelRouter(settings)
+        assert router._has_provider_key("openai") is True
+        assert router._has_provider_key("anthropic") is False
+
+    def test_runtime_excluded_set_seeds_from_env(self) -> None:
+        """The router's runtime _exclude_providers (consulted by the absolute-
+        fallback loop) seeds from the resolved disabled set at __init__."""
+        settings = Settings()
+        settings.routing.routing_disabled_providers = "minimax,moonshot"
+        router = ModelRouter(settings)
+        assert router._exclude_providers == {"minimax", "moonshot"}
+
+    def test_is_provider_disabled_reads_live_settings(self) -> None:
+        """is_provider_disabled() is static but reads live get_settings() — so it
+        tracks an env flip at runtime, not a snapshot."""
+        from src.llm.model_router import ModelRouter
+
+        # The default live settings resolve anthropic as disabled (curated temp
+        # baseline) under the quota cap; the method must reflect that without an
+        # explicit settings arg.
+        assert ModelRouter.is_provider_disabled("anthropic") is True
+        assert ModelRouter.is_provider_disabled("minimax") is False

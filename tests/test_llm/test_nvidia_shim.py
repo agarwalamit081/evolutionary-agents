@@ -58,6 +58,42 @@ class TestNvidiaShim:
         assert set(extra.keys()) <= {"api_base", "model"}
 
 
+class TestNvidiaApiBaseOverride:
+    """An explicit ``api_base`` (sourced from ``settings.llm.nvidia_api_base`` by
+    the gateway) overrides the curated public NIM endpoint — for pointing at a
+    private/regional NIM instance. ``None``/empty falls back to the curated base."""
+
+    def test_explicit_api_base_overrides_curated_base(self) -> None:
+        private = "https://nim.internal.corp/v1"
+        effective, extra = nvidia_shim_model_id(
+            "nvidia", "nvidia/nemotron-3-super-120b-a12b", api_base=private
+        )
+        assert effective == "openai/nemotron-3-super-120b-a12b"
+        assert extra["api_base"] == private
+        assert extra["model"] == effective
+
+    def test_none_api_base_falls_back_to_curated(self) -> None:
+        _, extra = nvidia_shim_model_id(
+            "nvidia", "nvidia/x", api_base=None
+        )
+        assert extra["api_base"] == NVIDIA_API_BASE
+
+    def test_empty_api_base_falls_back_to_curated(self) -> None:
+        # An empty-string override (e.g. NVIDIA_API_BASE= in .env) must NOT wipe
+        # the base — it falls back to the curated public NIM endpoint.
+        _, extra = nvidia_shim_model_id(
+            "nvidia", "nvidia/x", api_base=""
+        )
+        assert extra["api_base"] == NVIDIA_API_BASE
+
+    def test_override_does_not_affect_non_nvidia_provider(self) -> None:
+        effective, extra = nvidia_shim_model_id(
+            "openai", "openai/gpt-4o-mini-2024-07-18", api_base="https://x/v1"
+        )
+        assert effective == "openai/gpt-4o-mini-2024-07-18"
+        assert extra == {}
+
+
 class TestEveryRegisteredNvidiaModelIsShimmed:
     """Regression: every registered NVIDIA model_id rewrites to openai/<id> with
     the NIM base pinned — the contract the gateway relies on to actually route

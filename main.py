@@ -87,6 +87,28 @@ from src.runner import _create_gateway, execute_run
     type=int,
     help="With --retrieval-eval: top-k cutoff for precision@k (default 3)",
 )
+@click.option(
+    "--backfill-embeddings",
+    "backfill_embeddings",
+    type=click.Choice(["capability", "cold", "all"]),
+    default=None,
+    help="Backfill NULL embedding/capability vectors (capability=tools+sub-agents api-only, "
+    "cold=cold memories all-vectors) and exit. Idempotent (WHERE col IS NULL).",
+)
+@click.option(
+    "--backfill-concurrency",
+    "backfill_concurrency",
+    default=5,
+    type=int,
+    help="With --backfill-embeddings: max concurrent embedding API calls (default 5).",
+)
+@click.option(
+    "--backfill-dry-run",
+    "backfill_dry_run",
+    is_flag=True,
+    help="With --backfill-embeddings: report the NULL-row count WITHOUT calling the "
+    "embedding API (no spend); nothing is persisted.",
+)
 def main(
     goal_text: str | None,
     interactive: bool,
@@ -109,6 +131,9 @@ def main(
     run_retrieval_eval: bool,
     retrieval_k: int | None,
     run_aflow: bool,
+    backfill_embeddings: str | None,
+    backfill_concurrency: int,
+    backfill_dry_run: bool,
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -125,6 +150,21 @@ def main(
     if run_eval:
         asyncio.run(_run_eval_suite(model))
         return
+
+    # --backfill-embeddings: idempotently populate NULL embedding/capability
+    # vectors (the data half of already-shipped schema migrations). Read+write
+    # maintenance op — no agent run. Exit code: 1 if rows needed backfill but
+    # none were stored (all failed/skipped), else 0.
+    if backfill_embeddings:
+        sys.exit(
+            asyncio.run(
+                _run_backfill_embeddings(
+                    table=backfill_embeddings,
+                    concurrency=backfill_concurrency,
+                    dry_run=backfill_dry_run,
+                )
+            )
+        )
 
     # --capability-curve: read-only inspection of the nightly battery trend +
     # regression verdict (the measured-self-improvement evidence). No LLM/DB writes.
@@ -262,6 +302,59 @@ def _run_cost(result_dict: dict) -> float:
 
 def _fmt_score(score: float | None) -> str:
     return "n/a" if score is None else f"{score:.2f}"
+
+
+async def _run_backfill_embeddings(
+    *, table: str, concurrency: int, dry_run: bool
+) -> int:
+    """Run an idempotent embedding backfill (capability and/or cold) and exit.
+
+    This is the data half of already-shipped schema migrations that added the
+    nullable ``capability_embedding`` / ``cold_memories.embedding`` columns —
+    rows created before those fixes have NULL vectors and are invisible to
+    semantic recall/dedup. The backfill embeds each NULL row and writes the
+    vector back in place; it is idempotent (re-runs are no-ops).
+
+    ``--dry-run`` reports the NULL-row count WITHOUT calling the embedding API
+    (no spend) and persists nothing.
+
+    Returns an exit code: 0 when nothing needed backfill, or when at least one
+    vector was stored; 1 only when rows needed backfill but none were stored
+    (every one failed or was skipped) — a signal the embedding API / key should
+    be checked before re-running.
+    """
+    from src.db.backfills import run_backfill
+    from src.db.session import get_session
+    from src.memory.embeddings import EmbeddingGenerator
+
+    settings = get_settings()
+    generator = EmbeddingGenerator(settings)
+
+    click.echo("=" * 60)
+    click.echo(
+        f"🧮 Embedding backfill — table={table} concurrency={concurrency} "
+        f"dry_run={dry_run}"
+    )
+    click.echo("=" * 60)
+
+    async with get_session() as session:
+        stats = await run_backfill(
+            table=table,
+            concurrency=concurrency,
+            dry_run=dry_run,
+            session=session,
+            generator=generator,
+        )
+
+    click.echo("-" * 60)
+    click.echo(
+        f"scanned={stats.scanned} stored={stats.stored} "
+        f"skipped_hash={stats.skipped_hash} skipped_no_text={stats.skipped_no_text} "
+        f"failed={stats.failed}"
+    )
+    if dry_run:
+        click.echo("(dry-run: nothing persisted; no embedding API spend)")
+    return 1 if stats.scanned and stats.stored == 0 else 0
 
 
 async def _run_eval_suite(model: str | None = None) -> None:

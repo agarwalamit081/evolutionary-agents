@@ -164,6 +164,27 @@ from src.runner import _create_gateway, execute_run
     is_flag=True,
     help="With --cost: collapse the breakdown across runs (one row per model).",
 )
+@click.option(
+    "--inspect-mutation",
+    "inspect_mutation",
+    is_flag=True,
+    help="Print a stored evolution mutation row (id/type/path/status/shape) and exit. "
+    "Use with --mutation-id to target one (full UUID or short prefix); the latest "
+    "row is shown when no id is given. Shape is classified by promote.classify_payload "
+    "(the JSON-vs-free-text check the promotion gate uses). No secrets are printed.",
+)
+@click.option(
+    "--mutation-id",
+    "mutation_id",
+    default=None,
+    help="With --inspect-mutation: a mutation id (full UUID or a short prefix).",
+)
+@click.option(
+    "--inspect-full",
+    "inspect_full",
+    is_flag=True,
+    help="With --inspect-mutation: print the FULL mutated_content (default truncates).",
+)
 def main(
     goal_text: str | None,
     interactive: bool,
@@ -199,6 +220,9 @@ def main(
     cost_since: str | None,
     cost_today: bool,
     cost_by_model: bool,
+    inspect_mutation: bool,
+    mutation_id: str | None,
+    inspect_full: bool,
 ) -> None:
     """Turing Agent — a self-evolving AI agent built with LangGraph."""
     # Setup logging
@@ -269,6 +293,16 @@ def main(
                     since=cost_since or "",
                 )
             )
+        )
+
+    # --inspect-mutation: read-only inspection of a stored evolution mutation row
+    # (id/type/path/status/shape). The SHAPE is classified by
+    # promote.classify_payload — the JSON-vs-free-text heuristic that determines
+    # whether parse_prompt_payload/parse_code_payload will parse (and thus canary
+    # + promote) the row. No secrets are printed; no agent run, no API key.
+    if inspect_mutation:
+        sys.exit(
+            asyncio.run(_run_inspect_mutation(mutation_id, inspect_full))
         )
 
     # --capability-curve: read-only inspection of the nightly battery trend +
@@ -623,6 +657,70 @@ async def _run_cost_report(
         )
     click.echo(format_cost_breakdown(breakdown))
     click.echo("-" * 60)
+    return 0
+
+
+async def _run_inspect_mutation(ident: str | None, full: bool) -> int:
+    """Print a stored evolution mutation row + its payload shape, then exit.
+
+    Read-only inspection of the ``mutations`` table. The ``shape`` line reports
+    whether the promotion gate will *parse* (and thus canary + promote) the row,
+    classified by ``src.evolution.promote.classify_payload`` (the JSON-vs-free-text
+    heuristic that mirrors ``parse_prompt_payload``). No secrets are printed; no
+    agent run, no API key.
+
+    ``ident`` is a full UUID, a short prefix (as run logs), or ``None`` (latest
+    row). Returns 0 when a row is found, 1 when nothing matches.
+    """
+    import uuid
+
+    from sqlalchemy import Text, cast, select
+
+    from src.db.models import Mutation
+    from src.db.session import get_session
+    from src.evolution.promote import classify_payload
+
+    stmt = select(Mutation)
+    if ident:
+        if "-" in ident:
+            stmt = select(Mutation).where(Mutation.id == uuid.UUID(ident))
+        else:
+            # Short prefix (run logs a short id like 4c5c11d4); match newest first.
+            stmt = (
+                select(Mutation)
+                .where(cast(Mutation.id, Text).like(f"{ident}%"))
+                .order_by(Mutation.created_at.desc())
+            )
+    else:
+        stmt = select(Mutation).order_by(Mutation.created_at.desc())
+
+    async with get_session() as session:
+        row = (await session.execute(stmt)).scalars().first()
+
+    if row is None:
+        ident_repr = "latest" if not ident else repr(ident)
+        click.echo(f"No mutation found for id={ident_repr}")
+        return 1
+
+    content = row.mutated_content or ""
+    proposal: dict[str, object] = {
+        "mutation_type": row.mutation_type,
+        "mutated_content": content,
+        "target_path": row.target_path,
+    }
+    snippet = content if full else content[:800]
+    truncated = " …[truncated]" if (not full and len(content) > 800) else ""
+
+    click.echo(f"id            : {row.id}")
+    click.echo(f"mutation_type : {row.mutation_type}")
+    click.echo(f"target_path   : {row.target_path}")
+    click.echo(f"status        : {row.status}")
+    click.echo(f"model_used    : {row.model_used}")
+    click.echo(f"description   : {row.description}")
+    click.echo(f"content_len   : {len(content)} chars")
+    click.echo(f"shape         : {classify_payload(proposal)}")
+    click.echo("--- mutated_content ---")
+    click.echo(f"{snippet}{truncated}")
     return 0
 
 

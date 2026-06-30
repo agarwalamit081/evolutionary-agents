@@ -222,6 +222,43 @@ def parse_code_payload(
     return target_path.strip(), content
 
 
+def classify_payload(proposal: dict[str, Any]) -> str:
+    """Heuristic SHAPE label for a mutation proposal's ``mutated_content``.
+
+    Diagnostic companion to :func:`parse_prompt_payload` /
+    :func:`parse_code_payload`: reports the content shape so an operator can see
+    at a glance whether the promotion gate will *parse* a stored ``mutations``
+    row (and therefore canary + promote it) — without running the gate. Surfaced
+    via ``python main.py --inspect-mutation [id]``.
+
+    Reflects the CURRENT parser behavior: :func:`parse_prompt_payload` accepts
+    BOTH a JSON ``{"target_node", "suffixes"}`` payload AND a free-text whole-file
+    rewrite (treated as one promoted suffix); the older "free-text → gate cannot
+    promote" framing was stale after the free-text fix (live on battery-04 q08,
+    where a free-text ``prompts/system_prompt.md`` rewrite was promoted). Only a
+    JSON array or a non-PROMPT/CODE type is a shape the gate drops.
+    """
+    mtype = proposal.get("mutation_type")
+    content = proposal.get("mutated_content", "")
+    if not isinstance(content, str):
+        content = ""
+    stripped = content.lstrip()
+    if not stripped:
+        return f"{mtype!r} / empty mutated_content (parse → None)"
+
+    if mtype == MutationType.PROMPT:
+        if stripped.startswith("{"):
+            return "prompt / json-object (parses {target_node,suffixes})"
+        if stripped.startswith("["):
+            return "prompt / json-array (parse_prompt_payload → None)"
+        if stripped.startswith("<") or "#!/usr/bin" in content[:80]:
+            return "prompt / markup-script (free-text → one promoted suffix)"
+        return "prompt / free-text (whole-file rewrite → one promoted suffix)"
+    if mtype == MutationType.CODE:
+        return "code / module rewrite (parse_code_payload → shadow target_path)"
+    return f"mutation_type={mtype!r} (no promotion parser)"
+
+
 class PromotionGate:
     """Versioned promotion of PROMPT mutations to the live agent, canary-gated.
 

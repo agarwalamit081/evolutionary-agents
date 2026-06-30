@@ -23,6 +23,7 @@ import pytest
 from src.evolution.promote import (
     GoldenCanary,
     PromotionGate,
+    classify_payload,
     parse_prompt_payload,
 )
 from src.graph.enums import MutationType
@@ -815,3 +816,111 @@ def _canary(score: float | None) -> Any:
         return score
 
     return _fn
+
+
+# ---------------------------------------------------------------------------
+# classify_payload — the JSON-vs-free-text SHAPE heuristic promoted from
+# scripts/inspect_mutation.py (now exposed via `main.py --inspect-mutation`).
+# Diagnostic companion to parse_prompt_payload: reports whether the gate will
+# PARSE a stored mutations row. The free-text label is the regression anchor for
+# the stale-framing fix — free-text IS promotable now (whole-file rewrite → one
+# promoted suffix), NOT "gate cannot promote".
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyPayload:
+    """Shape labels must track the CURRENT parser behavior, not the old script."""
+
+    def test_prompt_json_object_parses(self) -> None:
+        proposal = {
+            "mutation_type": MutationType.PROMPT,
+            "mutated_content": json.dumps(
+                {"target_node": "execute", "suffixes": ["Be terse."]}
+            ),
+        }
+        label = classify_payload(proposal)
+        assert "json-object" in label
+        assert "target_node" in label  # the structured shape the parser pulls
+
+    def test_prompt_json_array_is_unparsable(self) -> None:
+        # A JSON array is the ONE PROMPT shape the gate drops (not a {…} dict).
+        proposal = {
+            "mutation_type": MutationType.PROMPT,
+            "mutated_content": json.dumps(["a", "b"]),
+        }
+        label = classify_payload(proposal)
+        assert "json-array" in label
+        assert "None" in label  # parse_prompt_payload → None
+
+    def test_prompt_free_text_is_promotable_not_dropped(self) -> None:
+        # Regression anchor: free-text whole-file rewrite IS promotable now (the
+        # parser treats the whole block as one suffix). The old script's "gate
+        # cannot promote" label was stale after the free-text fix.
+        proposal = {
+            "mutation_type": MutationType.PROMPT,
+            "mutated_content": "You are a meticulous execute node. Always emit JSON.",
+        }
+        label = classify_payload(proposal)
+        assert "free-text" in label
+        assert "one promoted suffix" in label
+        assert "cannot promote" not in label  # the stale framing is gone
+
+    def test_prompt_markup_script_is_free_text_variant(self) -> None:
+        proposal = {
+            "mutation_type": MutationType.PROMPT,
+            "mutated_content": "<system>\nYou are execute.\n</system>",
+        }
+        label = classify_payload(proposal)
+        assert "markup-script" in label
+        assert "one promoted suffix" in label  # still a promotable free-text shape
+
+    def test_code_payload_is_module_rewrite(self) -> None:
+        proposal = {
+            "mutation_type": MutationType.CODE,
+            "mutated_content": "def f():\n    return 42\n",
+            "target_path": "graph/nodes/execute.py",
+        }
+        label = classify_payload(proposal)
+        assert "code" in label and "module rewrite" in label
+        assert "shadow target_path" in label  # parse_code_payload target
+
+    def test_unhandled_type_has_no_parser(self) -> None:
+        # TOOL/WORKFLOW/MEMORY/etc. reach live via other paths (DB registry,
+        # shadow repo) — the promotion gate has no parser for them.
+        proposal = {
+            "mutation_type": MutationType.TOOL,
+            "mutated_content": "register_tool(name='x', ...)",
+        }
+        label = classify_payload(proposal)
+        assert "no promotion parser" in label
+        assert "tool" in label
+
+    def test_empty_content_is_reported_empty_not_free_text(self) -> None:
+        # An empty mutation is not promotable regardless of type — classify must
+        # not mislabel it "free-text → one promoted suffix".
+        for blank in ("", "   ", "\n\t"):
+            proposal = {"mutation_type": MutationType.PROMPT, "mutated_content": blank}
+            assert "empty" in classify_payload(proposal)
+
+    def test_non_str_content_does_not_crash(self) -> None:
+        # Defensive: a malformed row with non-string mutated_content classifies
+        # as empty rather than raising (the proposal comes from a DB row).
+        proposal = {"mutation_type": MutationType.PROMPT, "mutated_content": None}
+        assert "empty" in classify_payload(proposal)
+
+    def test_label_matches_actual_parser_outcome_for_each_shape(self) -> None:
+        # Cross-check: the label's promotability verdict agrees with what the real
+        # parser returns for the SAME proposal (json-object parses; array does not).
+        good = {
+            "mutation_type": MutationType.PROMPT,
+            "mutated_content": json.dumps({"target_node": "plan", "suffixes": ["x"]}),
+        }
+        bad = {
+            "mutation_type": MutationType.PROMPT,
+            "mutated_content": json.dumps(["x"]),
+        }
+        assert parse_prompt_payload(good) is not None
+        assert "None" not in classify_payload(good)
+        assert parse_prompt_payload(bad) is None
+        assert "None" in classify_payload(bad)
+

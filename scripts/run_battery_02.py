@@ -39,10 +39,27 @@ from typing import Any
 
 from sqlalchemy import text
 
-# Reuse the exact SQL the counts probe uses (same scripts/ dir) — single source
-# of truth for which tables the rubric measures.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _battery_counts import _QUERIES as COUNT_QUERIES  # noqa: E402
+# Tables the battery rubric measures (was imported from the throwaway
+# _battery_counts.py — inlined here so run_battery_02.py is self-contained and
+# no longer depends on a file slated for deletion).
+COUNT_QUERIES: dict[str, str] = {
+    "warm_memories": "SELECT count(*) FROM warm_memories",
+    "cold_memories": "SELECT count(*) FROM cold_memories",
+    "cold_embeddings_nonnull": (
+        "SELECT count(*) FROM cold_memories WHERE embedding IS NOT NULL"
+    ),
+    "memory_embeddings": "SELECT count(*) FROM memory_embeddings",
+    "cost_ledger_rows": "SELECT count(*) FROM cost_ledger",
+    "cost_total_tokens": "SELECT coalesce(sum(total_tokens),0) FROM cost_ledger",
+    "cost_total_usd": "SELECT coalesce(sum(cost_usd),0) FROM cost_ledger",
+    "tool_registrations": "SELECT count(*) FROM tool_registrations",
+    "tool_versions": "SELECT count(*) FROM tool_versions",
+    "sub_agent_definitions": "SELECT count(*) FROM sub_agent_definitions",
+    "sub_agent_runs": "SELECT count(*) FROM sub_agent_runs",
+    "mutations": "SELECT count(*) FROM mutations",
+    "mutation_chains": "SELECT count(*) FROM mutation_chains",
+    "evolution_telemetry": "SELECT count(*) FROM evolution_telemetry",
+}
 
 from src.db.session import close_db, get_session  # noqa: E402
 

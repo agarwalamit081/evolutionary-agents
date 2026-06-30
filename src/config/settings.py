@@ -1771,6 +1771,18 @@ class SchedulerSettings(BaseSettings):
     # cheap one-spec plumbing smoke that does not run the full $1.50 battery).
     # Env: SCHEDULER_SPEC_LIMIT.
     spec_limit: int = 0  # Env: SCHEDULER_SPEC_LIMIT
+    # DAG-release poll interval (#575): how often ``enqueue_battery`` re-checks
+    # whether a dependent goal's upstreams have reached terminal status. Default
+    # 30s — a cross-query goal waits at most one poll past its upstream's
+    # completion. Env: SCHEDULER_RELEASE_POLL_S.
+    release_poll_s: float = 30.0  # Env: SCHEDULER_RELEASE_POLL_S
+    # DAG-release overall deadline (#575): the bound on how long the nightly fire
+    # will wait for upstreams to finish before enqueuing remaining dependents
+    # anyway (a missing upstream → honest low score, the correct degraded point).
+    # Default 4h (14400s) — well under the 24h status-hash TTL and clear of the
+    # next night's fire; keeps a stuck/never-terminal status from hanging the
+    # ``max_instances=1`` job. Env: SCHEDULER_RELEASE_WAIT_S.
+    release_wait_s: float = 14400.0  # Env: SCHEDULER_RELEASE_WAIT_S
 
     model_config = SettingsConfigDict(
         # env_prefix maps the documented SCHEDULER_* vars to these fields:

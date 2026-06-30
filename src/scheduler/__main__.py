@@ -64,7 +64,13 @@ async def _run() -> int:
     # Reuse the worker's stream/group names so enqueued jobs land in the EXACT
     # stream the worker drains — no separate producer path to drift.
     queue = RunsQueue(redis_client, settings.worker)
-    enqueuer = BatteryEnqueuer(queue, sched_settings)
+    # RunStatusStore lets the enqueuer poll each goal's terminal status for the
+    # cross-query DAG-release (#575): a dependent is held until its upstream is
+    # done. Constructed from the SAME redis + worker settings the queue uses.
+    from src.worker.status import RunStatusStore  # noqa: PLC0415
+
+    status_store = RunStatusStore(redis_client, settings.worker)
+    enqueuer = BatteryEnqueuer(queue, sched_settings, status_store=status_store)
     scheduler = make_battery_scheduler(enqueuer, sched_settings)
 
     # Phase 2 C1f: the nightly curve regression→rollback gate. Registers on the

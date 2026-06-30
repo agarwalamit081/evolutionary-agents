@@ -59,6 +59,29 @@ class RunJob(BaseModel):
             "0 disables even if the worker default is set."
         ),
     )
+    results_per_run_subdir: bool | None = Field(
+        default=None,
+        description=(
+            "Override RESULTS_PER_RUN_SUBDIR for this run alone. None (default) keeps "
+            "the global setting (per-run isolation ON for ad-hoc/CLI). The scheduled "
+            "battery sets False so its cross-dependent goals (q02←q01, q04←q1-3, "
+            "q06←q05) share the flat results root their hardcoded paths expect — raw "
+            "tool reads (``cat results/q01/...``) then resolve to a sibling goal's "
+            "real output. Per-run fencing (the #574 contamination fix) stays active "
+            "for every non-battery run; the battery's integrity comes from its "
+            "pre-run stale-clear + topological DAG ordering instead."
+        ),
+    )
+    clear_flat_subdirs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Flat ``<results_root>/<sub>`` dirs the worker clears before a fresh "
+            "run (battery flat-root mode only). Each battery goal lists its own "
+            "``qNN`` write-dir so a prior night's differing file set can't linger "
+            "and be read by a dependent or scored as this run's output. Empty "
+            "(default) for every non-battery run → no-op."
+        ),
+    )
 
 
 class RunStatus(BaseModel):

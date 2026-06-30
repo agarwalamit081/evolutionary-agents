@@ -538,3 +538,57 @@ class TestCleanRunSubdir:
         (results / "real").mkdir(parents=True, exist_ok=True)
         assert _paths.clean_run_subdir("../real") is False
         assert (results / "real").exists()
+
+
+class TestClearFlatResultsSubdirs:
+    """clear_flat_results_subdirs: battery flat-root pre-run self-clear (#575)."""
+
+    def test_clears_each_listed_subdir_and_returns_count(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Removes each results/<sub>, leaves siblings, returns how many went."""
+        _install_roots(monkeypatch, tmp_path)
+        results = tmp_path / "results"
+        for sub in ("q01", "q02", "q03"):
+            (results / sub).mkdir(parents=True, exist_ok=True)
+            (results / sub / "out.csv").write_text("x")
+        (results / "q09").mkdir(parents=True, exist_ok=True)  # not in list → kept
+
+        cleared = _paths.clear_flat_results_subdirs(["q01", "q02", "q03"])
+
+        assert cleared == 3
+        for sub in ("q01", "q02", "q03"):
+            assert not (results / sub).exists()
+        # Untargeted sibling + the shared root survive.
+        assert (results / "q09").exists()
+        assert results.exists()
+
+    def test_empty_list_is_a_noop(self, monkeypatch, tmp_path) -> None:
+        """Non-battery runs pass [] → nothing cleared, returns 0."""
+        _install_roots(monkeypatch, tmp_path)
+        results = tmp_path / "results"
+        (results / "q01").mkdir(parents=True, exist_ok=True)
+        assert _paths.clear_flat_results_subdirs([]) == 0
+        assert (results / "q01").exists()
+
+    def test_refuses_unsafe_name_without_touching_target(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A traversal name is skipped (not deleted); a valid one still clears."""
+        _install_roots(monkeypatch, tmp_path)
+        results = tmp_path / "results"
+        (results / "real").mkdir(parents=True, exist_ok=True)
+        (results / "q01").mkdir(parents=True, exist_ok=True)
+
+        # "../real" is refused; "q01" still clears. Count reflects only the valid one.
+        cleared = _paths.clear_flat_results_subdirs(["../real", "q01"])
+        assert cleared == 1
+        assert (results / "real").exists()  # traversal target untouched
+        assert not (results / "q01").exists()
+
+    def test_absent_subdirs_count_as_zero(self, monkeypatch, tmp_path) -> None:
+        """A subdir that never existed is not an error; only real removals count."""
+        _install_roots(monkeypatch, tmp_path)
+        results = tmp_path / "results"
+        (results / "q01").mkdir(parents=True, exist_ok=True)
+        assert _paths.clear_flat_results_subdirs(["q01", "q99"]) == 1

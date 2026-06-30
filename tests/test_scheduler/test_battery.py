@@ -19,12 +19,15 @@ from src.config.settings import SchedulerSettings
 from src.eval.golden import BATTERY04_GOALS
 from src.runner import _resolve_eval_spec_id, _strip_date_suffix
 from src.scheduler.battery import (
+    BATTERY_DEPENDENCIES,
     BatteryEnqueuer,
+    _flat_clear_subdirs,
+    _spec_id_from_run,
     build_battery_jobs,
     build_run_id,
     make_battery_scheduler,
 )
-from src.worker.schema import RunJob
+from src.worker.schema import JobStatus, RunJob, RunStatus
 
 
 # ── Pure builders ─────────────────────────────────────────────────────
@@ -199,3 +202,158 @@ def test_make_battery_scheduler_registers_single_cron_job() -> None:
     job = jobs[0]
     assert job.id == "turing-battery"
     assert isinstance(job.trigger, CronTrigger)
+
+
+# ── Cross-query DAG release (#575) ───────────────────────────────────
+
+
+class TestFlatClearSubdir:
+    """_flat_clear_subdir: derive a goal's flat results/<qNN>/ write-dir."""
+
+    def test_derives_single_qnn_from_real_spec(self) -> None:
+        q01 = next(s for s in BATTERY04_GOALS if s.spec_id == "battery04_q01")
+        # q01 deliverables are results/q01/normalized.csv + results/q01/summary.json
+        assert _flat_clear_subdirs(q01) == ["q01"]
+
+    def test_derives_for_every_battery_goal(self) -> None:
+        """Every battery goal writes under exactly one results/<qNN>/ dir."""
+        for spec in BATTERY04_GOALS:
+            subs = _flat_clear_subdirs(spec)
+            assert len(subs) == 1, f"{spec.spec_id} should clear one dir, got {subs}"
+            assert subs[0].startswith("q")
+
+    def test_empty_when_no_results_deliverable(self) -> None:
+        from src.eval.models import GoalSpec
+
+        spec = GoalSpec(
+            spec_id="x", name="x", goal_text="g", expected_deliverables=["workspace/f.txt"]
+        )
+        assert _flat_clear_subdirs(spec) == []
+
+
+class TestSpecIdFromRun:
+    def test_strips_compact_date_suffix(self) -> None:
+        assert _spec_id_from_run("battery04_q02-20260622") == "battery04_q02"
+
+    def test_no_suffix_returns_as_is(self) -> None:
+        assert _spec_id_from_run("battery04_q02") == "battery04_q02"
+
+
+class TestBatteryJobFlatRoot:
+    """build_battery_jobs sets the flat-root + self-clear fields (#575)."""
+
+    def test_jobs_use_flat_root_and_self_clear(self) -> None:
+        settings = SchedulerSettings(_env_file=None)
+        jobs = build_battery_jobs(BATTERY04_GOALS, settings, "20260622")
+        assert len(jobs) == len(BATTERY04_GOALS)
+        for spec, job in zip(BATTERY04_GOALS, jobs, strict=True):
+            # Battery shares the flat results root so cross-query reads resolve.
+            assert job.results_per_run_subdir is False
+            # Each goal self-clears its own flat write-dir pre-run.
+            assert job.clear_flat_subdirs == _flat_clear_subdirs(spec)
+
+
+class _ProgressiveStatusStore:
+    """Fake RunStatusStore: a run flips to COMPLETED after ``flip_after`` polls.
+
+    Models a real worker finishing an upstream some polls after it was enqueued,
+    so a dependent that polls it early sees NOT-terminal and waits — the exact
+    race the DAG release exists to prevent.
+    """
+
+    def __init__(self, flip_after: dict[str, int]) -> None:
+        self._flip_after = dict(flip_after)
+        self.polls: dict[str, int] = {}
+
+    async def get(self, run_id: str) -> RunStatus | None:
+        n = self.polls.get(run_id, 0) + 1
+        self.polls[run_id] = n
+        if run_id in self._flip_after and n >= self._flip_after[run_id]:
+            return RunStatus(run_id=run_id, thread_id=f"api-{run_id}", status=JobStatus.COMPLETED)
+        return None  # queued / running / unknown → not terminal
+
+
+class _NeverTerminalStore:
+    """Fake store: nothing ever reaches terminal (drives the deadline fallback)."""
+
+    async def get(self, _run_id: str) -> RunStatus | None:
+        return None
+
+
+class TestBatteryDagRelease:
+    """enqueue_battery: topological release + deadline fallback (#575)."""
+
+    @pytest.mark.asyncio
+    async def test_dependents_release_only_after_upstream_terminal(self) -> None:
+        fake = _FakeQueue()
+        settings = SchedulerSettings(
+            _env_file=None, release_poll_s=0.0, release_wait_s=5.0
+        )
+        # Upstreams that something waits on flip terminal after 2 polls.
+        store = _ProgressiveStatusStore(
+            {
+                "battery04_q01-20260622": 2,
+                "battery04_q02-20260622": 2,
+                "battery04_q03-20260622": 2,
+                "battery04_q05-20260622": 2,
+            }
+        )
+        enqueuer = BatteryEnqueuer(fake, settings, status_store=store)  # type: ignore[arg-type]
+
+        ids = await enqueuer.enqueue_battery("20260622")
+
+        # Every goal eventually enqueued, one entry id each.
+        assert len(fake.enqueued) == len(BATTERY04_GOALS)
+        assert all(eid for eid in ids)
+        run_ids = [j.run_id for j in fake.enqueued]
+
+        def idx(spec_id: str) -> int:
+            return run_ids.index(f"{spec_id}-20260622")
+
+        # A dependent is enqueued AFTER every upstream it reads.
+        for dependent, upstreams in BATTERY_DEPENDENCIES.items():
+            for up in upstreams:
+                assert idx(up) < idx(dependent), (
+                    f"{dependent} (idx {idx(dependent)}) must follow {up} "
+                    f"(idx {idx(up)}); order was {run_ids}"
+                )
+        # q01 was polled repeatedly (the release WAITED for it), not once.
+        assert store.polls["battery04_q01-20260622"] >= 2
+
+    @pytest.mark.asyncio
+    async def test_deadline_enqueues_remaining_when_upstream_never_lands(self) -> None:
+        """If an upstream status never lands (workers down), the deadline still
+        enqueues the dependents — they honestly fail on missing data, the
+        correct degraded curve point rather than a hung nightly fire."""
+        fake = _FakeQueue()
+        settings = SchedulerSettings(
+            _env_file=None, release_poll_s=0.0, release_wait_s=0.0
+        )
+        enqueuer = BatteryEnqueuer(
+            fake, settings, status_store=_NeverTerminalStore()  # type: ignore[arg-type]
+        )
+
+        ids = await enqueuer.enqueue_battery("20260622")
+
+        # Roots enqueue in phase 1; dependents enqueue via the deadline fallback.
+        assert len(fake.enqueued) == len(BATTERY04_GOALS)
+        assert all(eid for eid in ids)
+        run_ids = {j.run_id for j in fake.enqueued}
+        # A cross-query dependent that would otherwise wait forever is present.
+        assert "battery04_q04-20260622" in run_ids
+
+    @pytest.mark.asyncio
+    async def test_no_status_store_falls_back_to_all_at_once(self) -> None:
+        """Legacy/test path (no store): original all-at-once enqueue, in order."""
+        fake = _FakeQueue()
+        settings = SchedulerSettings(_env_file=None)
+        enqueuer = BatteryEnqueuer(fake, settings)  # type: ignore[arg-type] — no store
+
+        ids = await enqueuer.enqueue_battery("20260622")
+
+        assert len(fake.enqueued) == len(BATTERY04_GOALS)
+        # All-at-once preserves spec order (the pre-#575 behavior).
+        assert [j.run_id for j in fake.enqueued] == [
+            f"{s.spec_id}-20260622" for s in BATTERY04_GOALS
+        ]
+        assert ids == [f"id-{i}" for i in range(1, len(BATTERY04_GOALS) + 1)]

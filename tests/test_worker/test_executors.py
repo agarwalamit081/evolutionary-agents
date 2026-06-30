@@ -81,3 +81,55 @@ class TestDefaultAgentExecutorSeam:
         assert captured["max_iterations"] == 7
         assert captured["no_evolution"] is True
         assert captured["model"] == "glm-4.7-flash"
+
+    @pytest.mark.asyncio
+    async def test_forwards_results_per_run_subdir_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The battery's flat-root opt-out (#575) reaches ``execute_run``."""
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr(executors, "execute_run", _recorder(captured))
+
+        await executors.default_agent_executor(
+            RunJob(run_id="battery04_q02-20260630", goal="g", results_per_run_subdir=False)
+        )
+
+        assert captured.get("results_per_run_subdir") is False
+
+    @pytest.mark.asyncio
+    async def test_clears_flat_subdirs_before_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A battery job's flat write-dir is cleared on the worker BEFORE the run
+        (#575) — the worker mounts the results volume (the scheduler does not)."""
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr(executors, "execute_run", _recorder(captured))
+        cleared: list[list[str]] = []
+        monkeypatch.setattr(
+            executors,
+            "clear_flat_results_subdirs",
+            lambda subs: (cleared.append(subs), 0)[1],  # sync; record + return 0
+        )
+
+        await executors.default_agent_executor(
+            RunJob(run_id="battery04_q02-20260630", goal="g", clear_flat_subdirs=["q02"])
+        )
+
+        assert cleared == [["q02"]]  # cleared exactly once, with the job's dirs
+
+    @pytest.mark.asyncio
+    async def test_skips_clear_when_no_flat_subdirs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-battery run (default empty list) never invokes the clear."""
+        monkeypatch.setattr(executors, "execute_run", _recorder({}))
+        cleared: list[list[str]] = []
+        monkeypatch.setattr(
+            executors,
+            "clear_flat_results_subdirs",
+            lambda subs: (cleared.append(subs), 0)[1],
+        )
+
+        await executors.default_agent_executor(RunJob(run_id="r1", goal="g"))
+
+        assert cleared == []

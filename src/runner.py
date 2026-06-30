@@ -189,6 +189,7 @@ async def execute_run(
     resume: bool = False,
     origin: str = "cli",
     on_progress: RunProgressCallback | None = None,
+    results_per_run_subdir: bool | None = None,
 ) -> dict:
     """Run the agent graph to completion.
 
@@ -217,6 +218,13 @@ async def execute_run(
             ``None`` (the CLI path), the run uses the atomic ``ainvoke`` path
             unchanged. The callback is observability-only — a raise inside it is
             caught and logged, never aborting the run.
+        results_per_run_subdir: Optional per-run override of
+            ``AgentSettings.results_per_run_subdir``. ``None`` (default) keeps the
+            global setting. The scheduled battery passes ``False`` so its
+            cross-dependent goals share the flat results root their hardcoded
+            paths expect (see RunJob.results_per_run_subdir). The prior value is
+            restored in ``finally`` so a long-lived worker process never leaks the
+            override into the next (ad-hoc) run.
 
     Returns:
         Final agent state as a dict.
@@ -264,6 +272,19 @@ async def execute_run(
     # Create initial state. thread_id is keyed on run_id when given so a later
     # --resume <run_id> reuses the same thread and continues from its checkpoint.
     thread_id = _thread_id_for_run(run_id, goal_text, origin=origin)
+    # Optional per-run override of results isolation. The scheduled battery opts
+    # OUT (flat shared root) so its cross-dependent goals resolve each other's
+    # hardcoded paths. Captured for restore in finally — a long-lived worker
+    # process must never leak the override into the next (ad-hoc) run. Applied
+    # before set_active_run_id so _subdir_active() reads the overridden value
+    # throughout the run.
+    prior_subdir = settings.agent.results_per_run_subdir
+    if results_per_run_subdir is not None and results_per_run_subdir != prior_subdir:
+        settings.agent.results_per_run_subdir = results_per_run_subdir
+        logger.info(
+            f"Results isolation override for run {run_id!r}: "
+            f"{prior_subdir} → {results_per_run_subdir}"
+        )
     # Phase 7: bind the run_id so file_writer/execute route this run's
     # deliverables under results_root/<run_id>/ and reads fall back to flat.
     # None (no --run-id) leaves resolution flat — legacy, non-regressing.
@@ -517,6 +538,17 @@ async def execute_run(
 
         logger.info("Agent execution complete")
     finally:
+        # Restore the results-isolation override (applied above) so a long-lived
+        # worker process never leaks a battery's flat-root opt-out into the next
+        # (ad-hoc) run. Never raises out of finally.
+        if (
+            results_per_run_subdir is not None
+            and settings.agent.results_per_run_subdir != prior_subdir
+        ):
+            try:
+                settings.agent.results_per_run_subdir = prior_subdir
+            except Exception as e:  # noqa: BLE001 — best-effort restore
+                logger.debug(f"Results isolation restore skipped: {e}")
         # Close the run-scoped cost-tracker session; never raise out of finally.
         if cost_session_cm is not None:
             try:

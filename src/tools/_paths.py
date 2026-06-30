@@ -192,6 +192,24 @@ def clean_run_subdir(run_id: str) -> bool:
     return True
 
 
+def clear_flat_results_subdirs(subdirs: list[str]) -> int:
+    """Delete flat ``<results_root>/<sub>`` dirs (best-effort, never raises).
+
+    The scheduled battery's flat-root mode (#575): each cross-dependent goal
+    self-clears its own ``results/<qNN>/`` write-dir before a fresh run so a
+    prior night's leftover files (a differing file set) don't linger and get
+    read by a dependent or scored as this run's output. Each name reuses
+    ``clean_run_subdir``'s single-safe-component + traversal-safety checks, so a
+    bad name is refused (logged DEBUG) rather than deleting the wrong tree.
+    Non-battery runs pass ``[]`` → no-op. Returns how many subdirs were removed.
+    """
+    removed = 0
+    for sub in subdirs:
+        if clean_run_subdir(sub):
+            removed += 1
+    return removed
+
+
 def _strip_names(*extra: str) -> set[str]:
     agent = _agent()
     return {

@@ -150,6 +150,121 @@ class TestRunConsumerCore:
         assert (await store.get("b")).status is JobStatus.COMPLETED  # type: ignore[union-attr]
 
 
+class TestRunConsumerTerminalGuard:
+    """Fix A1: a DUPLICATE stream entry for a run already in a terminal state is
+    acked-and-deleted WITHOUT re-running the goal. This is the q04/q06
+    redelivery-forever fix — a completed run that lost its ack used to re-execute
+    from checkpoint on every duplicate. Terminal-but-retryable ``FAILED`` is
+    intentionally excluded so transient failures stay redeliverable."""
+
+    async def _consumer_with_poison_executor(
+        self, fake_redis, worker_settings
+    ) -> tuple[RunConsumer, RunsQueue, RunStatusStore, list[int]]:
+        """A consumer whose executor MUST NEVER run — it appends to ``calls`` and
+        raises. If the terminal guard works, ``calls`` stays empty."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        calls: list[int] = []
+
+        async def executor(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
+            calls.append(1)
+            raise AssertionError("terminal run must NOT re-execute the executor")
+
+        consumer = RunConsumer(queue, store, executor, worker_settings)
+        await queue.ensure_group()
+        return consumer, queue, store, calls
+
+    async def test_completed_duplicate_skipped_not_rerun(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """A run that already reached COMPLETED on a prior delivery is acked +
+        deleted; the executor is never invoked."""
+        run_id = "dup-done"
+        consumer, queue, store, calls = await self._consumer_with_poison_executor(
+            fake_redis, worker_settings
+        )
+        job = RunJob(run_id=run_id, goal="g")
+        # Simulate the prior completed delivery that lost its XACK.
+        await store.mark(
+            run_id,
+            RunConsumer.thread_id_for(run_id),
+            JobStatus.COMPLETED,
+            final_output="already done",
+            is_complete=True,
+        )
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()  # claim into PEL
+
+        acked = await consumer._process(entry_id, job)
+
+        assert acked is True  # the duplicate entry was removed
+        assert await queue.pending_count() == 0
+        assert calls == []  # executor never ran
+        # The terminal record is unchanged (still COMPLETED, not re-RUNNING).
+        rec = await store.get(run_id)
+        assert rec is not None
+        assert rec.status is JobStatus.COMPLETED
+        assert rec.final_output == "already done"
+
+    async def test_cancelled_duplicate_skipped(self, fake_redis, worker_settings) -> None:
+        run_id = "dup-can"
+        consumer, queue, store, calls = await self._consumer_with_poison_executor(
+            fake_redis, worker_settings
+        )
+        await store.mark(
+            run_id, RunConsumer.thread_id_for(run_id), JobStatus.CANCELLED
+        )
+        entry_id = await queue.enqueue(RunJob(run_id=run_id, goal="g"))
+        await queue.read_new()
+
+        assert await consumer._process(entry_id, RunJob(run_id=run_id, goal="g")) is True
+        assert calls == []
+        assert (await store.get(run_id)).status is JobStatus.CANCELLED  # type: ignore[union-attr]
+
+    async def test_budget_exhausted_duplicate_skipped(
+        self, fake_redis, worker_settings
+    ) -> None:
+        run_id = "dup-budget"
+        consumer, queue, store, calls = await self._consumer_with_poison_executor(
+            fake_redis, worker_settings
+        )
+        await store.mark(
+            run_id, RunConsumer.thread_id_for(run_id), JobStatus.BUDGET_EXHAUSTED
+        )
+        entry_id = await queue.enqueue(RunJob(run_id=run_id, goal="g"))
+        await queue.read_new()
+
+        assert await consumer._process(entry_id, RunJob(run_id=run_id, goal="g")) is True
+        assert calls == []
+
+    async def test_failed_run_not_skipped_stays_retryable(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """``FAILED`` is excluded from the skip set: a prior failure stays
+        redeliverable (bounded by the dead-letter cap) — the guard must not trap
+        retryable failures."""
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        run_id = "dup-fail"
+        re_runs: list[int] = []
+
+        async def executor(_j: RunJob, _on_progress: Any = None) -> dict[str, Any]:
+            re_runs.append(1)
+            return _ok_result()  # succeeds on the redelivery
+
+        consumer = RunConsumer(queue, store, executor, worker_settings)
+        await queue.ensure_group()
+        await store.mark(run_id, RunConsumer.thread_id_for(run_id), JobStatus.FAILED)
+        entry_id = await queue.enqueue(RunJob(run_id=run_id, goal="g"))
+        await queue.read_new()
+
+        acked = await consumer._process(entry_id, RunJob(run_id=run_id, goal="g"))
+
+        assert acked is True  # re-processed and completed
+        assert re_runs == [1]  # the executor DID run (not skipped)
+        assert (await store.get(run_id)).status is JobStatus.COMPLETED  # type: ignore[union-attr]
+
+
 class TestRunConsumerRecovery:
     async def test_crashed_job_is_reclaimed_and_retried_by_peer(
         self, fake_redis, worker_settings

@@ -122,6 +122,43 @@ class RunConsumer:
             self._renew_lease(run_id, token, max(1.0, self._s.lock_ttl_s / 3.0))
         )
         try:
+            # Hoisted so the outer ``finally`` can cancel a still-running
+            # ``exec_task`` if ``_process`` returns early (terminal guard below)
+            # or is cancelled while parked in ``asyncio.wait``.
+            exec_task: asyncio.Task[dict[str, Any]] | None = None
+
+            # Idempotent terminal guard (Fix A1): a DUPLICATE stream entry for a
+            # run that ALREADY reached a terminal state on a prior delivery must
+            # NOT re-execute the goal. Without this, a duplicate entry re-ran a
+            # FINISHED run from its checkpoint on every redelivery (the q04/q06
+            # pathology: a completed run re-executed for minutes per duplicate,
+            # accumulating cost on a goal already done). ``FAILED`` is
+            # intentionally excluded — a transient failure stays retryable up to
+            # the dead-letter cap. Best-effort: a status-store miss (None / Redis
+            # hiccup) falls through to normal processing.
+            #
+            # Gated behind the per-run lease (``lock_ttl_s > 0``): the lease and
+            # this guard are BOTH claim-eligibility dedup gates, so the operator's
+            # ``lock_ttl_s <= 0`` opt-out (legacy single-worker mode) disables BOTH
+            # — preserving the documented "no skip" contract of lease-off mode.
+            # Production always runs with the lease on, so the redelivery-forever
+            # fix (q04/q06) is active where it matters.
+            if self._s.lock_ttl_s > 0:
+                prior = await self._status.get(run_id)
+                if prior is not None and prior.status in (
+                    JobStatus.COMPLETED,
+                    JobStatus.CANCELLED,
+                    JobStatus.BUDGET_EXHAUSTED,
+                    JobStatus.TIMEOUT,
+                ):
+                    logger.info(
+                        f"Run {run_id} ({entry_id}) already terminal "
+                        f"({prior.status.value}); acking duplicate entry without "
+                        f"re-running"
+                    )
+                    acked = await self._queue.ack_and_delete([entry_id])
+                    return acked > 0  # terminal — entry removed; lease released in finally
+
             # Surface the per-run output folder through the status hash so a
             # caller discovers the artifact location (``results/<run_id>/``)
             # without guessing — deliverables live in a per-run subdir, not the
@@ -158,11 +195,10 @@ class RunConsumer:
                 if await self._status.is_cancelled(run_id):
                     raise RunCancelled(f"cancelled via POST /runs/{run_id}/cancel")
 
-            # Hoisted so the outer ``finally`` can cancel a still-running
-            # ``exec_task`` if ``_process`` itself is cancelled (e.g. a
-            # serve_forever shutdown) while the supervisor is parked in
-            # ``asyncio.wait`` — without this the executor task would leak.
-            exec_task: asyncio.Task[dict[str, Any]] | None = None
+            # ``exec_task`` was hoisted to the top of this ``try`` (above the
+            # terminal guard) so both the guard's early ``return`` and a
+            # serve_forever shutdown/cancel can be cleaned up by the outer
+            # ``finally``. Do NOT re-declare it here.
             try:
                 # ── Out-of-band run-timeout watchdog (Phase 1) ──────────────────
                 # The run is RACED: ``exec_task`` vs ``_watchdog``. ``_watchdog``

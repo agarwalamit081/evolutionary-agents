@@ -70,6 +70,13 @@ from src.runner import _create_gateway, execute_run
 @click.option("--export", "curve_export", default=None, help="With --capability-curve: write JSON/CSV (.json/.csv by suffix) and exit")
 @click.option("--plot", "curve_plot", default=None, help="With --capability-curve: write a PNG of the battery trend (matplotlib optional)")
 @click.option(
+    "--curve-model",
+    "curve_model",
+    default=None,
+    help="With --capability-curve: slice the trend + verdict to one producer model (e.g. glm-4.7); "
+    "default is the blended system-wide trend",
+)
+@click.option(
     "--aflow",
     "run_aflow",
     is_flag=True,
@@ -204,6 +211,7 @@ def main(
     curve_until: str | None,
     curve_export: str | None,
     curve_plot: str | None,
+    curve_model: str | None,
     run_retrieval_eval: bool,
     retrieval_k: int | None,
     run_aflow: bool,
@@ -314,6 +322,7 @@ def main(
                 until=curve_until,
                 export=curve_export,
                 plot=curve_plot,
+                model=curve_model,
             )
         )
         return
@@ -803,13 +812,16 @@ async def _run_capability_curve(
     until: str | None,
     export: str | None,
     plot: str | None,
+    model: str | None = None,
 ) -> None:
     """Print the battery capability curve + regression verdict (read-only).
 
     Pure read of ``eval_results``: the per-night battery mean, the latest per-goal
     score, and the grounded regression verdict — the measured-self-improvement
     evidence. No LLM, no DB writes. ``--export`` writes JSON/CSV by suffix;
-    ``--plot`` writes a PNG (matplotlib optional).
+    ``--plot`` writes a PNG (matplotlib optional). ``model`` (the ``--curve-model``
+    flag) slices the trend + verdict to one producer model so the curve reads as a
+    model-specific self-improvement trend rather than the blended system-wide one.
     """
     from src.eval.curve import CapabilityCurve  # noqa: PLC0415
     from src.eval.store import EvalStore  # noqa: PLC0415
@@ -817,10 +829,11 @@ async def _run_capability_curve(
     win_since = _parse_window(since, end_of_day=False)
     win_until = _parse_window(until, end_of_day=True)
     curve = CapabilityCurve(EvalStore())
-    snap = await curve.snapshot(since=win_since, until=win_until)
+    snap = await curve.snapshot(since=win_since, until=win_until, model=model)
 
+    title = f"📈 Capability curve — producer {model}" if model else "📈 Capability curve — nightly battery mean correctness"
     click.echo("=" * 60)
-    click.echo("📈 Capability curve — nightly battery mean correctness")
+    click.echo(title)
     click.echo("=" * 60)
 
     battery = snap["battery_trend"]

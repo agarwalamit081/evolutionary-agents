@@ -262,6 +262,26 @@ class LLMGateway:
         """Clear the accumulated cost records."""
         self._cost_records.clear()
 
+    def resolve_model(
+        self,
+        complexity: TaskComplexity,
+        node: str | None = None,
+    ) -> str:
+        """Resolve the model the gateway WOULD call for (complexity, node).
+
+        Mirrors the selection in :meth:`acompletion` (pinned model wins, else
+        ``ModelRouter.route``) WITHOUT issuing a request. Used for eval
+        attribution — the verify node tags ``eval_results`` rows with the
+        producer model that actually ran the goal's execute step, so the
+        capability curve can be sliced per-model (``curve --model``). Falls back
+        to the SIMPLE tier when ``complexity`` is falsy, matching ``acompletion``.
+        """
+        if self._pinned_model is not None:
+            return self._pinned_model
+        if complexity:
+            return self._model_router.route(complexity, node=node)
+        return self._model_router.route(TaskComplexity.SIMPLE, node=node)
+
     async def cache_stats(self) -> dict[str, Any]:
         """Return prompt-cache hit/miss stats, or zeros when caching is disabled.
 

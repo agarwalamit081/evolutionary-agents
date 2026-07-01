@@ -361,7 +361,7 @@ class TestModelRouterPerNodeRouting:
     def test_deflat_complex_ne_simple_for_plan(self) -> None:
         """De-flat (findings-03 #1): a COMPLEX plan no longer collapses to the
         same model as a SIMPLE plan. With all providers keyed, COMPLEX→plan
-        resolves to its NODE_TIER_MAP primary (MODERATE glm-4.7) while
+        resolves to its NODE_TIER_MAP primary (MODERATE glm-5.1) while
         SIMPLE→plan falls to the COMPLEXITY_TIER_MAP SIMPLE default (CHEAP)."""
         from src.llm.model_router import NODE_TIER_MAP
 
@@ -372,16 +372,17 @@ class TestModelRouterPerNodeRouting:
         # COMPLEX+plan hits the NODE_TIER_MAP override primary.
         assert complex_plan == NODE_TIER_MAP[(TaskComplexity.COMPLEX, "plan")][1]
 
-    def test_execute_stays_cheap_on_complex_goal(self) -> None:
-        """Cost discipline: execute stays CHEAP even on a COMPLEX goal —
-        NODE_TIER_MAP overrides the de-flatted COMPLEX→MODERATE default so
-        tool-calling steps don't overspend. Asserted via the registry tier of
-        the returned model so it tracks the invariant, not a model name."""
-        from src.config.model_registry import MODEL_REGISTRY, ModelTier
-
+    def test_execute_upgrades_to_glm47_on_complex_goal(self) -> None:
+        """Phase-2 retier: execute on a COMPLEX/CRITICAL goal moves to the
+        MODERATE glm-4.7 — a stronger live tool-caller than the CHEAP
+        deepseek-v4-flash that previously ran every execute step. The cost
+        uplift is bounded by per-step routing (Phase 3 routes trivial/simple
+        steps back to the CHEAP tier) + RAG-over-tools, NOT by keeping execute
+        CHEAP. Pinned to the model id (not just the tier) since the retier is
+        the point."""
         router = self._all_keyed_router()
-        model = router.route(TaskComplexity.COMPLEX, node="execute")
-        assert MODEL_REGISTRY[model].tier in {ModelTier.VERY_CHEAP, ModelTier.CHEAP}
+        assert router.route(TaskComplexity.COMPLEX, node="execute") == "glm-4.7"
+        assert router.route(TaskComplexity.CRITICAL, node="execute") == "glm-4.7"
 
     def test_verify_and_reflect_complex_route_to_reasoning(self) -> None:
         """Resurrected route_reasoning caller: verify/reflect on a COMPLEX goal
@@ -480,7 +481,7 @@ class TestRoutingEnvOverrides:
     def test_node_tier_override_flips_routing(self) -> None:
         """A node-tier override redirects a (complexity, node) decision. With all
         providers keyed, COMPLEX+execute normally returns the NODE_TIER_MAP
-        primary deepseek-v4-flash; overriding ``COMPLEX:execute`` →
+        primary glm-4.7 (Phase-2 retier); overriding ``COMPLEX:execute`` →
         deepseek-v4-pro flips it."""
         from src.llm.model_router import NODE_TIER_MAP
 
@@ -488,7 +489,7 @@ class TestRoutingEnvOverrides:
             node_json='{"COMPLEX:execute": "deepseek-v4-pro"}'
         )
         # Sanity: the curated default for COMPLEX:execute is NOT the override.
-        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "deepseek-v4-flash"
+        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "glm-4.7"
         assert router.route(TaskComplexity.COMPLEX, node="execute") == "deepseek-v4-pro"
 
     def test_complexity_tier_override_flips_routing_no_node(self) -> None:
@@ -501,12 +502,13 @@ class TestRoutingEnvOverrides:
     def test_node_tier_override_wins_over_complexity_tier(self) -> None:
         """When a node-tier and a complexity-tier override name different models
         for the same decision, the more-specific node-tier wins. Here
-        ``COMPLEX:execute`` → glm-4.7 beats ``COMPLEX`` → deepseek-v4-pro."""
+        ``COMPLEX:execute`` → deepseek-v4-pro beats ``COMPLEX`` → glm-5.1
+        (both differ from the curated COMPLEX:execute primary glm-4.7)."""
         router = self._all_keyed_router(
-            node_json='{"COMPLEX:execute": "glm-4.7"}',
-            cpx_json='{"COMPLEX": "deepseek-v4-pro"}',
+            node_json='{"COMPLEX:execute": "deepseek-v4-pro"}',
+            cpx_json='{"COMPLEX": "glm-5.1"}',
         )
-        assert router.route(TaskComplexity.COMPLEX, node="execute") == "glm-4.7"
+        assert router.route(TaskComplexity.COMPLEX, node="execute") == "deepseek-v4-pro"
 
     def test_invalid_json_override_is_ignored(self) -> None:
         """Malformed override JSON is logged at DEBUG and treated as no override

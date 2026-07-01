@@ -35,13 +35,22 @@ class _FakeStore(EvalStore):
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 2000,
+        producer_model: str | None = None,
     ) -> list[dict[str, Any]]:
         wanted = set(goal_ids)
-        return [r for r in self._seed if r["goal_id"] in wanted]
+        rows = [r for r in self._seed if r["goal_id"] in wanted]
+        if producer_model is not None:
+            rows = [r for r in rows if r.get("producer_model") == producer_model]
+        return rows
 
 
 def _row(
-    goal_id: str, attempt: str, created_at: str, score: float, check: str = "check_x"
+    goal_id: str,
+    attempt: str,
+    created_at: str,
+    score: float,
+    check: str = "check_x",
+    producer_model: str | None = None,
 ) -> dict[str, Any]:
     """A row shaped like EvalStore._row_to_dict output."""
     return {
@@ -56,6 +65,7 @@ def _row(
         "skipped": False,
         "evidence": None,
         "cost_usd": 0.0,
+        "producer_model": producer_model,
         "created_at": created_at,
     }
 
@@ -231,3 +241,42 @@ def test_plot_png_renders_when_matplotlib_present(tmp_path: Path) -> None:
     ok = curve.plot_png(out, snap)
     assert ok is True
     assert out.exists() and out.stat().st_size > 0
+
+
+# ─── producer-model slicing (Phase-2 attribution) ─────────────────
+
+
+async def test_per_goal_trend_model_filter_slices_to_one_producer() -> None:
+    # Same goal+date scored by two different producers; the model filter must
+    # isolate one producer's trend so the curve reads model-specific, not blended.
+    rows = [
+        _row("battery04_q01", "2026-06-01T10:00:00+00:00_a", "2026-06-01T10:00:00+00:00", 0.9, producer_model="glm-4.7"),
+        _row("battery04_q01", "2026-06-01T11:00:00+00:00_a", "2026-06-01T11:00:00+00:00", 0.3, producer_model="deepseek-v4-flash"),
+    ]
+    curve = CapabilityCurve(_FakeStore(rows), _settings())
+
+    glm = await curve.per_goal_trend("battery04_q01", model="glm-4.7")
+    assert len(glm) == 1
+    assert glm[0].mean_score == pytest.approx(0.9)
+
+    ds = await curve.per_goal_trend("battery04_q01", model="deepseek-v4-flash")
+    assert len(ds) == 1
+    assert ds[0].mean_score == pytest.approx(0.3)
+
+    # No filter = blended (latest-attempt-per-date rule keeps the newer attempt,
+    # so the 11:00 row — deepseek — wins for that date, model=None spans both).
+    blended = await curve.per_goal_trend("battery04_q01")
+    assert len(blended) == 1
+
+
+async def test_snapshot_carries_producer_model_key() -> None:
+    rows = [_row("battery04_q01", "a", "2026-06-01T01:00:00+00:00", 0.8, producer_model="glm-4.7")]
+    curve = CapabilityCurve(_FakeStore(rows), _settings())
+    snap = await curve.snapshot(model="glm-4.7")
+    assert snap["producer_model"] == "glm-4.7"
+    # The model filter actually narrowed the fetch (the un-tagged row is excluded).
+    assert all(g["mean_score"] is not None for g in snap["latest_per_goal"] if g["goal_id"] == "battery04_q01")
+
+    unfiltered = await curve.snapshot()
+    assert unfiltered["producer_model"] is None
+

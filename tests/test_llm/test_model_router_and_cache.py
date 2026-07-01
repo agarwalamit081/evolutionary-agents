@@ -188,24 +188,27 @@ class TestNodeTierMapOverrides:
             assert node is not None
             assert model in MODEL_REGISTRY, f"{cpx.name}:{node} -> unknown {model!r}"
 
-    def test_execute_override_downgrades_complex_to_cheap(self) -> None:
-        """On a COMPLEX goal, execute stays CHEAP even though the default is MODERATE.
+    def test_execute_override_upgrades_complex_to_glm47(self) -> None:
+        """Phase-2 retier: execute on a COMPLEX goal moves to MODERATE glm-4.7.
 
-        This is the cost-discipline override documented in NODE_TIER_MAP:
-        individual execute steps are simple tool-calling, so they don't pay for
-        a Moderate model even on a complex goal.
+        The execute NODE_TIER_MAP override now explicitly pins the strong live
+        tool-caller (glm-4.7) instead of keeping execution CHEAP — the cost uplift
+        is bounded by per-step routing (Phase 3, trivial steps back to CHEAP) +
+        RAG-over-tools, not by a CHEAP execute tier.
         """
         key = (TaskComplexity.COMPLEX, "execute")
         assert key in NODE_TIER_MAP
         tier, model = NODE_TIER_MAP[key]
-        assert tier == ModelTier.CHEAP
-        assert MODEL_REGISTRY[model].tier == ModelTier.CHEAP
+        assert tier == ModelTier.MODERATE
+        assert model == "glm-4.7"
+        assert MODEL_REGISTRY[model].tier == ModelTier.MODERATE
 
-    def test_execute_tier_differs_from_complex_default(self) -> None:
-        """The execute override is genuinely DIFFERENT from the COMPLEX default tier."""
-        exec_tier = NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][0]
-        default_tier = COMPLEXITY_TIER_MAP[TaskComplexity.COMPLEX][0]
-        assert exec_tier != default_tier
+    def test_execute_override_explicitly_pins_glm47(self) -> None:
+        """The execute override is an explicit glm-4.7 pin. Post Phase-2 retier it
+        coincides with the COMPLEX complexity default (also glm-4.7), but the
+        override entry is KEPT so execute won't silently drift if the complexity
+        default ever changes — the model id is locked here, not implied."""
+        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "glm-4.7"
 
     def test_plan_tier_differs_from_or_refines_default(self) -> None:
         """The plan override for COMPLEX targets the reasoning tier (MODERATE)."""
@@ -213,9 +216,11 @@ class TestNodeTierMapOverrides:
         assert plan_tier == ModelTier.MODERATE
 
     def test_route_uses_execute_override_when_provider_armed(self) -> None:
-        """route(COMPLEX, 'execute') returns the execute-override model, not the default."""
+        """route(COMPLEX, 'execute') returns the execute-override model when its
+        provider is armed. Post Phase-2 retier the execute primary is glm-4.7
+        (provider ``zai``), so arming zai makes it resolve directly."""
         settings = _fresh_settings()
-        _arm_only(settings, "deepseek")  # deepseek-v4-flash provider
+        _arm_only(settings, "zai")  # glm-4.7 provider (Phase-2 execute primary)
         router = ModelRouter(settings)
         expected = NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1]
         assert router.route(TaskComplexity.COMPLEX, node="execute") == expected

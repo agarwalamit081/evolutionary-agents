@@ -152,6 +152,34 @@ class TestEvalStoreRecord:
             )
         assert written == 0  # non-fatal
 
+    @pytest.mark.asyncio
+    async def test_producer_model_is_stamped_on_rows(self) -> None:
+        # Phase-2 attribution: producer_model threads record_correctness ->
+        # _store_check -> EvalResult so the curve can slice per-model.
+        session = _FakeSession()
+        with patch("src.config.settings.get_settings", lambda: _enabled_settings(True)), patch(
+            "src.db.session.get_session", lambda: session
+        ):
+            written = await EvalStore().record_correctness(
+                _correctness(2),
+                goal_id="battery04_q01",
+                run_id="run-1",
+                producer_model="glm-4.7",
+            )
+        assert written == 2
+        assert all(r.producer_model == "glm-4.7" for r in session.added)
+
+    @pytest.mark.asyncio
+    async def test_producer_model_defaults_to_none(self) -> None:
+        # Nullable/additive: an unattributed write leaves the column NULL so
+        # legacy callers (and the migration's backfill-free old rows) stay valid.
+        session = _FakeSession()
+        with patch("src.config.settings.get_settings", lambda: _enabled_settings(True)), patch(
+            "src.db.session.get_session", lambda: session
+        ):
+            await EvalStore().record_correctness(_correctness(1), goal_id="g", run_id="r")
+        assert session.added[0].producer_model is None
+
 
 class TestEvalStoreQuery:
     @pytest.mark.asyncio
@@ -228,6 +256,7 @@ def _attempt_row(attempt_id: str, check_name: str) -> SimpleNamespace:
         skipped=False,
         evidence=None,
         cost_usd=0.0,
+        producer_model=None,
         created_at=None,
     )
 

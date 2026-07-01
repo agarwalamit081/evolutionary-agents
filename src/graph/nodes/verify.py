@@ -777,6 +777,22 @@ async def _run_correctness_checks(
     # Persist to the durable store (non-fatal: a DB hiccup is logged inside).
     # Attribution: eval_attempt_id tags the rows with THIS invocation so a
     # re-run of the same --run_id does not blend attempts under one run_id.
+    # Producer-model attribution (Phase-2): tag the rows with the model id that
+    # ran the goal's execute step (the SAME selection execute used — pinned model
+    # wins, else the (complexity, execute) tier) so the capability curve can be
+    # sliced per-model (``curve --model``) instead of a blended system-wide trend.
+    producer_model: str | None = None
+    if gateway is not None:
+        from src.graph.prompts import NODE_EXECUTE  # noqa: PLC0415 — local; avoid eager import
+
+        goal = state.get("current_goal")
+        complexity = (
+            goal.complexity if goal and goal.complexity else TaskComplexity.SIMPLE
+        )
+        try:
+            producer_model = gateway.resolve_model(complexity, NODE_EXECUTE)
+        except Exception:  # noqa: BLE001 — attribution is best-effort; never blocks verify
+            producer_model = None
     try:
         from src.eval.store import EvalStore
 
@@ -785,6 +801,7 @@ async def _run_correctness_checks(
             goal_id=spec.name,
             run_id=state.get("thread_id", ""),
             attempt_id=state.get("eval_attempt_id") or None,
+            producer_model=producer_model,
         )
     except Exception as exc:  # noqa: BLE001 — eval persistence must never break verify
         logger.debug("Eval store write skipped: {}", exc)

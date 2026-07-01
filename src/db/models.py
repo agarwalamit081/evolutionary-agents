@@ -1044,6 +1044,13 @@ class EvalResult(Base):
     skipped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     evidence: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0.0)
+    # Producer-model attribution (Phase-2): the model id that ran the goal's
+    # execute step, so the capability curve can be sliced per-model
+    # (``curve --model glm-4.7``) instead of reading a blended system-wide trend
+    # — the thesis ("self-improvement") is model-specific. Nullable for back-compat
+    # with legacy rows + unattributed writes (the verify node resolves it only when
+    # a gateway is present).
+    producer_model: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

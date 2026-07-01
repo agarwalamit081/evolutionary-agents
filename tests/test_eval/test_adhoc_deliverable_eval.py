@@ -76,12 +76,14 @@ def _capture_store(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         run_id: str,
         attempt_id: str | None = None,
         cost_usd: float = 0.0,
+        producer_model: str | None = None,
     ) -> int:
         calls.append(
             SimpleNamespace(
                 goal_id=goal_id,
                 run_id=run_id,
                 attempt_id=attempt_id,
+                producer_model=producer_model,
                 correctness=correctness,
             )
         )

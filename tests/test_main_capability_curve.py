@@ -58,7 +58,7 @@ def _sample_snapshot(*, regressed: bool = False, inconclusive: bool = False) -> 
 class _FakeCurve(CapabilityCurve):
     """Real export methods; ``snapshot`` returns a deterministic bundle (no DB)."""
 
-    async def snapshot(self, *, since=None, until=None):  # noqa: ANN001 — matches parent signature
+    async def snapshot(self, *, since=None, until=None, model=None):  # noqa: ANN001 — matches parent signature
         return _sample_snapshot()
 
 
@@ -106,7 +106,7 @@ class TestRunCapabilityCurve:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         class _RegCurve(_FakeCurve):
-            async def snapshot(self, *, since=None, until=None):  # noqa: ANN001
+            async def snapshot(self, *, since=None, until=None, model=None):  # noqa: ANN001
                 return _sample_snapshot(regressed=True)
 
         _patch_curve(monkeypatch, _RegCurve)
@@ -118,7 +118,7 @@ class TestRunCapabilityCurve:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         class _IncCurve(_FakeCurve):
-            async def snapshot(self, *, since=None, until=None):  # noqa: ANN001
+            async def snapshot(self, *, since=None, until=None, model=None):  # noqa: ANN001
                 return _sample_snapshot(inconclusive=True)
 
         _patch_curve(monkeypatch, _IncCurve)

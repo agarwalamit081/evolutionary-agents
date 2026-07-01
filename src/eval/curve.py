@@ -90,6 +90,7 @@ class CapabilityCurve:
         *,
         since: datetime | None = None,
         until: datetime | None = None,
+        model: str | None = None,
     ) -> list[CurvePoint]:
         """Latest-attempt-per-date mean score for one goal (ascending by date).
 
@@ -98,8 +99,14 @@ class CapabilityCurve:
         max — attempt ids are timestamp-prefixed so this == newest) and means
         their ``score``. A re-run of the same date therefore replaces, not
         blends, the earlier attempt's score.
+
+        ``model`` slices the trend to one producer model (``producer_model = m``)
+        so the curve can show a per-model self-improvement trend rather than the
+        blended system-wide one; ``None`` (default) spans all producers.
         """
-        rows = await self._store.fetch_rows([goal_id], since=since, until=until)
+        rows = await self._store.fetch_rows(
+            [goal_id], since=since, until=until, producer_model=model
+        )
         by_date: dict[date, list[dict[str, Any]]] = {}
         for row in rows:
             d = _row_date(row)
@@ -136,6 +143,7 @@ class CapabilityCurve:
         *,
         since: datetime | None = None,
         until: datetime | None = None,
+        model: str | None = None,
     ) -> list[BatteryPoint]:
         """Per-night battery mean across the 9 ``BATTERY04_GOALS`` (ascending by date).
 
@@ -143,12 +151,17 @@ class CapabilityCurve:
         mean that ran that night (only goals that ran count; ``n_goals`` records
         how many). Unioning the per-goal trends means a partial night (fewer than
         9 goals) still yields a point rather than a gap.
+
+        ``model`` restricts the trend to a single producer model's rows so the
+        curve can be read as a model-specific self-improvement trend.
         """
         from src.eval.golden import BATTERY04_GOALS  # noqa: PLC0415 — lazy; golden is a data module
 
         per_goal: dict[date, list[float]] = {}
         for spec in BATTERY04_GOALS:
-            for point in await self.per_goal_trend(spec.spec_id, since=since, until=until):
+            for point in await self.per_goal_trend(
+                spec.spec_id, since=since, until=until, model=model
+            ):
                 per_goal.setdefault(point.date, []).append(point.mean_score)
 
         return [
@@ -169,6 +182,7 @@ class CapabilityCurve:
         *,
         since: datetime | None = None,
         until: datetime | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Apply the grounded regression definition to the battery trend.
 
@@ -177,8 +191,10 @@ class CapabilityCurve:
         (best_prior - current), ``n_points``, plus the configured ``floor`` /
         ``delta_floor`` (the regression_delta threshold) for observability.
         ``inconclusive`` and ``regressed`` are mutually exclusive.
+
+        ``model`` scopes the verdict to one producer model's trend.
         """
-        points = await self.battery_trend(since=since, until=until)
+        points = await self.battery_trend(since=since, until=until, model=model)
         n = len(points)
         if n < self._min_points or n < 2:
             return {
@@ -213,15 +229,22 @@ class CapabilityCurve:
         *,
         since: datetime | None = None,
         until: datetime | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
-        """One-fetch inspection bundle for the CLI: battery trend + per-goal latest + verdict."""
+        """One-fetch inspection bundle for the CLI: battery trend + per-goal latest + verdict.
+
+        ``model`` scopes every sub-fetch to one producer model so the bundle is a
+        single model's capability view (the CLI ``--model`` flag).
+        """
         from src.eval.golden import BATTERY04_GOALS  # noqa: PLC0415
 
-        verdict = await self.detect_regression(since=since, until=until)
-        battery = await self.battery_trend(since=since, until=until)
+        verdict = await self.detect_regression(since=since, until=until, model=model)
+        battery = await self.battery_trend(since=since, until=until, model=model)
         latest_per_goal: list[dict[str, Any]] = []
         for spec in BATTERY04_GOALS:
-            trend = await self.per_goal_trend(spec.spec_id, since=since, until=until)
+            trend = await self.per_goal_trend(
+                spec.spec_id, since=since, until=until, model=model
+            )
             last = trend[-1] if trend else None
             latest_per_goal.append(
                 {
@@ -235,6 +258,7 @@ class CapabilityCurve:
             "battery_trend": [_battery_to_json(p) for p in battery],
             "latest_per_goal": latest_per_goal,
             "verdict": verdict,
+            "producer_model": model,
         }
 
     def export_json(self, path: str | Path, snapshot: dict[str, Any]) -> None:
@@ -276,7 +300,11 @@ class CapabilityCurve:
         ax.set_xticks(range(len(labels)))
         ax.set_xticklabels(labels, rotation=45, ha="right")
         ax.set_ylabel("battery mean correctness")
-        ax.set_title("Capability curve — nightly battery mean")
+        model = snapshot.get("producer_model")
+        title = (
+            f"Capability curve — {model}" if model else "Capability curve — nightly battery mean"
+        )
+        ax.set_title(title)
         ax.set_ylim(0.0, 1.05)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()

@@ -31,6 +31,7 @@ async def _store_check(
     spec_id: str | None,
     check: CheckResult,
     cost_usd: float,
+    producer_model: str | None = None,
 ) -> None:
     session.add(
         EvalResult(
@@ -45,6 +46,7 @@ async def _store_check(
             skipped=check.skipped,
             evidence=dict(check.evidence) or None,
             cost_usd=cost_usd,
+            producer_model=producer_model,
         )
     )
 
@@ -65,12 +67,16 @@ class EvalStore:
         run_id: str,
         attempt_id: str | None = None,
         cost_usd: float = 0.0,
+        producer_model: str | None = None,
     ) -> int:
         """Persist every check in ``correctness``; return rows written.
 
         ``attempt_id`` tags the rows with THIS invocation so a re-run of the
         same ``--run_id`` (which shares ``thread_id``/``run_id``) does not blend
         attempts; ``query_latest_attempt(run_id)`` returns only the newest one.
+        ``producer_model`` tags the rows with the model id that produced the goal
+        so the capability curve can be sliced per-model (``curve --model``);
+        ``None`` leaves the column NULL (legacy/unattributed rows).
 
         Returns 0 (and logs) if the store is disabled or the write fails.
         """
@@ -95,6 +101,7 @@ class EvalStore:
                         spec_id=correctness.spec_id or None,
                         check=check,
                         cost_usd=cost_usd,
+                        producer_model=producer_model,
                     )
                     written += 1
         except Exception as exc:  # noqa: BLE001 — observability-only, never re-raise
@@ -109,11 +116,12 @@ class EvalStore:
             )
             return 0
         logger.debug(
-            "EvalStore wrote {} check rows for run={} goal={} attempt={}",
+            "EvalStore wrote {} check rows for run={} goal={} attempt={} model={}",
             written,
             run_id,
             goal_id,
             attempt_id,
+            producer_model,
         )
         return written
 
@@ -124,6 +132,7 @@ class EvalStore:
         run_id: str,
         attempt_id: str | None = None,
         cost_usd: float = 0.0,
+        producer_model: str | None = None,
     ) -> int:
         """Persist a BenchmarkResult's checks (one row per check)."""
         from src.eval.models import CorrectnessResult
@@ -142,6 +151,7 @@ class EvalStore:
             run_id=run_id,
             attempt_id=attempt_id,
             cost_usd=cost_usd,
+            producer_model=producer_model,
         )
 
     async def query_by_run(self, run_id: str) -> list[dict[str, Any]]:
@@ -232,6 +242,7 @@ class EvalStore:
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 2000,
+        producer_model: str | None = None,
     ) -> list[dict[str, Any]]:
         """Goal-scoped rows in a ``created_at`` window, newest-first (empty on failure).
 
@@ -246,6 +257,10 @@ class EvalStore:
             since: Optional inclusive lower bound on ``created_at``.
             until: Optional inclusive upper bound on ``created_at``.
             limit: Row cap (default 2000; the 9-spec battery writes ~tens/night).
+            producer_model: Optional model-id filter (``WHERE producer_model = :m``)
+                so ``curve --model`` slices a single model's trend instead of the
+                blended system-wide one. ``None`` returns rows for all producers
+                (including legacy NULL-attributed rows).
 
         Returns:
             List of ``_row_to_dict`` rows (``created_at`` as an ISO string), or
@@ -267,6 +282,8 @@ class EvalStore:
                     stmt = stmt.where(EvalResult.created_at >= since)
                 if until is not None:
                     stmt = stmt.where(EvalResult.created_at <= until)
+                if producer_model is not None:
+                    stmt = stmt.where(EvalResult.producer_model == producer_model)
                 rows = (await session.execute(stmt)).scalars().all()
                 return [_row_to_dict(r) for r in rows]
         except Exception as exc:  # noqa: BLE001
@@ -289,5 +306,6 @@ def _row_to_dict(row: EvalResult) -> dict[str, Any]:
         "skipped": row.skipped,
         "evidence": row.evidence,
         "cost_usd": float(row.cost_usd),
+        "producer_model": row.producer_model,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }

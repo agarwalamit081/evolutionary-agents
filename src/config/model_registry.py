@@ -190,6 +190,40 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         input_cost_per_1k=0.001,
         output_cost_per_1k=0.003,
     ),
+    # glm-5.1 / glm-5.2 — Z.AI-native (distinct from the NVIDIA-hosted FREE
+    # copy ``nvidia-glm-5-1``). Added 2026-07-01 to back the plan-node routing
+    # (glm-5.1 is the strong planner primary; glm-5.2 is a 1M-context peer).
+    # Caps per llm-model-guardrails.md:35-36 (both Moderate; glm-5.1 200K/131K,
+    # glm-5.2 1M/128K; text INPUT only — no vision INPUT). PRICING IS A
+    # CONSERVATIVE MIRROR OF glm-5-turbo (0.001/0.003 per 1K) pending the exact
+    # Z.AI per-token rates — the owner should confirm and correct if the ledger
+    # must be exact. Both ALLOWED (NOT blocked) per the repo guardrails.
+    "glm-5.1": ModelSpec(
+        model_id="zai/glm-5.1",
+        provider="zai",
+        tier=ModelTier.MODERATE,
+        max_context=200_000,
+        max_output=131_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=False,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.003,
+    ),
+    "glm-5.2": ModelSpec(
+        model_id="zai/glm-5.2",
+        provider="zai",
+        tier=ModelTier.MODERATE,
+        max_context=1_000_000,
+        max_output=128_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=False,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.003,
+    ),
     # ── MiniMax ───────────────────────────────────────────────────
     "minimax-m2.5-highspeed": ModelSpec(
         model_id="minimax/minimax-m2.5-highspeed",
@@ -820,6 +854,27 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
         "deepseek-v4-pro",
         "mistral-medium-3-5",
         "gemini-3-flash-preview",
+    ],
+    # Plan-node primary (findings-06 retier / phase-2). Order matches the owner
+    # spec: claude-sonnet-4-6 first, then glm-4.7. The gateway pre-filters a
+    # provider with no API key (gateway.py ``_execute_with_fallback``), so while
+    # anthropic is disabled claude-sonnet-4-6 is SKIPPED (no wasted 400) and
+    # glm-4.7 — a strong live execute model — is attempted. Once the Anthropic
+    # key recovers claude-sonnet-4-6 becomes the first live fallback. deepseek-
+    # v4-pro (live reasoning) and glm-5-turbo (same-family peer) round it out.
+    "glm-5.1": [
+        "claude-sonnet-4-6",
+        "glm-4.7",
+        "deepseek-v4-pro",
+        "glm-5-turbo",
+    ],
+    # 1M-context planner peer; falls to its same-family successor first, then the
+    # same cross-provider net as glm-5.1.
+    "glm-5.2": [
+        "glm-5.1",
+        "claude-sonnet-4-6",
+        "glm-4.7",
+        "deepseek-v4-pro",
     ],
     "mistral-medium-3-5": [
         "claude-sonnet-4-6",

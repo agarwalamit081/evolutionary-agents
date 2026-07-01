@@ -736,6 +736,12 @@ class TestAcompletion:
         """For a non-deepseek model that rejects a forced tool_choice, the
         thinking-disable stage does not apply (DeepSeek-specific API); the
         gateway falls back to retrying with tool_choice dropped.
+
+        Pinned hermetic to ``.env``: this asserts the
+        ``tool_choice_force_hardening`` **OFF** path (drop → None). The live
+        ``.env`` sets the flag ON (the prod net), which would otherwise make
+        ``seen_tc[1] == 'required'`` and spuriously fail. Mirror of the sibling
+        ON-tests below, which explicitly flip the flag True; flip it False here.
         """
 
         class _FakeBadRequest(Exception):
@@ -754,6 +760,8 @@ class TestAcompletion:
             return mock_resp
 
         gateway._model_router._has_provider_key = MagicMock(return_value=True)
+        # Hermetic OFF-path: force the flag False regardless of live .env.
+        gateway._settings.resilience.tool_choice_force_hardening = False
 
         with patch("src.llm.gateway.litellm") as mock_litellm:
             mock_litellm.acompletion = fake_acompletion

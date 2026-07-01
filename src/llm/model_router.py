@@ -6,7 +6,7 @@ import json
 
 from loguru import logger
 
-from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY, ModelTier
+from src.config.model_registry import MODEL_REGISTRY, ModelTier, effective_fallback_chains
 from src.config.settings import Settings, get_settings
 from src.graph.enums import TaskComplexity
 
@@ -126,6 +126,13 @@ class ModelRouter:
         # absolute-fallback loop in route() (the one path that uses `excluded`,
         # not _has_provider_key). See _resolved_disabled_providers.
         self._exclude_providers: set[str] = _resolved_disabled_providers(settings)
+        # Env-overlaid fallback chains (curated + FALLBACK_CHAINS_JSON merge).
+        # Resolved ONCE here (not per call) so the gateway hot path does not
+        # re-parse the overlay JSON. See effective_fallback_chains in
+        # model_registry — a bad/empty overlay returns the curated dict.
+        self._fallback_chains: dict[str, list[str]] = effective_fallback_chains(
+            settings.routing.routing_fallback_chains_json
+        )
 
     def _effective_default_tier(self) -> tuple[ModelTier, str]:
         """Defensive default tier for an UNMAPPED TaskComplexity (the ``.get()``
@@ -298,11 +305,11 @@ class ModelRouter:
         Returns:
             List of fallback model identifiers.
         """
-        return FALLBACK_CHAINS.get(model, [])
+        return self._fallback_chains.get(model, [])
 
     def get_fallback_tier0(self) -> str:
         """Get a cheap fallback model."""
-        chain = FALLBACK_CHAINS.get("qwen3.5-flash", [])
+        chain = self._fallback_chains.get("qwen3.5-flash", [])
         if chain:
             return chain[0]
         return "qwen3.5-flash"
@@ -372,7 +379,7 @@ class ModelRouter:
 
         # Supplement from the fallback chain (may cross tiers)
         if len(provider_to_model) < n:
-            for model_id in FALLBACK_CHAINS.get(chain_key, []):
+            for model_id in self._fallback_chains.get(chain_key, []):
                 provider = self._extract_provider(model_id)
                 if provider in excluded or provider in provider_to_model:
                     continue
@@ -406,7 +413,7 @@ class ModelRouter:
 
     def _route_from_chain(self, chain_key: str, exclude_providers: set[str]) -> str | None:
         """Try models in a fallback chain, skipping excluded providers."""
-        chain = FALLBACK_CHAINS.get(chain_key, [])
+        chain = self._fallback_chains.get(chain_key, [])
 
         for model_id in chain:
             provider = self._extract_provider(model_id)

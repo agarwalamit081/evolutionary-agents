@@ -454,15 +454,18 @@ class TestGetCheaperFallback:
             f"budget fallback returned disabled provider 'openai' ({result})"
         )
 
-    def test_is_provider_disabled_reads_temporary_set(
+    def test_is_provider_disabled_reads_resolved_set(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """is_provider_disabled returns True exactly for providers in the
-        temporary-disabled set (whatever it currently holds)."""
+        resolved disabled set (env DISABLED_PROVIDERS when set, else the curated
+        _TEMPORARY_DISABLED_PROVIDERS baseline). Hermetic to .env: stub the
+        resolver rather than mutating the baseline, since the baseline is only
+        consulted when DISABLED_PROVIDERS is unset (the live .env sets it)."""
         import src.llm.model_router as mr
         from src.llm.model_router import ModelRouter
 
-        monkeypatch.setattr(mr, "_TEMPORARY_DISABLED_PROVIDERS", frozenset({"groq"}))
+        monkeypatch.setattr(mr, "_resolved_disabled_providers", lambda _s: {"groq"})
         assert ModelRouter.is_provider_disabled("groq") is True
         assert ModelRouter.is_provider_disabled("openai") is False
 
@@ -1585,11 +1588,14 @@ class TestGatewayVision:
         mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
         # Force the key-check to True so it cannot mask the vision filter.
         gateway._model_router._has_provider_key = lambda _p: True  # type: ignore[method-assign]
+        # Inject the fake chain into the router's env-overlaid chains (the
+        # gateway now resolves chains via self._model_router.get_fallback_chain,
+        # which reads _fallback_chains — it no longer imports the module global).
+        gateway._model_router._fallback_chains = {
+            "text-only-fake-model": ["gpt-4o-mini-2024-07-18"]
+        }
 
-        with patch.dict(
-            "src.llm.gateway.FALLBACK_CHAINS",
-            {"text-only-fake-model": ["gpt-4o-mini-2024-07-18"]},
-        ), patch("src.llm.gateway.litellm") as mock_litellm:
+        with patch("src.llm.gateway.litellm") as mock_litellm:
             mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
             mock_litellm.Usage = MagicMock
             mock_litellm.RateLimitError = Exception
@@ -1615,11 +1621,11 @@ class TestGatewayVision:
         (gpt-4o-mini-2024-07-18 supports images in the registry)."""
         mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
         gateway._model_router._has_provider_key = lambda _p: True  # type: ignore[method-assign]
+        gateway._model_router._fallback_chains = {
+            "text-only-fake-model": ["gpt-4o-mini-2024-07-18"]
+        }
 
-        with patch.dict(
-            "src.llm.gateway.FALLBACK_CHAINS",
-            {"text-only-fake-model": ["gpt-4o-mini-2024-07-18"]},
-        ), patch("src.llm.gateway.litellm") as mock_litellm:
+        with patch("src.llm.gateway.litellm") as mock_litellm:
             mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
             mock_litellm.Usage = MagicMock
             mock_litellm.RateLimitError = Exception

@@ -806,13 +806,24 @@ class TestDisabledProvidersEnv:
         router = ModelRouter(settings)
         assert router._exclude_providers == {"minimax", "moonshot"}
 
-    def test_is_provider_disabled_reads_live_settings(self) -> None:
-        """is_provider_disabled() is static but reads live get_settings() — so it
-        tracks an env flip at runtime, not a snapshot."""
+    def test_is_provider_disabled_reads_live_settings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """is_provider_disabled() is static but reads the live resolved disabled
+        set on EACH call (via get_settings() + _resolved_disabled_providers), so
+        it tracks a runtime flip — not a snapshot taken at import. Hermetic to
+        .env: the resolver is stubbed with a mutable box rather than relying on
+        the live DISABLED_PROVIDERS value."""
+        import src.llm.model_router as mr
         from src.llm.model_router import ModelRouter
 
-        # The default live settings resolve anthropic as disabled (curated temp
-        # baseline) under the quota cap; the method must reflect that without an
-        # explicit settings arg.
+        box: dict[str, set[str]] = {"s": {"anthropic"}}
+        monkeypatch.setattr(mr, "_resolved_disabled_providers", lambda _s: set(box["s"]))
+
         assert ModelRouter.is_provider_disabled("anthropic") is True
         assert ModelRouter.is_provider_disabled("minimax") is False
+
+        # Flip the live set at runtime — the static method must observe it.
+        box["s"] = {"minimax"}
+        assert ModelRouter.is_provider_disabled("anthropic") is False
+        assert ModelRouter.is_provider_disabled("minimax") is True

@@ -144,3 +144,96 @@ def test_pruned_models_do_not_declare_vision_input(key: str) -> None:
         f"{key}: live-probed text-only (2026-06-26 vision batch — drops/rejects "
         f"image_url); supports_images must be False or the vision path silently fails"
     )
+
+
+# ─── glm-5.1 / glm-5.2 (Z.AI-native) registration regression ────────────────
+
+
+def test_glm51_glm52_registered_and_chained() -> None:
+    """glm-5.1 / glm-5.2 are the Z.AI-native planner models (distinct from the
+    NVIDIA-hosted FREE copy nvidia-glm-5-1). Both must be registered with the
+    zai/ litellm prefix, text-only INPUT, and have a fallback chain so the
+    gateway can fail over. Caps per .claude/rules/llm-model-guardrails.md:35-36.
+    """
+    from src.config.model_registry import FALLBACK_CHAINS
+
+    for key, ctx, out in (("glm-5.1", 200_000, 131_000), ("glm-5.2", 1_000_000, 128_000)):
+        assert key in MODEL_REGISTRY, f"{key} must be registered"
+        spec = MODEL_REGISTRY[key]
+        assert spec.model_id == f"zai/{key}", f"{key}: model_id must be zai/-prefixed"
+        assert spec.provider == "zai"
+        assert spec.max_context == ctx, f"{key}: context cap {spec.max_context} != {ctx}"
+        assert spec.max_output == out, f"{key}: output cap {spec.max_output} != {out}"
+        assert spec.supports_images is False, f"{key}: text-only INPUT per guardrails"
+        assert key in FALLBACK_CHAINS, f"{key}: must have a fallback chain"
+        assert FALLBACK_CHAINS[key], f"{key}: fallback chain must be non-empty"
+
+
+# ─── effective_fallback_chains (FALLBACK_CHAINS_JSON overlay) ───────────────
+
+
+def test_effective_fallback_chains_empty_overlay_returns_curated() -> None:
+    """No overlay → the curated FALLBACK_CHAINS object is returned unchanged."""
+    from src.config.model_registry import FALLBACK_CHAINS, effective_fallback_chains
+
+    assert effective_fallback_chains(None) is FALLBACK_CHAINS
+    assert effective_fallback_chains("") is FALLBACK_CHAINS
+    assert effective_fallback_chains("   ") is FALLBACK_CHAINS
+
+
+def test_effective_fallback_chains_overlay_replaces_and_adds() -> None:
+    """A valid overlay REPLACES an existing model's chain and ADDS new keys;
+    untouched curated chains are preserved (merge, not full replace)."""
+    import json
+
+    from src.config.model_registry import FALLBACK_CHAINS, effective_fallback_chains
+
+    overlay = json.dumps(
+        {
+            "glm-4.7": ["glm-5.1", "deepseek-v4-pro"],  # replace existing
+            "brand-new-fake-model": ["gpt-4o-mini-2024-07-18"],  # add new key
+        }
+    )
+    merged = effective_fallback_chains(overlay)
+
+    assert merged["glm-4.7"] == ["glm-5.1", "deepseek-v4-pro"]  # overwritten
+    assert merged["brand-new-fake-model"] == ["gpt-4o-mini-2024-07-18"]  # added
+    # Untouched curated chain preserved (merge, not replace):
+    assert merged["deepseek-v4-flash"] == FALLBACK_CHAINS["deepseek-v4-flash"]
+    # Original curated dict NOT mutated (effective returns a fresh dict on overlay):
+    assert FALLBACK_CHAINS["glm-4.7"] != ["glm-5.1", "deepseek-v4-pro"]
+
+
+def test_effective_fallback_chains_invalid_overlay_is_ignored() -> None:
+    """A bad overlay (unparseable / non-dict / non-list values) must NEVER break
+    routing — the curated chains are returned unchanged."""
+    from src.config.model_registry import FALLBACK_CHAINS, effective_fallback_chains
+
+    assert effective_fallback_chains("not json {") is FALLBACK_CHAINS
+    assert effective_fallback_chains("[1, 2, 3]") is FALLBACK_CHAINS  # not a dict
+    # Non-list values are skipped; valid sibling entries still merge:
+    import json
+
+    merged = effective_fallback_chains(
+        json.dumps({"glm-4.7": "not-a-list", "qwen3.5-flash": ["gpt-4o-mini-2024-07-18"]})
+    )
+    assert merged["glm-4.7"] == FALLBACK_CHAINS["glm-4.7"]  # bad entry ignored
+    assert merged["qwen3.5-flash"] == ["gpt-4o-mini-2024-07-18"]  # good entry merged
+
+
+def test_router_caches_overlay_in_init() -> None:
+    """ModelRouter resolves the overlay ONCE in __init__ (not per call), so the
+    gateway hot path does not re-parse FALLBACK_CHAINS_JSON."""
+    import json
+
+    from src.config.settings import Settings
+    from src.llm.model_router import ModelRouter
+
+    settings = Settings()
+    settings.routing.routing_fallback_chains_json = json.dumps(
+        {"glm-4.7": ["glm-5.1", "deepseek-v4-pro"]}
+    )
+    router = ModelRouter(settings)
+    assert router.get_fallback_chain("glm-4.7") == ["glm-5.1", "deepseek-v4-pro"]
+    # Untouched model still uses curated chain via the same cache:
+    assert router.get_fallback_chain("qwen3.5-flash")  # non-empty curated chain

@@ -281,14 +281,14 @@ class TestVisionChainFilter:
         (gpt-4o-mini): with images+vision the chain is restricted so ONLY the
         vision model is attempted — the text-only primary is never tried (it
         would silently drop the images)."""
-        import src.llm.gateway as gw_mod
-
+        gw = _make_gateway(vision=True)
+        # The gateway resolves chains via the router's env-overlaid _fallback_
+        # chains (gateway no longer imports the FALLBACK_CHAINS module global).
         monkeypatch.setitem(
-            gw_mod.FALLBACK_CHAINS,
+            gw._model_router._fallback_chains,
             "deepseek-v4-flash",
             ["gpt-4o-mini-2024-07-18"],
         )
-        gw = _make_gateway(vision=True)
         messages = [{"role": "user", "content": "describe"}]
         mock_litellm = _make_litellm_mock(_make_litellm_response())
         with patch("src.llm.gateway.litellm", mock_litellm):
@@ -315,12 +315,12 @@ class TestVisionChainFilter:
         degraded text attempt is preferable to raising)."""
         import src.llm.gateway as gw_mod
 
+        gw = _make_gateway(vision=True)
         monkeypatch.setitem(
-            gw_mod.FALLBACK_CHAINS,
+            gw._model_router._fallback_chains,
             "deepseek-v4-flash",
             ["deepseek-v4-pro"],
         )
-        gw = _make_gateway(vision=True)
         messages = [{"role": "user", "content": "describe"}]
         mock_litellm = _make_litellm_mock(_make_litellm_response())
         # Spy on the module-level loguru logger (caplog can't see loguru). The

@@ -8,6 +8,7 @@ every supported model ID to its specification. FALLBACK_CHAINS provide
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from typing import NamedTuple
 
@@ -980,6 +981,37 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
         "qwen3.5-flash",
     ],
 }
+
+
+def effective_fallback_chains(overlay_json: str | None = None) -> dict[str, list[str]]:
+    """Return ``FALLBACK_CHAINS`` with an optional JSON overlay merged in.
+
+    Lets an operator retune/add fallback chains without a code change via the
+    ``FALLBACK_CHAINS_JSON`` env — a JSON object ``{model_id: [fallback, ...]}``.
+
+    Merge semantics: an overlay key REPLACEs that model's curated chain (a full
+    overwrite of its list); a key absent from the curated dict is ADDED. Empty /
+    unparseable / non-dict / non-list-value overlay entries are ignored, and a
+    totally empty/invalid overlay returns the curated ``FALLBACK_CHAINS`` object
+    unchanged — so a bad env can never break routing. Pure (no settings import)
+    so ``model_registry`` stays a leaf module: the caller passes the env string
+    in, and ``ModelRouter.__init__`` resolves + caches it once (kept off the
+    per-call hot path). Mirrors the merge-not-replace intent of the findings-06
+    follow-on; the curated dict above is always the baseline.
+    """
+    if not overlay_json or not overlay_json.strip():
+        return FALLBACK_CHAINS
+    try:
+        parsed = json.loads(overlay_json)
+    except (json.JSONDecodeError, TypeError):
+        return FALLBACK_CHAINS
+    if not isinstance(parsed, dict):
+        return FALLBACK_CHAINS
+    merged: dict[str, list[str]] = dict(FALLBACK_CHAINS)
+    for key, value in parsed.items():
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            merged[str(key)] = list(value)
+    return merged
 
 
 def get_fallback_chain(model_id: str) -> list[str]:

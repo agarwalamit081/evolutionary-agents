@@ -13,7 +13,7 @@ from __future__ import annotations
 import functools
 from typing import Literal, Optional
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -354,8 +354,25 @@ class RoutingSettings(BaseSettings):
     # (e.g. ``"anthropic"`` or ``"anthropic,minimax"``); an EMPTY string means
     # none disabled — so the temporary Anthropic block can be cleared without a
     # code change by setting ``DISABLED_PROVIDERS=`` once the cap resets. Env:
-    # DISABLED_PROVIDERS.
-    routing_disabled_providers: Optional[str] = None
+    # DISABLED_PROVIDERS (alias ROUTING_DISABLED_PROVIDERS — the field-name form
+    # that actually bound before this alias was added; both work).
+    routing_disabled_providers: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("DISABLED_PROVIDERS", "ROUTING_DISABLED_PROVIDERS"),
+    )
+    # Operator overlay for FALLBACK_CHAINS (findings-06 follow-on). A JSON
+    # object ``{model_id: [fallback, ...]}`` MERGED over the curated dict in
+    # model_registry.py (overlay key REPLACES that model's chain; new keys
+    # ADDED) by ``effective_fallback_chains``. Empty/invalid → curated chains
+    # unchanged. Resolved + cached ONCE in ``ModelRouter.__init__`` so the
+    # per-call gateway hot path does not re-parse. Env: FALLBACK_CHAINS_JSON
+    # (alias ROUTING_FALLBACK_CHAINS_JSON).
+    routing_fallback_chains_json: str = Field(
+        default="{}",
+        validation_alias=AliasChoices(
+            "FALLBACK_CHAINS_JSON", "ROUTING_FALLBACK_CHAINS_JSON"
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

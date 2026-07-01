@@ -26,7 +26,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY, ModelTier
+from src.config.model_registry import MODEL_REGISTRY, ModelTier
 from src.config.settings import Settings
 from src.graph.enums import TaskComplexity
 from src.graph.models import CostRecord
@@ -584,8 +584,8 @@ class LLMGateway:
                     yield delta
         except _TRANSIENT_ERRORS as exc:
             logger.warning(f"Streaming failed for {model}: {exc}")
-            # Fallback: try next in chain
-            fallbacks = FALLBACK_CHAINS.get(model, [])
+            # Fallback: try next in chain (env-overlaid chains via the router).
+            fallbacks = self._model_router.get_fallback_chain(model)
             for fallback_model in fallbacks:
                 try:
                     fb_kwargs = self._build_kwargs(fallback_model, temperature, max_tokens, metadata)
@@ -694,7 +694,7 @@ class LLMGateway:
         # float | None at the fallback loop's join point; a non-parameter local
         # keeps the inferred float type throughout the function.
         resolved_temperature: float = self._resolve_temperature(temperature)
-        fallback_chain = [model] + FALLBACK_CHAINS.get(model, [])
+        fallback_chain = [model] + self._model_router.get_fallback_chain(model)
 
         # Multimodal (D2): when a vision payload is attached, restrict the chain
         # to image-capable models (``ModelSpec.supports_images``) so a text-only
@@ -1258,7 +1258,7 @@ class LLMGateway:
         # Walk fallback chain first — prefer provider diversity. Skip any
         # candidate whose provider is temporarily disabled (e.g. anthropic under
         # a quota cap) — selecting it would burn the fallback chain on a 400.
-        for fb in FALLBACK_CHAINS.get(model, []):
+        for fb in self._model_router.get_fallback_chain(model):
             fb_spec = MODEL_REGISTRY.get(fb)
             if (
                 fb_spec

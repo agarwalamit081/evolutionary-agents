@@ -143,6 +143,16 @@ class CostTracker:
            (2) (cumulative ``get_run_spend`` minus the cost baseline). Only
            enforced when a ``run_id`` is bound AND the limit is ``> 0`` (default
            ``0`` = disabled — opt-in safety bound).
+        4. **Cumulative-absolute per-run cost** cap (``per_run_cost_limit_absolute``)
+           — the redelivery-forever backstop (battery q06). Unlike (3) this
+           measures the run's TOTAL $ spend across ALL attempts with NO baseline
+           subtraction, so a redelivery loop on an INCOMPLETE run cannot churn
+           unbounded. Fix A1 (terminal guard) skips a FINISHED run's duplicates,
+           but a still-incomplete run that keeps losing its lease and restarting
+           can still accumulate; this tier bounds that. Set it ABOVE (3)'s
+           per-attempt value so it only catches a genuine runaway, never a normal
+           resume. Only enforced when a ``run_id`` is bound AND the limit is
+           ``> 0`` (default ``0`` = disabled — opt-in).
 
         All caps reuse the gateway's existing not-within-budget path: it
         downgrades to a cheaper model, and only hard-``raise``s when no cheaper
@@ -181,13 +191,20 @@ class CostTracker:
                 )
 
         per_run_cost_limit = self._budget.per_run_cost_limit
+        absolute_cost_limit = self._budget.per_run_cost_limit_absolute
+        # Fetch the run's cumulative $ spend ONCE for both cost tiers (3 + 4)
+        # when either is active. Initialized so it is always bound for the
+        # tier-4 read below even when no cost tier runs this call.
+        cumulative_cost = 0.0
+        if run_id is not None and (per_run_cost_limit > 0 or absolute_cost_limit > 0):
+            cumulative_cost = await self.get_run_spend(run_id)
+
         if run_id is not None and per_run_cost_limit > 0:
             # The $-complement to the per-run token cap: bounds this attempt's
             # DOLLAR spend on the run_id (cumulative get_run_spend minus the cost
             # baseline), so a run on an expensive model cannot drain the daily
             # pool. Same attempt-relative baseline logic as the token cap so a
             # resumed/re-enqueued run does not inherit its prior $ debt.
-            cumulative_cost = await self.get_run_spend(run_id)
             spent_cost = max(0.0, cumulative_cost - self._run_baseline_cost)
             if spent_cost >= per_run_cost_limit:
                 return (
@@ -195,6 +212,23 @@ class CostTracker:
                     f"Per-run cost cap reached: ${spent_cost:.4f} / "
                     f"${per_run_cost_limit:.4f} this attempt (run {run_id}; "
                     f"baseline ${self._run_baseline_cost:.4f})",
+                )
+
+        if run_id is not None and absolute_cost_limit > 0:
+            # Tier 4 — cumulative-absolute backstop (redelivery-forever guard).
+            # NO baseline subtraction: this is the run's TOTAL $ across all
+            # attempts, so a redelivery loop on an INCOMPLETE run is bounded
+            # regardless of how many times the per-attempt baseline reset (Fix B,
+            # the q06 pathology). Fix A1 (terminal guard) already skips a FINISHED
+            # run's duplicates; this bounds the still-incomplete redelivery churn.
+            # Set ABOVE ``per_run_cost_limit`` so it catches only genuine runaways,
+            # never a normal resume. Disabled by default (0.0); opt-in ceiling.
+            if cumulative_cost >= absolute_cost_limit:
+                return (
+                    False,
+                    f"Cumulative run cost cap reached: ${cumulative_cost:.4f} / "
+                    f"${absolute_cost_limit:.4f} total across attempts "
+                    f"(run {run_id})",
                 )
 
         if daily_total >= daily_limit * self._budget.budget_critical_threshold:

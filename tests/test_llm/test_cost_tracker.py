@@ -33,6 +33,12 @@ def mock_settings() -> MagicMock:
     settings.budget.max_cost_usd = 10.0
     settings.budget.budget_warn_threshold = 0.7
     settings.budget.budget_critical_threshold = 0.9
+    # Mirror the full BudgetSettings surface so check_budget reads (every cap
+    # field incl. the cumulative-absolute tier-4 backstop) never hit a stray
+    # MagicMock-attribute — defaults match BudgetSettings (0.0 = disabled).
+    settings.budget.per_task_token_limit = 0
+    settings.budget.per_run_cost_limit = 0.0
+    settings.budget.per_run_cost_limit_absolute = 0.0
     return settings
 
 
@@ -359,6 +365,7 @@ class TestCheckBudget:
         settings.budget.max_cost_usd = 10.0
         settings.budget.budget_warn_threshold = 0.5
         settings.budget.budget_critical_threshold = 0.8
+        settings.budget.per_run_cost_limit_absolute = 0.0
         tracker = CostTracker(session=MagicMock(), settings=settings)
 
         tracker.get_daily_spend = AsyncMock(return_value=4.0)  # 40%
@@ -401,6 +408,7 @@ class TestCheckBudgetPerRunTokenCap:
         settings.budget.budget_critical_threshold = 0.9
         settings.budget.per_task_token_limit = per_task_token_limit
         settings.budget.per_run_cost_limit = 0.0
+        settings.budget.per_run_cost_limit_absolute = 0.0
         tracker = CostTracker(session=MagicMock(), settings=settings)
         tracker.get_daily_spend = AsyncMock(return_value=0.5)
         return tracker
@@ -477,6 +485,7 @@ class TestCheckBudgetBaselineDelta:
         settings.budget.budget_critical_threshold = 0.9
         settings.budget.per_task_token_limit = per_task_token_limit
         settings.budget.per_run_cost_limit = 0.0
+        settings.budget.per_run_cost_limit_absolute = 0.0
         tracker = CostTracker(session=MagicMock(), settings=settings)
         tracker.get_daily_spend = AsyncMock(return_value=0.5)
         return tracker
@@ -560,6 +569,7 @@ class TestCheckBudgetPerRunCostCap:
         # Token cap disabled so only the cost cap is exercised here.
         settings.budget.per_task_token_limit = 0
         settings.budget.per_run_cost_limit = per_run_cost_limit
+        settings.budget.per_run_cost_limit_absolute = 0.0
         tracker = CostTracker(session=MagicMock(), settings=settings)
         tracker.get_daily_spend = AsyncMock(return_value=0.5)
         return tracker

@@ -173,16 +173,22 @@ class TestCriticalThresholdDowngrade:
 
 
 def _make_cost_tracker_with_ledger(
-    settings: Settings, *, run_usage: int, daily_spend: float = 0.0
+    settings: Settings,
+    *,
+    run_usage: int,
+    daily_spend: float = 0.0,
+    run_spend: float = 0.0,
 ) -> Any:
-    """A real ``CostTracker`` whose DB reads are faked by overriding the two
+    """A real ``CostTracker`` whose DB reads are faked by overriding the three
     query methods — so ``check_budget`` runs its PURE threshold logic against a
-    planted cumulative run-usage + daily spend without a live Postgres."""
+    planted cumulative run-usage + daily spend + cumulative run $ spend without a
+    live Postgres."""
     from src.llm.cost_tracker import CostTracker
 
     tracker = CostTracker(session=MagicMock(), settings=settings)
     tracker.get_run_token_usage = AsyncMock(return_value=run_usage)  # type: ignore[method-assign]
     tracker.get_daily_spend = AsyncMock(return_value=daily_spend)  # type: ignore[method-assign]
+    tracker.get_run_spend = AsyncMock(return_value=run_spend)  # type: ignore[method-assign]
     return tracker
 
 
@@ -237,6 +243,112 @@ class TestResumeReTripsCap:
 
         # spent = max(0, 100_000 - 0) = 100_000 (baseline clamped to 0).
         assert within is True
+
+
+# ─── Two-tier per-run COST caps (attempt-relative + cumulative-absolute) ──
+
+
+class TestPerRunCostCaps:
+    """The two per-run COST tiers: ``per_run_cost_limit`` (attempt-relative,
+    baseline-subtracted — the q09 resume-safe fix) and
+    ``per_run_cost_limit_absolute`` (cumulative across all attempts, NO baseline
+    — the q06 redelivery-forever backstop, Fix B)."""
+
+    @pytest.mark.asyncio
+    async def test_per_attempt_cost_cap_trips(self, settings: Settings) -> None:
+        """Tier 3 (attempt-relative): cumulative $1.5 with a $0.5 baseline → this
+        attempt spent $1.0 ≥ the $1.0 per-attempt cap → trips. Locks the cost tier
+        that was previously untested and that the two-tier refactor restructured."""
+        settings.budget.per_run_cost_limit = 1.0
+        tracker = _make_cost_tracker_with_ledger(
+            settings, run_usage=0, daily_spend=0.0, run_spend=1.5
+        )
+        tracker.set_run_cost_baseline(0.5)
+
+        within, msg = await tracker.check_budget("cli-q06")
+
+        assert within is False
+        assert "Per-run cost cap reached" in msg
+
+    @pytest.mark.asyncio
+    async def test_per_attempt_cost_baseline_prevents_pretrip(
+        self, settings: Settings
+    ) -> None:
+        """Tier 3 is resume-safe: a fresh baseline (set to the prior cumulative)
+        means THIS attempt's spend is ~$0 even though the run has spent $1.5 total
+        → does not trip the $1.0 per-attempt cap. (The q09 resume property,
+        expressed for the cost tier.)"""
+        settings.budget.per_run_cost_limit = 1.0
+        tracker = _make_cost_tracker_with_ledger(
+            settings, run_usage=0, daily_spend=0.0, run_spend=1.5
+        )
+        tracker.set_run_cost_baseline(1.5)
+
+        within, msg = await tracker.check_budget("cli-q06")
+
+        assert within is True
+        assert "cap reached" not in msg
+
+    @pytest.mark.asyncio
+    async def test_cumulative_absolute_trips_despite_baseline_reset(
+        self, settings: Settings
+    ) -> None:
+        """Tier 4 — the q06 redelivery-forever fix. A run that redelivered N× has
+        spent $3.5 TOTAL. The per-attempt baseline was reset (to $2.6) so tier 3
+        sees only $0.9 this attempt (< $1.0) and does NOT trip — exactly the hole
+        that let q06 run unbounded. Tier 4 ignores the baseline and trips on the
+        cumulative $3.5 ≥ $3.0 absolute cap."""
+        settings.budget.per_run_cost_limit = 1.0
+        settings.budget.per_run_cost_limit_absolute = 3.0
+        tracker = _make_cost_tracker_with_ledger(
+            settings, run_usage=0, daily_spend=0.0, run_spend=3.5
+        )
+        tracker.set_run_cost_baseline(2.6)
+
+        within, msg = await tracker.check_budget("cli-q06")
+
+        assert within is False
+        assert "Cumulative run cost cap reached" in msg
+        # Sanity: tier 3 alone would have allowed this (spent $0.9 < $1.0).
+        assert "Per-run cost cap reached" not in msg
+
+    @pytest.mark.asyncio
+    async def test_cumulative_absolute_disabled_by_default(
+        self, settings: Settings
+    ) -> None:
+        """Tier 4 is opt-in: with ``per_run_cost_limit_absolute = 0`` (default) an
+        arbitrarily large cumulative spend does not trip tier 4 — only the active
+        per-attempt tier (here also 0/disabled) governs, so the run stays within."""
+        settings.budget.per_run_cost_limit = 0.0
+        settings.budget.per_run_cost_limit_absolute = 0.0
+        tracker = _make_cost_tracker_with_ledger(
+            settings, run_usage=0, daily_spend=0.0, run_spend=999.0
+        )
+
+        within, msg = await tracker.check_budget("cli-q06")
+
+        assert within is True
+        assert "cap reached" not in msg
+
+    @pytest.mark.asyncio
+    async def test_two_tiers_normal_resume_not_tripped(
+        self, settings: Settings
+    ) -> None:
+        """Both tiers active but a NORMAL resume (cumulative $1.2, this attempt
+        $0) stays within: tier 3 spent $0 < $1.0 and tier 4 cumulative $1.2 <
+        $3.0. The backstop must not falsely kill a healthy resumed run."""
+        settings.budget.per_run_cost_limit = 1.0
+        settings.budget.per_run_cost_limit_absolute = 3.0
+        tracker = _make_cost_tracker_with_ledger(
+            settings, run_usage=0, daily_spend=0.0, run_spend=1.2
+        )
+        tracker.set_run_cost_baseline(1.2)
+
+        within, msg = await tracker.check_budget("cli-q06")
+
+        assert within is True
+        assert "cap reached" not in msg
+
 
 
 # ─── The 70% warn / 90% critical messages (pure check_budget logic) ──

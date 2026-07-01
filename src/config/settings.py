@@ -834,6 +834,19 @@ class BudgetSettings(BaseSettings):
     # NOT inherit its prior $ debt and trip before doing work. ``0`` (default) =
     # DISABLED — opt-in hard safety bound. Env: PER_RUN_COST_LIMIT.
     per_run_cost_limit: float = 0.0
+    # CUMULATIVE-ABSOLUTE per-run cost cap (two-tier safety backstop). Unlike
+    # ``per_run_cost_limit`` (attempt-relative — baseline-subtracted so a resumed
+    # run does not re-trip), this measures the run's TOTAL $ spend across ALL
+    # attempts/redeliveries with NO baseline subtraction. It is the backstop for
+    # the redelivery-forever pathology (battery q06): a run whose stream entry
+    # redelivered N× accumulated N× per-attempt spend unbounded because each
+    # attempt reset its own baseline. Fix A1 (terminal guard) already skips a
+    # FINISHED run's duplicates, but a redelivery loop on an INCOMPLETE run can
+    # still churn; this cap bounds that churn's total cost. Set it ABOVE the
+    # expected single-attempt cost (``per_run_cost_limit``) so it only catches a
+    # genuine runaway, never a normal resume. ``0`` (default) = DISABLED — opt-in.
+    # Env: PER_RUN_COST_LIMIT_ABSOLUTE.
+    per_run_cost_limit_absolute: float = 0.0
     max_cost_usd: float = 10.0
     budget_warn_threshold: float = 0.70
     budget_critical_threshold: float = 0.90
@@ -865,7 +878,9 @@ class BudgetSettings(BaseSettings):
             raise ValueError(f"Threshold must be between 0 and 1. Got: {v}")
         return v
 
-    @field_validator("per_run_cost_limit", "max_cost_usd")
+    @field_validator(
+        "per_run_cost_limit", "per_run_cost_limit_absolute", "max_cost_usd"
+    )
     @classmethod
     def validate_non_negative_cost(cls, v: float) -> float:
         """Cost caps must be non-negative — ``0`` disables the per-run cap."""

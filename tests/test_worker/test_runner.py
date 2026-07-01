@@ -677,3 +677,120 @@ class TestRunConsumerRunControl:
         assert rec.status is not JobStatus.TIMEOUT
         assert "read timeout" in (rec.error or "")
 
+
+class TestRunConsumerWatchdog:
+    """Phase 1 — out-of-band run-timeout watchdog (the q04 ~3h-stall fix).
+
+    The prior in-band ``asyncio.timeout`` was defeated when a stalled run
+    ABSORBED the cancellation somewhere in the execute_run↔gateway stack and
+    never returned: the ``await self._executor(...)`` blocked forever, so no
+    terminal mark fired and ``_renew_lease`` (created OUTSIDE the timeout ctx)
+    kept the lease alive ~1h28m past the ceiling (only the Redis-side TTL ended
+    it). The watchdog enforces a terminal TIMEOUT with plain Redis calls
+    INDEPENDENT of whether the executor honors cancellation.
+
+    The existing ``asyncio.sleep``-based timeout test (above) passes under BOTH
+    the old and new code, and so cannot prove the fix: ``asyncio.sleep`` honors
+    cancellation. A "swallow-once-then-return" executor also cannot —
+    ``asyncio.timeout.__aexit__`` re-raises ``TimeoutError`` on expiry anyway.
+    ONLY an executor that hangs INDEFINITELY distinguishes the out-of-band
+    watchdog; that is the regression locked here.
+    """
+
+    async def test_watchdog_enforces_timeout_when_executor_absorbs_cancel(
+        self, fake_redis, worker_settings, monkeypatch
+    ) -> None:
+        """A stalled run that swallows every ``CancelledError`` and never
+        finishes still terminates at the deadline: the watchdog marks TIMEOUT +
+        acks + releases the lease out-of-band, and ``_process`` returns True
+        within ``deadline + grace`` — NOT the absorbed executor's hang. The old
+        in-band code blocked forever in ``await self._executor(...)`` here."""
+        import src.worker.runner as runner_mod
+
+        # Shrink the abandon grace so the truly-stuck executor case is fast.
+        monkeypatch.setattr(runner_mod, "_EXEC_CANCEL_GRACE_S", 0.1)
+
+        queue = RunsQueue(fake_redis, worker_settings)
+        store = RunStatusStore(fake_redis, worker_settings)
+        job = RunJob(run_id="hang", goal="g", run_timeout_s=0.05)
+
+        # The leaked background executor (it absorbs cancellation) is reaped via
+        # ``abandon`` after the assertions so the event loop is clean on teardown.
+        abandon = asyncio.Event()
+        cancels: list[int] = []
+        hung: list[asyncio.Task[Any]] = []
+
+        async def absorbing(_j: RunJob, _p: Any = None) -> dict[str, Any]:
+            # Absorb cancellation indefinitely — the litellm/gateway stall analog.
+            # Never finishes on its own; only the out-of-band watchdog ends the RUN.
+            hung.append(asyncio.current_task())  # type: ignore[arg-type]
+            while not abandon.is_set():
+                try:
+                    await asyncio.sleep(0.5)
+                except asyncio.CancelledError:
+                    cancels.append(1)
+                    continue  # swallow → keep hanging
+            return {"final_output": "absorbed", "is_complete": False, "iteration_count": 0}
+
+        consumer = RunConsumer(queue, store, absorbing, worker_settings)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()  # claim into the PEL so the watchdog's ack resolves
+
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        acked = await consumer._process(entry_id, job)
+        elapsed = loop.time() - start
+
+        # Terminal + acked even though the executor never finished (it swallowed
+        # every cancellation) — the watchdog did the mark/ack/release out-of-band.
+        assert acked is True
+        assert await queue.pending_count() == 0
+        rec = await store.get("hang")
+        assert rec is not None
+        assert rec.status is JobStatus.TIMEOUT
+        assert "timeout after 0.05s" in (rec.error or "")
+        # Bounded by the deadline + the shrunk grace, NOT the executor's hang.
+        assert elapsed < 2.0
+        assert cancels  # exec_task.cancel() was delivered at least once (absorbed)
+        # The watchdog cancelled the renewal + released the lease → a fresh claim
+        # can acquire the per-run lock (peer takeover is unblocked, not held for
+        # ~1h28m past the ceiling by a zombie renewer as in the old code).
+        assert await queue.try_lock(job.run_id, "peer", worker_settings.lock_ttl_s) is True
+
+        # Reap the leaked background executor: set the gate so its next loop
+        # iteration exits, then wake its sleep with a cancel. ``asyncio.wait``
+        # (not ``wait_for``/bare ``await``) bounds the reap so an absorbing
+        # executor can never hang the test teardown.
+        abandon.set()
+        if hung and not hung[0].done():
+            hung[0].cancel()
+            await asyncio.wait({hung[0]}, timeout=1.0)
+
+    async def test_armed_watchdog_does_not_fire_on_fast_completion(
+        self, fake_redis, worker_settings
+    ) -> None:
+        """An ARMED wall-clock bound must NOT produce a false TIMEOUT on a healthy
+        fast run: when ``exec_task`` finishes before the deadline, the watchdog is
+        cancelled and the normal COMPLETED path runs. Locks that the watchdog is a
+        pure addition — no behavior change when the run completes in time."""
+        s = worker_settings.model_copy(update={"run_timeout_s": 5.0})
+        queue = RunsQueue(fake_redis, s)
+        store = RunStatusStore(fake_redis, s)
+        job = RunJob(run_id="fast", goal="g")  # no per-run override → 5s bound
+
+        async def fast(_j: RunJob, _p: Any = None) -> dict[str, Any]:
+            return _ok_result()
+
+        consumer = RunConsumer(queue, store, fast, s)
+        await queue.ensure_group()
+        entry_id = await queue.enqueue(job)
+        await queue.read_new()
+
+        assert await consumer._process(entry_id, job) is True  # completed — acked
+        assert await queue.pending_count() == 0
+        rec = await store.get("fast")
+        assert rec is not None
+        assert rec.status is JobStatus.COMPLETED  # NOT a false TIMEOUT
+        assert rec.final_output == "answer"
+

@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Coroutine, cast
 from uuid import uuid4
 
 from loguru import logger
@@ -40,6 +40,14 @@ if TYPE_CHECKING:
 RunExecutor = Callable[
     [RunJob, Callable[[int], Awaitable[None]] | None], Awaitable[dict[str, Any]]
 ]
+
+# Grace given to a cancelled ``exec_task`` to unwind before it is abandoned. The
+# out-of-band watchdog enforces the terminal TIMEOUT at the deadline REGARDLESS
+# (it never waits on the executor); this grace only bounds how long ``_process``
+# blocks on best-effort cleanup of a cancellation-absorbing executor. Module
+# constant (not a setting) so tests can shrink it for speed; the leaked task is
+# reaped at worker restart if it never honors cancellation within the grace.
+_EXEC_CANCEL_GRACE_S: float = 5.0
 
 
 class RunConsumer:
@@ -150,73 +158,134 @@ class RunConsumer:
                 if await self._status.is_cancelled(run_id):
                     raise RunCancelled(f"cancelled via POST /runs/{run_id}/cancel")
 
+            # Hoisted so the outer ``finally`` can cancel a still-running
+            # ``exec_task`` if ``_process`` itself is cancelled (e.g. a
+            # serve_forever shutdown) while the supervisor is parked in
+            # ``asyncio.wait`` — without this the executor task would leak.
+            exec_task: asyncio.Task[dict[str, Any]] | None = None
             try:
-                # ── Run-level wall-clock timeout (A, opt-in) ──────────────────
-                # When ``_resolve_timeout`` returns >0, wrap the executor in
-                # ``asyncio.timeout``; the inner ``except TimeoutError`` then
-                # marks a terminal TIMEOUT (acked, NOT redelivered — the
-                # per-iteration AsyncPostgresSaver checkpoint lets ``--resume``
-                # continue later). When unarmed (timeout_s == 0) we still enter
-                # the inner ``except`` on a *stray* downstream TimeoutError, but
-                # ``re-raise`` it so it falls through to the typed/dead-letter
-                # handlers below — preserving the prior default-path behavior.
+                # ── Out-of-band run-timeout watchdog (Phase 1) ──────────────────
+                # The run is RACED: ``exec_task`` vs ``_watchdog``. ``_watchdog``
+                # sleeps to the deadline then enforces a terminal TIMEOUT with
+                # PLAIN REDIS CALLS — it does NOT depend on ``exec_task`` honoring
+                # cancellation. This closes the q04 3h-stall: a stalled run
+                # absorbed the in-band ``asyncio.timeout`` cancellation somewhere
+                # in the execute_run↔gateway stack, so no terminal mark ever fired
+                # and ``_renew_lease`` (created OUTSIDE the old timeout ctx) kept
+                # the lease alive ~1h28m past the ceiling. The watchdog cancels the
+                # renewal on the deadline so the zombie stops renewing → a peer can
+                # reclaim the entry. When unarmed (``timeout_s == 0``, the shipped
+                # default) there is no watchdog and ``exec_task`` resolves on its
+                # own (prior behavior). The gateway already bounds each socket read
+                # at ``request_timeout``; the watchdog covers the case where even
+                # that absorption hangs.
                 timeout_s = self._resolve_timeout(job)
-                timeout_ctx = (
-                    asyncio.timeout(timeout_s) if timeout_s > 0 else contextlib.nullcontext()
+                # The injected executor is typed ``Awaitable`` (so fakes may be a
+                # bare awaitable), but the production executor is an ``async def``
+                # → a coroutine. ``asyncio.create_task`` requires a coroutine, so
+                # cast at the single call site rather than narrowing the executor
+                # type alias (which would forbid legitimate bare-awaitable fakes).
+                exec_task = asyncio.create_task(
+                    cast(
+                        Coroutine[Any, Any, dict[str, Any]],
+                        self._executor(job, _report_progress),
+                    )
                 )
-                try:
-                    # ``asyncio.timeout`` (a ``Timeout``) and ``nullcontext`` both
-                    # implement the async CM protocol, so ``async with`` is the
-                    # correct unifier (``with`` is rejected by the ``Timeout``
-                    # stub, which only exposes ``__aenter__``/``__aexit__``).
-                    async with timeout_ctx:
-                        result = await self._executor(job, _report_progress)
-                except TimeoutError:
-                    if timeout_s <= 0:
-                        raise  # stray downstream TimeoutError — dead-letter, not ours
-                    logger.warning(
-                        f"Run {run_id} timed out after {timeout_s}s (terminal, "
-                        f"resumable via --resume)"
+                watchdog: asyncio.Task[bool] | None = None
+                if timeout_s > 0:
+                    deadline = asyncio.get_running_loop().time() + timeout_s
+                    watchdog = asyncio.create_task(
+                        self._watchdog(
+                            run_id,
+                            thread_id,
+                            entry_id,
+                            token,
+                            timeout_s,
+                            deadline,
+                            exec_task,
+                            renewal,
+                        )
                     )
-                    await self._status.mark(
-                        run_id,
-                        thread_id,
-                        JobStatus.TIMEOUT,
-                        error=f"Run timeout after {timeout_s}s",
-                    )
-                    acked = await self._queue.ack_and_delete([entry_id])
-                    return acked > 0  # terminal — resumable via checkpoint
-                except RunCancelled as exc:
-                    # Graceful cancel (E): a Redis flag set via POST
-                    # /runs/{run_id}/cancel, polled at the per-iteration progress
-                    # callback inside execute_run → raises RunCancelled with
-                    # ~1-iteration latency. Terminal + acked (NOT redelivered).
-                    logger.info(f"Run {run_id} cancelled (terminal): {exc}")
-                    await self._status.mark(
-                        run_id,
-                        thread_id,
-                        JobStatus.CANCELLED,
-                        error=str(exc),
-                    )
-                    acked = await self._queue.ack_and_delete([entry_id])
-                    return acked > 0  # terminal
-                except BudgetExhaustedError as exc:
-                    # Opt-in budget hard-stop (D): the gateway raised instead of
-                    # downgrading to a cheaper fallback. Terminal + acked
-                    # (resumable via checkpoint — caveat: cumulative budget
-                    # re-trips on resume; deferred follow-up).
-                    logger.warning(
-                        f"Run {run_id} budget-exhausted (terminal, opt-in "
-                        f"hard_stop): {exc}"
-                    )
-                    await self._status.mark(
-                        run_id,
-                        thread_id,
-                        JobStatus.BUDGET_EXHAUSTED,
-                        error=str(exc),
-                    )
-                    acked = await self._queue.ack_and_delete([entry_id])
-                    return acked > 0  # terminal — resumable
+
+                wait_set: set[asyncio.Task[Any]] = {exec_task}
+                if watchdog is not None:
+                    wait_set.add(watchdog)
+                await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+
+                # Watchdog priority: if it fired AND enforced, the terminal TIMEOUT
+                # work (mark + ack + release + cancel renewal) is already done
+                # out-of-band. ``exec_task`` is still hung, so best-effort cancel
+                # it (abandon if it won't honor cancellation within a short grace).
+                if watchdog is not None and watchdog.done():
+                    enforced = False
+                    try:
+                        enforced = watchdog.result()
+                    except Exception as exc:  # noqa: BLE001 — never mask the run
+                        logger.error(
+                            f"Run {run_id} watchdog crashed (timeout NOT enforced): {exc}"
+                        )
+                    if enforced:
+                        if not exec_task.done():
+                            exec_task.cancel()
+                            # BOUNDED best-effort unwind — NOT ``wait_for``:
+                            # ``wait_for`` internally ``await``s the task after its
+                            # own timeout (``_cancel_and_wait``), so a cancellation-
+                            # ABSORBING executor would hang ``_process`` here — the
+                            # exact q04 stall the watchdog exists to end. ``asyncio.wait``
+                            # returns at ``timeout`` WITHOUT awaiting pending tasks, so
+                            # an absorbing task is abandoned (reaped at worker restart);
+                            # the run is already terminal (TIMEOUT + acked + released).
+                            await asyncio.wait(
+                                {exec_task}, timeout=_EXEC_CANCEL_GRACE_S
+                            )
+                        exec_task = None  # handled — skip double-cancel in finally
+                        return True  # watchdog already acked + released the lease
+
+                # ``exec_task`` resolved first (normal completion, a typed
+                # exception, or a stray). Cancel the deadline watchdog — the outer
+                # ``finally`` cancels the lease renewal.
+                if watchdog is not None and not watchdog.done():
+                    watchdog.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await watchdog
+
+                # Unwrap the executor outcome via the typed handlers (the executor
+                # returned a result OR raised). Only the watchdog path cancels
+                # ``exec_task``, so it is not cancelled here.
+                if exec_task.cancelled():  # defensive — treat as a generic failure
+                    raise asyncio.CancelledError("exec_task cancelled unexpectedly")
+                exc = exec_task.exception()
+                if exc is not None:
+                    if isinstance(exc, RunCancelled):
+                        # Graceful cancel (E): a Redis flag polled at the
+                        # per-iteration progress callback → RunCancelled with
+                        # ~1-iteration latency. Terminal + acked (NOT redelivered).
+                        logger.info(f"Run {run_id} cancelled (terminal): {exc}")
+                        await self._status.mark(
+                            run_id, thread_id, JobStatus.CANCELLED, error=str(exc)
+                        )
+                        acked = await self._queue.ack_and_delete([entry_id])
+                        return acked > 0  # terminal
+                    if isinstance(exc, BudgetExhaustedError):
+                        # Opt-in budget hard-stop (D): the gateway raised instead
+                        # of downgrading. Terminal + acked (resumable via
+                        # checkpoint — caveat: cumulative cap re-trips on resume).
+                        logger.warning(
+                            f"Run {run_id} budget-exhausted (terminal, opt-in "
+                            f"hard_stop): {exc}"
+                        )
+                        await self._status.mark(
+                            run_id, thread_id, JobStatus.BUDGET_EXHAUSTED, error=str(exc)
+                        )
+                        acked = await self._queue.ack_and_delete([entry_id])
+                        return acked > 0  # terminal — resumable
+                    if isinstance(exc, TimeoutError) and timeout_s <= 0:
+                        # F (fallthrough): a STRAY downstream TimeoutError (e.g. an
+                        # httpx read timeout) while the wall-clock bound is UNARMED
+                        # → dead-letter (re-raise), NOT mislabeled TIMEOUT.
+                        raise exc
+                    raise exc  # generic exception → dead-letter handler below
+                result = exec_task.result()
             except Exception as exc:
                 # Dead-letter cap (Bug B). ``record_attempt`` is keyed by run_id, so
                 # the count is stable across XAUTOCLAIM redelivery (same consumer or a
@@ -258,6 +327,19 @@ class RunConsumer:
             logger.info(f"Run {run_id} completed (acked={acked})")
             return acked > 0
         finally:
+            # If ``_process`` is exiting with the executor still running (e.g. a
+            # serve_forever shutdown cancelled the supervisor while it was parked
+            # in ``asyncio.wait``), cancel the task so it does not leak. The
+            # watchdog-enforced path sets ``exec_task = None`` after its own
+            # best-effort cancel, so this is a no-op there. A truly stuck executor
+            # (absorbs cancellation) is abandoned after the grace — reaped at
+            # worker restart — the lease/status are already terminal by then.
+            if exec_task is not None and not exec_task.done():
+                exec_task.cancel()
+                # Bounded cleanup, same reason as the enforced path: ``wait_for``
+                # would hang on an absorbing executor. ``asyncio.wait`` returns at
+                # the timeout; a still-pending task is abandoned + reaped at restart.
+                await asyncio.wait({exec_task}, timeout=_EXEC_CANCEL_GRACE_S)
             renewal.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await renewal
@@ -267,6 +349,70 @@ class RunConsumer:
                 await self._queue.release_lock(run_id, token)
             except Exception as exc:  # noqa: BLE001 — release must never mask the result
                 logger.warning(f"Run {run_id} lease release failed: {exc}")
+
+    async def _watchdog(
+        self,
+        run_id: str,
+        thread_id: str,
+        entry_id: str,
+        token: str,
+        timeout_s: float,
+        deadline: float,
+        exec_task: asyncio.Task[dict[str, Any]],
+        renewal: asyncio.Task[None],
+    ) -> bool:
+        """Out-of-band run-timeout enforcement. Returns True iff it enforced a
+        terminal TIMEOUT (so ``_process`` knows the run is already acked + the
+        lease released and must not double-handle).
+
+        Sleeps until ``deadline``; if the executor is STILL running then (the run
+        exceeded its wall-clock bound), enforces a terminal TIMEOUT with PLAIN
+        REDIS CALLS — mark + ack + release + cancel the lease renewal — INDEPENDENT
+        of whether ``exec_task`` honors cancellation. This is the q04 3h-stall fix:
+        a stalled run absorbed the in-band ``asyncio.timeout`` cancellation
+        somewhere in the execute_run↔gateway stack, so no terminal mark ever fired
+        and ``_renew_lease`` (created outside the old timeout ctx) kept the lease
+        alive ~1h28m past the ceiling. The watchdog cancels the renewal on the
+        deadline so the zombie stops renewing → a peer can reclaim the entry.
+
+        Race guard: if the executor finished (normally OR via the cooperative
+        timeout) by the wake instant, it wins — return False and do NOT clobber its
+        terminal outcome (likely COMPLETED / a typed exception). Plain Redis calls
+        only — no LLM, no gateway — so the watchdog itself can never hang; each
+        step is best-effort so a partial Redis failure cannot leave it half-done.
+        """
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(max(0.0, deadline - loop.time()))
+        # Race guard: exec finished while we slept / at the wake instant → it wins.
+        if exec_task.done():
+            return False
+        logger.warning(
+            f"Run {run_id} exceeded its {timeout_s}s wall-clock bound (still "
+            f"running) — enforcing terminal TIMEOUT out-of-band (resumable via "
+            f"--resume)"
+        )
+        # Stop the zombie renewing the lease so a peer can take the entry over.
+        renewal.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await renewal
+        try:
+            await self._status.mark(
+                run_id,
+                thread_id,
+                JobStatus.TIMEOUT,
+                error=f"Run timeout after {timeout_s}s",
+            )
+        except Exception as exc:  # noqa: BLE001 — observability-only, never mask
+            logger.warning(f"Run {run_id} watchdog status-mark failed: {exc}")
+        try:
+            await self._queue.ack_and_delete([entry_id])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Run {run_id} watchdog ack failed: {exc}")
+        try:
+            await self._queue.release_lock(run_id, token)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Run {run_id} watchdog lease release failed: {exc}")
+        return True
 
     async def _renew_lease(self, run_id: str, token: str, interval: float) -> None:
         """Background lease renewal — extends the TTL every ``interval`` while the

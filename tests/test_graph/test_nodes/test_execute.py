@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.config.settings import get_settings
-from src.graph.enums import GoalStatus, Phase
+from src.graph.enums import GoalStatus, Phase, Strategy, TaskComplexity
 from src.graph.factory import initial_state
 from src.graph.models import PlanStep, ToolResult
 from src.graph.nodes.execute import (
@@ -160,6 +160,86 @@ class TestExecuteNodeLLM:
         # Step completed and index advanced
         assert result["phase"] == Phase.REFLECT
         assert result["current_step_index"] == 1
+
+    @staticmethod
+    def _gateway_tools_returning_code_result() -> tuple[MagicMock, MagicMock]:
+        """A gateway + tools pair whose ``code_executor`` call completes cleanly,
+        so ``execute_node`` reaches its single ``acompletion_with_tools`` call."""
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(return_value=ToolCallResponse(
+            content="ran code",
+            tool_calls=[{
+                "id": "tc1",
+                "type": "function",
+                "function": {
+                    "name": "code_executor",
+                    "arguments": '{"code": "print(42)"}',
+                },
+            }],
+            model="glm-4.7",
+            provider="zai",
+            input_tokens=10,
+            output_tokens=20,
+            total_tokens=30,
+            cost_usd=0.0001,
+        ))
+        tools = MagicMock()
+        tools.list_tools = MagicMock(return_value=[{
+            "type": "function",
+            "function": {
+                "name": "code_executor",
+                "description": "Execute code",
+                "parameters": {"type": "object", "properties": {"code": {"type": "string"}}},
+            },
+        }])
+        tools.get_handler = MagicMock(return_value=AsyncMock(return_value="42"))
+        return gateway, tools
+
+    @pytest.mark.asyncio
+    async def test_execute_routes_complex_step_by_step_nature(
+        self, state_with_plan: dict[str, Any]
+    ) -> None:
+        """Phase 3: a step whose ``step_nature`` is COMPLEX threads that complexity
+        into the gateway call — so it routes to glm-4.7 — regardless of the goal's
+        own complexity. Replaces the prior no-complexity → always-SIMPLE-tier path."""
+        state_with_plan["plan_steps"][0].step_nature = TaskComplexity.COMPLEX
+        gateway, tools = self._gateway_tools_returning_code_result()
+
+        await execute_node(state_with_plan, gateway=gateway, tools=tools)
+
+        assert gateway.acompletion_with_tools.called
+        assert (
+            gateway.acompletion_with_tools.call_args.kwargs["complexity"]
+            is TaskComplexity.COMPLEX
+        )
+
+    @pytest.mark.asyncio
+    async def test_per_step_routing_picks_different_models(
+        self, state_with_plan: dict[str, Any]
+    ) -> None:
+        """The proof of per-step routing: a TRIVIAL step and a COMPLEX step thread
+        different complexities into the gateway, which the tier map resolves to
+        DIFFERENT models (TRIVIAL→qwen3.6-flash, COMPLEX→glm-4.7)."""
+        from src.llm.model_router import ModelRouter
+
+        router = ModelRouter(get_settings())
+
+        async def _routed_model(nature: TaskComplexity) -> str:
+            # Fresh state each call — execute_node mutates step index/results.
+            state = dict(initial_state("mixed goal", f"thread-{nature.value}", 10))
+            state["plan_steps"] = [
+                PlanStep(id="s1", description="do step", step_nature=nature)
+            ]
+            state["current_step_index"] = 0
+            state["strategy"] = Strategy.REACT
+            gateway, tools = self._gateway_tools_returning_code_result()
+            await execute_node(state, gateway=gateway, tools=tools)
+            cpx = gateway.acompletion_with_tools.call_args.kwargs["complexity"]
+            return router.route(cpx, node="execute")
+
+        assert await _routed_model(TaskComplexity.TRIVIAL) != await _routed_model(
+            TaskComplexity.COMPLEX
+        )
 
     @pytest.mark.asyncio
     async def test_write_step_forces_file_writer_tool_choice_on_nudge(

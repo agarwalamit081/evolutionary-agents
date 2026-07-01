@@ -14,7 +14,7 @@ from src.graph.state import AgentState, objective_goal_text
 from src.llm.exceptions import BudgetExhaustedError
 
 if TYPE_CHECKING:
-    from src.graph.schemas import PlanQuality
+    from src.graph.schemas import GeneratedPlan, PlanQuality
     from src.llm.gateway import LLMGateway
     from src.tools.registry import ToolRegistry
 
@@ -268,6 +268,101 @@ def _missing_deliverable_context(state: AgentState) -> str:
     return "\n".join(lines)
 
 
+# ─── Phase 3: per-step difficulty heuristic ─────────────────────────────────
+# When the planner omits ``step_nature`` (the LLM schema field is optional),
+# each step is classified so ``execute`` can route it to the model suited to its
+# nature (trivial→qwen3.6-flash, complex→glm-4.7). Mirrors the goal-level cues in
+# ``classify.py`` (``_apply_complexity_floor``) but at step granularity. Kept
+# conservative: it only PROMOTES to COMPLEX on objective signals (code execution,
+# recompute/verify, a synthesized code/data artifact) and to TRIVIAL on a clear
+# single lookup/format; everything else defaults to SIMPLE.
+_STEP_CRITICAL: tuple[str, ...] = (
+    "production", "deploy", "security", "audit", "migrate", "drop",
+    "delete", "refund", "payment",
+)
+_STEP_COMPLEX: tuple[str, ...] = (
+    "recompute", "re-compute", "cross-check", "cross check", "re-derive",
+    "rederive", "validate that", "assert that", "check that",
+    "independently confirm", "verify", "synthesize", "aggregate",
+)
+_STEP_TRIVIAL: tuple[str, ...] = (
+    "define", "what is", "list", "convert", "format", "label", "translate",
+    "look up", "lookup", "fetch", "read",
+)
+# A step that produces a code/data artifact (not just narrates it) is COMPLEX —
+# the code_executor / file write is the real work. ≥1 distinct code/data ext.
+_STEP_ARTIFACT_EXTS: frozenset[str] = frozenset({
+    "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "py", "js", "ts",
+    "rs", "go", "java", "sql", "parquet", "xlsx", "db", "sqlite",
+})
+_STEP_EXT_RE = re.compile(r"\.([a-z0-9]{2,4})\b")
+
+
+def _step_artifact_count(text: str) -> int:
+    """Count DISTINCT code/data file extensions mentioned in the step text."""
+    return len({m for m in _STEP_EXT_RE.findall(text) if m in _STEP_ARTIFACT_EXTS})
+
+
+def _classify_step(
+    description: str,
+    tool_name: str | None,
+    expected_output: str,
+) -> TaskComplexity:
+    """Heuristic per-step difficulty when the planner omits ``step_nature``.
+
+    Args:
+        description: The step's description (what it accomplishes).
+        tool_name: The tool the step names (``code_executor`` ⟹ COMPLEX).
+        expected_output: What the step should produce.
+
+    Returns:
+        A ``TaskComplexity`` tier used to route THIS step's execute model.
+    """
+    text = f"{description} {expected_output}".lower()
+    tool = (tool_name or "").lower()
+    has_artifact = _step_artifact_count(text) >= 1
+
+    if any(k in text or k in tool for k in _STEP_CRITICAL):
+        return TaskComplexity.CRITICAL
+
+    if (
+        tool == "code_executor"
+        or any(k in text for k in _STEP_COMPLEX)
+        or has_artifact
+    ):
+        return TaskComplexity.COMPLEX
+
+    if any(k in text for k in _STEP_TRIVIAL) and not has_artifact:
+        return TaskComplexity.TRIVIAL
+
+    return TaskComplexity.SIMPLE
+
+
+def _stamp_steps(plan: GeneratedPlan) -> list[PlanStep]:
+    """Convert an LLM ``GeneratedPlan`` into ``PlanStep``s, stamping each step's
+    ``step_nature`` (Phase 3): honor the LLM-emitted tier when present, else
+    classify heuristically over (description, tool_name, expected_output) so
+    ``execute`` can route each step to a model suited to its nature."""
+    steps: list[PlanStep] = []
+    for gen_step in plan.steps:
+        step_nature = gen_step.step_nature
+        if step_nature is None:
+            step_nature = _classify_step(
+                gen_step.description, gen_step.tool_name, gen_step.expected_output
+            )
+        steps.append(PlanStep(
+            id=uuid4().hex[:8],
+            description=gen_step.description,
+            tool_name=gen_step.tool_name,
+            expected_output=gen_step.expected_output,
+            depends_on=list(gen_step.depends_on),
+            status=GoalStatus.PENDING,
+            step_nature=step_nature,
+        ))
+    logger.info(f"LLM generated {len(steps)} plan steps")
+    return steps
+
+
 async def _llm_plan(
     gateway: LLMGateway,
     goal: Goal,
@@ -373,18 +468,7 @@ async def _llm_plan(
         if plan is None or not plan.steps:
             return None
 
-        steps: list[PlanStep] = []
-        for gen_step in plan.steps:
-            steps.append(PlanStep(
-                id=uuid4().hex[:8],
-                description=gen_step.description,
-                tool_name=gen_step.tool_name,
-                expected_output=gen_step.expected_output,
-                depends_on=list(gen_step.depends_on),
-                status=GoalStatus.PENDING,
-            ))
-
-        logger.info(f"LLM generated {len(steps)} plan steps")
+        steps: list[PlanStep] = _stamp_steps(plan)
         return steps
     except BudgetExhaustedError:
         # Terminal budget condition: don't degrade to heuristics — the cheapest
@@ -520,6 +604,12 @@ def _generate_plan(goal_text: str, strategy: Strategy) -> list[PlanStep]:
             status=GoalStatus.PENDING,
         ))
 
+    # Phase 3: stamp per-step difficulty for the heuristic path too, so execute
+    # routes each step to a model suited to its nature even without the LLM.
+    for step in steps:
+        step.step_nature = _classify_step(
+            step.description, step.tool_name, step.expected_output
+        )
     return steps
 
 

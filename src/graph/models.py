@@ -47,6 +47,15 @@ class PlanStep(BaseModel):
     result: str | None = None
     tokens_used: int = 0
     duration_ms: int = 0
+    # Per-step difficulty/nature (Phase 3 per-step routing). Drives which model
+    # executes THIS step: ``execute`` resolves ``route(step.step_nature,
+    # NODE_EXECUTE)`` so a trivial step (single-tool lookup) goes to the cheap
+    # tier (qwen3.6-flash) while a complex step (code_executor / recompute /
+    # multi-artifact) goes to the strong tier (glm-4.7). Defaults to SIMPLE so
+    # old checkpoints deserialize without this field and the prior behavior
+    # (single execute-model per goal) is preserved when unset. Graph state only —
+    # NOT a DB column, so no migration.
+    step_nature: TaskComplexity = TaskComplexity.SIMPLE
 
 
 class SkillDef(BaseModel):

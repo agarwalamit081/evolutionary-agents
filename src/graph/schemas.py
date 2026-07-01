@@ -57,6 +57,17 @@ class GeneratedStep(BaseModel):
         description="Descriptions of earlier steps this step depends on (the "
         "'dependencies' decomposition pass); empty if none",
     )
+    # Optional per-step difficulty. When the planner emits this, ``_llm_plan``
+    # honors it directly; otherwise the node falls back to a heuristic
+    # classifier over (description, tool_name, expected_output). Optional so the
+    # LLM is never forced to guess a tier it lacks signal for.
+    step_nature: TaskComplexity | None = Field(
+        default=None,
+        description="Optional difficulty of this step: trivial (single-tool "
+        "lookup/format), simple (one clear tool call), complex (code execution, "
+        "recompute/verification, multi-artifact synthesis), critical "
+        "(irreversible / high-stakes). Omit if unclear.",
+    )
 
 
 class GeneratedPlan(BaseModel):

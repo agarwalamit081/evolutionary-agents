@@ -10,7 +10,15 @@ from src.config import get_settings
 from src.graph.enums import GoalStatus, Phase, Strategy, TaskComplexity
 from src.graph.factory import initial_state
 from src.graph.models import Goal, PlanStep
-from src.graph.nodes.plan import _split_coarse_step, _validate_step_atomicity, plan_node
+from src.graph.nodes.plan import (
+    _classify_step,
+    _generate_plan,
+    _split_coarse_step,
+    _stamp_steps,
+    _validate_step_atomicity,
+    plan_node,
+)
+from src.graph.schemas import GeneratedPlan, GeneratedStep
 from src.llm.models import LLMResponse
 
 
@@ -672,3 +680,86 @@ class TestPlanAtomicityNodeIntegration:
         # Guard held: the coarse step is NOT decomposed.
         assert len(result["plan_steps"]) == 1
         assert result["plan_quality"]["too_coarse_count"] == 1
+
+
+class TestStepNatureClassification:
+    """Phase 3: per-step difficulty drives which model executes each step.
+    ``_classify_step`` is the heuristic fallback when the planner omits
+    ``step_nature``; ``_stamp_steps`` honors an LLM-emitted tier, else classifies."""
+
+    def test_code_executor_step_is_complex(self) -> None:
+        """A step that runs code is COMPLEX regardless of its prose."""
+        assert (
+            _classify_step("produce the answer", "code_executor", "the computed value")
+            == TaskComplexity.COMPLEX
+        )
+
+    def test_recompute_verify_step_is_complex(self) -> None:
+        """Recompute/verify/cross-check cues are COMPLEX (the strong-model work)."""
+        assert (
+            _classify_step("Recompute the totals from the raw file", None, "validated sum")
+            == TaskComplexity.COMPLEX
+        )
+
+    def test_multi_artifact_step_is_complex(self) -> None:
+        """A step that synthesizes distinct code/data artifacts is COMPLEX."""
+        assert (
+            _classify_step(
+                "write the deliverables", None, "results.csv and summary.json"
+            )
+            == TaskComplexity.COMPLEX
+        )
+
+    def test_critical_step(self) -> None:
+        """Irreversible / high-stakes verbs are CRITICAL."""
+        assert (
+            _classify_step("deploy to production", None, "deployment confirmed")
+            == TaskComplexity.CRITICAL
+        )
+
+    def test_trivial_lookup_step(self) -> None:
+        """A single list/format/lookup with no artifact is TRIVIAL."""
+        assert (
+            _classify_step("list the category names", "web_search", "the names")
+            == TaskComplexity.TRIVIAL
+        )
+
+    def test_plain_step_defaults_to_simple(self) -> None:
+        """No strong signal → SIMPLE (the conservative default)."""
+        assert (
+            _classify_step("process the items", None, "processed items")
+            == TaskComplexity.SIMPLE
+        )
+
+    def test_stamp_steps_honors_llm_emitted_nature(self) -> None:
+        """When the planner emits ``step_nature``, it is honored verbatim."""
+        plan = GeneratedPlan(steps=[
+            GeneratedStep(description="trivial step", step_nature=TaskComplexity.TRIVIAL),
+            GeneratedStep(description="hard step", step_nature=TaskComplexity.COMPLEX),
+        ])
+        steps = _stamp_steps(plan)
+        assert [s.step_nature for s in steps] == [
+            TaskComplexity.TRIVIAL,
+            TaskComplexity.COMPLEX,
+        ]
+
+    def test_stamp_steps_classifies_when_omitted(self) -> None:
+        """When the planner omits ``step_nature``, the heuristic fills it in."""
+        plan = GeneratedPlan(steps=[
+            GeneratedStep(description="run code_executor to compute", tool_name="code_executor"),
+            GeneratedStep(description="list the names", expected_output="names"),
+        ])
+        steps = _stamp_steps(plan)
+        assert steps[0].step_nature is TaskComplexity.COMPLEX
+        assert steps[1].step_nature is TaskComplexity.TRIVIAL
+
+    def test_heuristic_plan_stamps_every_step(self) -> None:
+        """The no-LLM heuristic planner also stamps ``step_nature`` on every step
+        (the verify/validate step must promote to COMPLEX)."""
+        steps = _generate_plan("compute and verify the statistics", Strategy.REACT)
+        assert steps, "heuristic planner must produce steps"
+        assert all(s.step_nature is not None for s in steps)
+        # The "verify against success criteria" step carries a COMPLEX cue.
+        verify_like = [s for s in steps if "verify" in s.description.lower()]
+        assert verify_like, "REACT heuristic plan should include a verify step"
+        assert verify_like[0].step_nature is TaskComplexity.COMPLEX

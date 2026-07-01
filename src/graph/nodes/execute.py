@@ -514,6 +514,23 @@ async def _llm_execute(
         execute_complexity = (
             goal.complexity if goal and goal.complexity else TaskComplexity.SIMPLE
         )
+        # Phase 3 — per-step routing: the model for THIS execute call follows the
+        # step's OWN nature (``step_nature``, stamped by the plan node), not the
+        # goal-level complexity. A trivial step (single-tool lookup) routes to the
+        # cheap tier (qwen3.6-flash); a complex step (code_executor / recompute /
+        # multi-artifact) routes to glm-4.7. This makes execute routing REAL
+        # (previously the gateway call passed no complexity → always the SIMPLE
+        # tier, even though eval attribution tagged route(goal.complexity)) and
+        # per-step. Falls back to the goal complexity when there is no current
+        # step so routing never breaks.
+        _cur_step = (
+            plan_steps[step_index]
+            if plan_steps and 0 <= step_index < len(plan_steps)
+            else None
+        )
+        step_routing_complexity = (
+            _cur_step.step_nature if _cur_step is not None else execute_complexity
+        )
         techniques = select_techniques_for_node(
             complexity=execute_complexity, node=NODE_EXECUTE, goal_text=goal_text,
         )
@@ -656,11 +673,13 @@ async def _llm_execute(
                 messages=payload,
                 tools=tool_defs,
                 tool_choice=forced_tool_choice,
-                # Node identity → NODE_TIER_MAP: execute stays CHEAP
-                # (deepseek-v4-flash) even on a COMPLEX/CRITICAL goal, since
-                # individual steps are simple tool-calling (cost discipline,
-                # findings-05 A). Overrides the de-flatted COMPLEX→MODERATE
-                # default.
+                # Phase 3: route THIS step's model by its own nature
+                # (``step_routing_complexity``) so a trivial step runs on the
+                # cheap tier (qwen3.6-flash) and a complex step on glm-4.7.
+                # ``node=NODE_EXECUTE`` still threads into NODE_TIER_MAP for the
+                # per-(complexity,node) refine. This is the real per-step routing
+                # (replacing the prior no-complexity → always-SIMPLE-tier path).
+                complexity=step_routing_complexity,
                 node=NODE_EXECUTE,
             )
 

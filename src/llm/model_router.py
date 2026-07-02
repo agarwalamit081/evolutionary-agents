@@ -79,13 +79,22 @@ COMPLEXITY_TIER_MAP: dict[TaskComplexity, tuple[ModelTier, str]] = {
     # the gateway applies to whichever fires.
     TaskComplexity.TRIVIAL: (ModelTier.VERY_CHEAP, "qwen3.6-flash"),
     TaskComplexity.SIMPLE: (ModelTier.CHEAP, "deepseek-v4-flash"),
-    TaskComplexity.COMPLEX: (ModelTier.MODERATE, "glm-4.7"),
-    TaskComplexity.CRITICAL: (ModelTier.MODERATE, "glm-4.7"),
+    # COMPLEX/CRITICAL primary is glm-5.1 (the deferred C3, promoted ahead of
+    # battery-04 curve #5+). glm-5.1 is the stronger cost-effective model (200K
+    # ctx, a stronger planner/tool-caller) but is text-only — glm-4.7
+    # (vision-capable, same MODERATE tier) is glm-5.1's first LIVE
+    # FALLBACK_CHAINS entry (claude-sonnet-4-6 above it is inert while Anthropic
+    # is disabled), so an image-bearing step or a Z.AI hiccup degrades cleanly
+    # to glm-4.7 (the very model this replaces). Pre-C3, execute + the no-node
+    # default were glm-4.7; only plan was glm-5.1 — and a transient Z.AI failure
+    # silently dropped plan to glm-4.7 throughout curve #4 (0 glm-5.1 calls).
+    TaskComplexity.COMPLEX: (ModelTier.MODERATE, "glm-5.1"),
+    TaskComplexity.CRITICAL: (ModelTier.MODERATE, "glm-5.1"),
 }
 
 # Per-node routing overrides keyed by (TaskComplexity, node_name). A node-aware
 # tier lets a complex goal use a stronger model for reasoning-heavy steps
-# (plan/reflect/verify) while capping execute to MODERATE glm-4.7 (Phase 2
+# (plan/reflect/verify) while keeping execute at MODERATE glm-5.1 (Phase 2
 # retier — the cost uplift is offset by RAG-over-tools + per-step routing,
 # which keeps trivial steps on the CHEAP tier). verify/reflect on
 # complex/critical goals additionally prefer the reasoning model via
@@ -100,12 +109,14 @@ NODE_TIER_MAP: dict[tuple[TaskComplexity, str], tuple[ModelTier, str]] = {
     # glm-5.1 → glm-4.7 → deepseek-v4-pro.
     (TaskComplexity.COMPLEX, "plan"): (ModelTier.MODERATE, "glm-5.1"),
     (TaskComplexity.CRITICAL, "plan"): (ModelTier.MODERATE, "glm-5.1"),
-    # Execution on complex/critical goals moves to glm-4.7 (MODERATE) — a
-    # stronger live tool-caller than the CHEAP deepseek-v4-flash that previously
-    # ran every execute step. Phase-3 per-step routing routes trivial/simple
-    # steps back to the CHEAP tier, so only the genuinely complex steps pay.
-    (TaskComplexity.COMPLEX, "execute"): (ModelTier.MODERATE, "glm-4.7"),
-    (TaskComplexity.CRITICAL, "execute"): (ModelTier.MODERATE, "glm-4.7"),
+    # Execution on complex/critical goals uses glm-5.1 (MODERATE) — the C3 swap
+    # from glm-4.7 (battery-04 curve #5+ re-baseline). glm-5.1 is text-only; its
+    # first LIVE FALLBACK_CHAINS entry is glm-4.7 (vision-capable), so an
+    # image-bearing execute step falls back cleanly. Phase-3 per-step routing
+    # keeps trivial/simple steps on the CHEAP tier, so only the genuinely complex
+    # steps pay for the MODERATE primary.
+    (TaskComplexity.COMPLEX, "execute"): (ModelTier.MODERATE, "glm-5.1"),
+    (TaskComplexity.CRITICAL, "execute"): (ModelTier.MODERATE, "glm-5.1"),
 }
 
 

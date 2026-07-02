@@ -158,19 +158,24 @@ class TestModelRouterRoute:
         against the current COMPLEXITY_TIER_MAP + its fallback chain so the test
         tracks the invariant, not a model name that a tier-map experiment retunes."""
         from src.config.model_registry import FALLBACK_CHAINS
-        from src.llm.model_router import COMPLEXITY_TIER_MAP
+        from src.llm.model_router import COMPLEXITY_TIER_MAP, _resolved_disabled_providers
 
         settings = Settings()
         _tier, primary = COMPLEXITY_TIER_MAP[TaskComplexity.COMPLEX]
         primary_provider = ModelRouter._extract_provider(primary)
-        # First chain model on a DIFFERENT provider than the primary, so keying
-        # it genuinely exercises the fallback path (same-provider members share
-        # the primary's lack of a key).
+        # A disabled provider (e.g. anthropic under a quota cap) is never
+        # routable even with a key, so it is excluded here just as route() does
+        # — otherwise the picker selects a fallback production can never reach.
+        disabled = _resolved_disabled_providers(settings)
+        # First chain model on a DIFFERENT, non-disabled provider than the
+        # primary, so keying it genuinely exercises the fallback path
+        # (same-provider members share the primary's lack of a key).
         fallback = next(
             (
                 m
                 for m in FALLBACK_CHAINS.get(primary, [])
                 if ModelRouter._extract_provider(m) != primary_provider
+                and ModelRouter._extract_provider(m) not in disabled
             ),
             None,
         )
@@ -372,17 +377,17 @@ class TestModelRouterPerNodeRouting:
         # COMPLEX+plan hits the NODE_TIER_MAP override primary.
         assert complex_plan == NODE_TIER_MAP[(TaskComplexity.COMPLEX, "plan")][1]
 
-    def test_execute_upgrades_to_glm47_on_complex_goal(self) -> None:
-        """Phase-2 retier: execute on a COMPLEX/CRITICAL goal moves to the
-        MODERATE glm-4.7 — a stronger live tool-caller than the CHEAP
+    def test_execute_upgrades_to_glm51_on_complex_goal(self) -> None:
+        """C3 retier: execute on a COMPLEX/CRITICAL goal moves to the
+        MODERATE glm-5.1 — a stronger live tool-caller than the CHEAP
         deepseek-v4-flash that previously ran every execute step. The cost
         uplift is bounded by per-step routing (Phase 3 routes trivial/simple
         steps back to the CHEAP tier) + RAG-over-tools, NOT by keeping execute
         CHEAP. Pinned to the model id (not just the tier) since the retier is
         the point."""
         router = self._all_keyed_router()
-        assert router.route(TaskComplexity.COMPLEX, node="execute") == "glm-4.7"
-        assert router.route(TaskComplexity.CRITICAL, node="execute") == "glm-4.7"
+        assert router.route(TaskComplexity.COMPLEX, node="execute") == "glm-5.1"
+        assert router.route(TaskComplexity.CRITICAL, node="execute") == "glm-5.1"
 
     def test_verify_and_reflect_complex_route_to_reasoning(self) -> None:
         """Resurrected route_reasoning caller: verify/reflect on a COMPLEX goal
@@ -481,7 +486,7 @@ class TestRoutingEnvOverrides:
     def test_node_tier_override_flips_routing(self) -> None:
         """A node-tier override redirects a (complexity, node) decision. With all
         providers keyed, COMPLEX+execute normally returns the NODE_TIER_MAP
-        primary glm-4.7 (Phase-2 retier); overriding ``COMPLEX:execute`` →
+        primary glm-5.1 (C3 retier); overriding ``COMPLEX:execute`` →
         deepseek-v4-pro flips it."""
         from src.llm.model_router import NODE_TIER_MAP
 
@@ -489,7 +494,7 @@ class TestRoutingEnvOverrides:
             node_json='{"COMPLEX:execute": "deepseek-v4-pro"}'
         )
         # Sanity: the curated default for COMPLEX:execute is NOT the override.
-        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "glm-4.7"
+        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "glm-5.1"
         assert router.route(TaskComplexity.COMPLEX, node="execute") == "deepseek-v4-pro"
 
     def test_complexity_tier_override_flips_routing_no_node(self) -> None:

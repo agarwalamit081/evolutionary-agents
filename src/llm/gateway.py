@@ -476,7 +476,7 @@ class LLMGateway:
                 model=response.model,
                 input_tokens=response.input_tokens,
                 output_tokens=response.output_tokens,
-                cached_tokens=0,
+                cached_tokens=response.cache_read_tokens,
                 cost_usd=response.cost_usd,
                 latency_ms=latency_ms,
             )
@@ -491,6 +491,7 @@ class LLMGateway:
                 output_tokens=response.output_tokens,
                 latency_ms=latency_ms,
                 run_id=self._run_id,
+                cached_tokens=response.cache_read_tokens,
             )
 
         # Cache store

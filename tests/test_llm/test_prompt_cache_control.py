@@ -172,6 +172,78 @@ class TestParseResponseCacheTokens:
         assert out.cache_creation_tokens == 0
 
 
+# ─── multi-provider prefix-cache read-back + recorder (Phase 3.5 A2) ──────
+
+
+class TestParseResponseMultiProviderCacheTokens:
+    """OpenAI (prompt_tokens_details.cached_tokens) and DeepSeek
+    (prompt_cache_hit_tokens) surface their own prefix-cache hit fields; the
+    parser sums them into cache_read_tokens alongside Anthropic's
+    _cache_read_input_tokens so the win is measurable across providers. The
+    real int/dict values are set explicitly because a bare MagicMock usage
+    auto-vivifies every attribute (the isinstance guards would otherwise skip
+    them and int(MagicMock()) coerces to 1)."""
+
+    def test_openai_prompt_tokens_details_parsed(self) -> None:
+        gw = _make_gateway(_make_settings())
+        resp = _mock_resp()
+        resp.usage.prompt_tokens_details = {"cached_tokens": 500}
+        out = gw._parse_response(resp, "gpt-4o-mini-2024-07-18", "openai")
+        assert out.cache_read_tokens == 500
+
+    def test_deepseek_prompt_cache_hit_parsed(self) -> None:
+        gw = _make_gateway(_make_settings())
+        resp = _mock_resp()
+        resp.usage.prompt_cache_hit_tokens = 300
+        out = gw._parse_response(resp, "deepseek-v4-flash", "deepseek")
+        assert out.cache_read_tokens == 300
+
+    def test_sums_anthropic_openai_and_deepseek(self) -> None:
+        """All three provider-native fields on one usage object are summed."""
+        gw = _make_gateway(_make_settings())
+        resp = _mock_resp()
+        resp.usage._cache_read_input_tokens = 200  # type: ignore[attr-defined]
+        resp.usage.prompt_tokens_details = {"cached_tokens": 500}
+        resp.usage.prompt_cache_hit_tokens = 300
+        out = gw._parse_response(resp, "deepseek-v4-pro", "deepseek")
+        assert out.cache_read_tokens == 1000
+
+    def test_non_numeric_junk_fields_are_skipped_not_fatal(self) -> None:
+        """A usage object that reports cache fields as non-int junk (incl. the
+        MagicMock auto-vivified values) must be skipped, never abort the parse."""
+        gw = _make_gateway(_make_settings())
+        resp = _mock_resp()
+        # Anthropic path coerced to 0 via `None or 0`; OpenAI/DeepSeek isinstance
+        # guards skip a non-numeric cached value.
+        resp.usage._cache_read_input_tokens = None  # type: ignore[attr-defined]
+        resp.usage.prompt_tokens_details = {"cached_tokens": "not-a-number"}
+        out = gw._parse_response(resp, "gpt-4o-mini-2024-07-18", "openai")
+        assert out.cache_read_tokens == 0
+
+    def test_records_prometheus_counter_when_enabled(self) -> None:
+        """With metrics ON, a cache hit records the Prometheus counter."""
+        settings = _make_settings()
+        settings.observability.llm_cache_token_metrics_enabled = True
+        gw = _make_gateway(settings)
+        resp = _mock_resp()
+        resp.usage.prompt_cache_hit_tokens = 424
+        with patch("src.llm.gateway.record_prompt_cache_tokens") as mock_record:
+            out = gw._parse_response(resp, "deepseek-v4-pro", "deepseek")
+        assert out.cache_read_tokens == 424
+        mock_record.assert_called_once_with("deepseek-v4-pro", "deepseek", 424, 0)
+
+    def test_no_prometheus_counter_when_metrics_disabled(self) -> None:
+        """With metrics OFF, the counter is never touched."""
+        settings = _make_settings()
+        settings.observability.llm_cache_token_metrics_enabled = False
+        gw = _make_gateway(settings)
+        resp = _mock_resp()
+        resp.usage.prompt_cache_hit_tokens = 424
+        with patch("src.llm.gateway.record_prompt_cache_tokens") as mock_record:
+            gw._parse_response(resp, "deepseek-v4-pro", "deepseek")
+        mock_record.assert_not_called()
+
+
 # ─── gateway wiring: messages reach litellm with the breakpoint ──────
 
 

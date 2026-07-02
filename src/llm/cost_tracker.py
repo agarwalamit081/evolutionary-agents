@@ -65,6 +65,7 @@ class CostTracker:
         task_id: str | None = None,
         latency_ms: int | None = None,
         run_id: str | None = None,
+        cached_tokens: int = 0,
     ) -> float:
         """Record an LLM API call and return the calculated cost.
 
@@ -79,6 +80,13 @@ class CostTracker:
                 the run that issued the call. Enables per-run cost attribution
                 (``get_run_spend`` / ``get_runs_summary``). Defaults to ``None``
                 (unattributed) when the gateway has no run bound.
+            cached_tokens: Prompt-cache HIT tokens for this call — the subset of
+                ``input_tokens`` the provider served from its cache (Anthropic
+                ``_cache_read_input_tokens`` / OpenAI ``prompt_tokens_details.
+                cached_tokens`` / DeepSeek ``prompt_cache_hit_tokens``). Recorded
+                for observability (Cluster-A A2); the actual $ saving still
+                occurs at provider billing, so ``cost_usd`` stays full-price and
+                budget-cap math is untouched. Defaults to ``0``.
 
         Returns:
             The calculated cost in USD.
@@ -95,6 +103,7 @@ class CostTracker:
             task_id=task_id,
             latency_ms=latency_ms,
             run_id=run_id,
+            cached_tokens=cached_tokens,
         )
         # Cost tracking is observability-only — a persistence failure here
         # (e.g. a duplicate-key IntegrityError from interleaved commits on the

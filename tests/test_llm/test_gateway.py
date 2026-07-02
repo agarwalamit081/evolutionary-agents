@@ -683,6 +683,46 @@ class TestAcompletion:
         assert tracker.record_usage.call_args.kwargs["run_id"] == "cli-q05"
 
     @pytest.mark.asyncio
+    async def test_cache_tokens_thread_into_record_usage(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """Phase 3.5 A2: the provider-native prompt-cache hit tokens parsed by
+        ``_parse_response`` reach ``CostTracker.record_usage`` as ``cached_tokens``
+        so the prefix-cache win is persisted to cost_ledger (not dropped). The
+        in-memory CostRecord gets the same value."""
+        mock_resp = _make_litellm_response(content="ok", input_tokens=4, output_tokens=2)
+        # Set REAL int/dict cache fields (a bare MagicMock usage would coerce to
+        # 1 and the isinstance guards would skip non-numeric values).
+        mock_resp.usage._cache_read_input_tokens = 200  # type: ignore[attr-defined]
+        mock_resp.usage.prompt_tokens_details = {"cached_tokens": 500}
+        mock_resp.usage.prompt_cache_hit_tokens = 300
+        tracker = MagicMock()
+        tracker.record_usage = AsyncMock(return_value=0.001)
+        tracker.check_budget = AsyncMock(return_value=(True, "ok"))
+        gateway.set_cost_tracker(tracker)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model="deepseek-v4-flash",
+            )
+
+        tracker.record_usage.assert_awaited_once()
+        # 200 (Anthropic) + 500 (OpenAI) + 300 (DeepSeek) summed by the parser.
+        assert tracker.record_usage.call_args.kwargs["cached_tokens"] == 1000
+        # The in-memory CostRecord (flushed to graph state) carries the same.
+        assert gateway.get_cost_records()[-1].cached_tokens == 1000
+
+    @pytest.mark.asyncio
     async def test_per_call_timeout_threads_to_litellm(
         self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
     ) -> None:

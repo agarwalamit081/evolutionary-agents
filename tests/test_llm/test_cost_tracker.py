@@ -207,6 +207,46 @@ class TestRecordUsage:
         assert call_kwargs["latency_ms"] == 1500
 
     @pytest.mark.asyncio
+    async def test_cached_tokens_default_is_zero(
+        self, mock_session: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """cached_tokens defaults to 0 when the caller (e.g. optimizer/engine)
+        omits it — backward-compatible with the pre-A2 callers."""
+        with patch("src.llm.cost_tracker.CostLedger") as mock_ledger_cls:
+            tracker = CostTracker(session=mock_session, settings=mock_settings)
+            await tracker.record_usage(
+                model="deepseek-v4-flash",
+                provider="deepseek",
+                input_tokens=10,
+                output_tokens=5,
+            )
+        assert mock_ledger_cls.call_args[1]["cached_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_cached_threads_into_ledger_entry(
+        self, mock_session: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Phase 3.5 A2: the parsed provider-native cache-hit tokens reach the
+        CostLedger row as cached_tokens (so the prefix-cache win is persisted to
+        cost_ledger, not dropped). cost_usd stays full-price (recorder-only)."""
+        with patch("src.llm.cost_tracker.CostLedger") as mock_ledger_cls:
+            tracker = CostTracker(session=mock_session, settings=mock_settings)
+            await tracker.record_usage(
+                model="deepseek-v4-pro",
+                provider="deepseek",
+                input_tokens=800,
+                output_tokens=120,
+                cached_tokens=424,
+            )
+        call_kwargs = mock_ledger_cls.call_args[1]
+        assert call_kwargs["cached_tokens"] == 424
+        # cost_usd is computed from input+output tokens only — NOT discounted by
+        # the cache hit (recorder-only; the $ saving occurs at provider billing).
+        assert call_kwargs["cost_usd"] == CostTracker.calculate_cost(
+            "deepseek-v4-pro", 800, 120
+        )
+
+    @pytest.mark.asyncio
     async def test_optional_fields_default_to_none(
         self, mock_session: MagicMock, mock_settings: MagicMock
     ) -> None:

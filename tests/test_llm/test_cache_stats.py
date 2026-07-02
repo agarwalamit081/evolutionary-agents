@@ -184,3 +184,43 @@ class TestGatewayCacheStats:
         assert stats["hits"] == 1
         assert stats["misses"] == 1
         assert stats["hit_rate"] == 0.5
+
+
+# ─── A1 (Phase 3.5): production gateway ↔ PromptCache wiring seam ────────────
+
+
+class TestSetCacheSeam:
+    """``gateway.set_cache`` is the seam ``execute_run`` wires on every run.
+
+    The exact-match LLM cache is attached on the PRODUCTION path:
+    ``execute_run`` builds a ``PromptCache`` over the run's Redis client and calls
+    ``gateway.set_cache(cache)`` (runner.py:351); the worker's
+    ``default_agent_executor`` reuses ``execute_run``, so the battery path has the
+    cache attached. These lock the seam itself — ``_cache`` is ``None`` by default
+    and the exact object is attached on ``set_cache`` — so the wiring is real, not
+    dormant (the original "dormant on the worker path" misread this guards against).
+
+    CAVEAT: the cache is exact-match on (messages, model, temperature, max_tokens)
+    (cache._make_cache_key). In a verify loop the prompt grows every cycle, so
+    cache hits there are ≈ 0 by design. The per-call input-token win is
+    provider-native PREFIX caching (A2) observed via record_prompt_cache_tokens,
+    not this exact-match cache.
+    """
+
+    def test_cache_is_none_by_default(self) -> None:
+        gateway = LLMGateway(_make_settings())
+        assert gateway._cache is None
+
+    def test_set_cache_attaches_the_exact_object(self) -> None:
+        gateway = LLMGateway(_make_settings())
+        cache = PromptCache(_make_redis({}), _make_settings())
+        gateway.set_cache(cache)
+        assert gateway._cache is cache
+
+    def test_set_cache_replaces_a_prior_cache(self) -> None:
+        gateway = LLMGateway(_make_settings())
+        first = PromptCache(_make_redis({}), _make_settings())
+        second = PromptCache(_make_redis({}), _make_settings())
+        gateway.set_cache(first)
+        gateway.set_cache(second)
+        assert gateway._cache is second

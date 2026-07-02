@@ -158,3 +158,31 @@ class TestExecuteRunSubdirClean:
         # The resumable deliverable SURVIVES — clean did not fire on resume.
         assert deliverable.exists()
         assert deliverable.read_text() == "resumable state"
+
+
+class TestExecuteRunWiresPromptCache:
+    """A1 (Phase 3.5) — ``execute_run`` attaches the Redis PromptCache on the
+    production path.
+
+    The exact-match LLM cache is wired inside ``execute_run`` (runner.py:338-357):
+    it builds a ``PromptCache`` over the run's Redis client and calls
+    ``gateway.set_cache(cache)``. The worker's ``default_agent_executor`` reuses
+    ``execute_run`` (worker/executors.py), so the battery/production path has the
+    cache attached — NOT dormant. This is the source-level invariant that guards
+    the original "the cache is dormant on the worker path" misread: it locks that
+    ``execute_run`` both constructs and attaches the cache, so a future refactor
+    can't silently drop the wiring. Same source-inspection pattern as the G1
+    import-smoke invariant; the seam mechanism itself is locked in
+    ``tests/test_llm/test_cache_stats.py::TestSetCacheSeam``.
+    """
+
+    def test_execute_run_constructs_and_attaches_prompt_cache(self) -> None:
+        import inspect
+
+        body = inspect.getsource(runner.execute_run)
+        assert "PromptCache" in body, (
+            "execute_run must construct a PromptCache over the run's Redis client"
+        )
+        assert "gateway.set_cache(" in body, (
+            "execute_run must attach the cache via gateway.set_cache(...)"
+        )

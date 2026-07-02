@@ -143,3 +143,55 @@ class TestExecuteSystemRunFilesGuidance:
         # Relative results/ paths resolve because the tools run from project root.
         assert "project root" in rendered
 
+
+# ─── A2a (Phase 3.5): builder prefix-stability for provider-native caching ──
+
+
+class TestBuildMessagesPrefixStability:
+    """Provider-native PREFIX caching (OpenAI/DeepSeek/Z.AI auto-cache) engages
+    only when the system-prompt prefix is byte-identical across calls in a run.
+
+    ``build_messages`` is a pure function of (base_system, techniques, node): it
+    injects no per-call timestamp / run_id / randomness (builder.py has none of
+    datetime/uuid/random). These lock that purity — the prerequisite that lets
+    every auto-caching provider engage on the shared system block, the dominant
+    per-call input-token lever for A2. Companion to the cache-hit observability in
+    gateway.py (record_prompt_cache_tokens parses OpenAI ``cached_tokens`` /
+    DeepSeek ``prompt_cache_hit_tokens`` / Anthropic ``_cache_read_input_tokens``).
+    """
+
+    def test_identical_args_yield_byte_identical_system_block(self) -> None:
+        from src.graph.prompts.builder import build_messages, clear_evolved_candidate
+        from src.graph.prompts.technique_selector import NODE_EXECUTE
+
+        clear_evolved_candidate(None)  # promotion OFF by default → deterministic
+        techniques = _techniques_for_critical_plan()
+        m1 = build_messages(
+            _SYSTEM_WITH_MARKER, "user turn A", techniques=techniques, node=NODE_EXECUTE
+        )
+        m2 = build_messages(
+            _SYSTEM_WITH_MARKER, "user turn A", techniques=techniques, node=NODE_EXECUTE
+        )
+        assert m1[0]["content"] == m2[0]["content"]  # system block identical
+        assert m1 == m2  # whole message list identical
+
+    def test_system_prefix_invariant_to_varying_user_turn(self) -> None:
+        """The cacheable system prefix stays byte-identical as the per-call user
+        turn varies — the whole point of prefix caching."""
+        from src.graph.prompts.builder import build_messages, clear_evolved_candidate
+        from src.graph.prompts.technique_selector import NODE_PLAN
+
+        clear_evolved_candidate(None)
+        m1 = build_messages(_SYSTEM_WITH_MARKER, "user turn 1", node=NODE_PLAN)
+        m2 = build_messages(_SYSTEM_WITH_MARKER, "DIFFERENT user turn 2", node=NODE_PLAN)
+        assert m1[0]["content"] == m2[0]["content"]  # system prefix invariant
+        assert m1[1]["content"] != m2[1]["content"]  # only the user tail differs
+
+    def test_no_techniques_is_byte_stable(self) -> None:
+        from src.graph.prompts.builder import build_messages, clear_evolved_candidate
+
+        clear_evolved_candidate(None)
+        m1 = build_messages(_SYSTEM_NO_MARKER, "u1")
+        m2 = build_messages(_SYSTEM_NO_MARKER, "u1")
+        assert m1[0]["content"] == m2[0]["content"]
+

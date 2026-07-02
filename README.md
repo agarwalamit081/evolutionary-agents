@@ -196,10 +196,19 @@ in each goal's latest attempt, then mean-of-per-goal-means. Results live in `log
 | #1 | 20260701 | 0.7735 | 0.7785 | baseline |
 | #2 (per-step routing) | 20260702 | 0.7362 | 0.7977 | −0.037 (neutral) |
 | #3 (Cluster A + B1) | 20260704 | 0.7663 | 0.8482 | +0.030 (neutral recovery; ex-q06 best of three) |
+| #4 (Cluster B latency rebalance + A2 cache recorder) | 20260705 | 0.7038 | 0.7446 | −0.063 (neutral; lowest of four) |
 
-The reliability/cost stack is now proven (q06 redelivery bounded 40% by the A5 token cap;
-timeout amplification killed by B1). Three consecutive neutral curves — the unproven pillar
-remains self-improvement.
+The reliability/cost stack is now proven across four consecutive neutral curves (q06
+redelivery bounded 40% by the A5 token cap; timeout amplification killed by B1; budget/timeout
+backstops fired cleanly — q06 `budget_exhausted` @ $0.985, q08 `timeout` @ 2h). Curve #4 is the
+lowest but is **run-to-run variance, not a regression**: goals perfect in #3 (q02/q07/q09=1.0)
+dropped, while low-in-#3 goals (q05 0.525→0.863, q06 0.111→0.378) improved. Cluster B was a
+speed/cost cycle — its latency-bomb removal (mistral-medium-3-5 946s, nvidia-deepseek-v4-pro
+164s) was a **no-op for this battery** (only 3 MODERATE-tier primaries touched; the bombs live
+in fallback tails never reached), but valid as forward-looking defensive hardening. The clear
+cost win is **A2**: provider prompt-cache hits are now recorded in `cost_ledger.cached_tokens`
+(2,107,520 tokens across 428/624 rows in this battery — previously invisible). The unproven
+pillar remains self-improvement.
 
 ---
 

@@ -221,6 +221,120 @@ def test_effective_fallback_chains_invalid_overlay_is_ignored() -> None:
     assert merged["qwen3.5-flash"] == ["gpt-4o-mini-2024-07-18"]  # good entry merged
 
 
+# ─── Phase 3.5 Cluster B: latency-aware FALLBACK_CHAINS rebalance ──────────
+# cost_ledger.latency_ms (12,596 rows) showed two latency bombs sitting in the
+# hot-path fallback chains: mistral-medium-3-5 (946s mean / 1358s max) was a
+# fallback entry in every MODERATE chain, and nvidia-deepseek-v4-pro (164s) was
+# a fallback in the deepseek-v4-pro reasoning chain. NVIDIA free-tier models
+# succeed so they never trip the breaker/timeout logs — they just burn
+# wall-clock. These locks keep the bombs out of the hot path so a maintainer
+# does not "restore" them from a doc that implies depth.
+
+
+def test_mistral_medium_latency_bomb_removed_from_all_chains() -> None:
+    """mistral-medium-3-5 (946s mean per cost_ledger.latency_ms) must not be a
+    fallback entry in ANY chain — it is a hard latency bomb. Its own key is
+    retained (never a routing primary; reached only by the exhaustion
+    tier-scan), but it never lists itself, so the assertion is simply that the
+    model_id appears in no fallback list at all."""
+    from src.config.model_registry import FALLBACK_CHAINS
+
+    offenders = [
+        prim for prim, chain in FALLBACK_CHAINS.items() if "mistral-medium-3-5" in chain
+    ]
+    assert not offenders, (
+        "mistral-medium-3-5 (946s mean latency bomb) must not appear as a "
+        f"fallback in any chain; found in: {offenders}"
+    )
+
+
+def test_nvidia_deepseek_pro_removed_from_reasoning_chain() -> None:
+    """nvidia-deepseek-v4-pro (164s mean) must not sit in the deepseek-v4-pro
+    reasoning chain. It MAY remain in NVIDIA-primary chains (free-tier
+    affinity) — only the *paid-reasoning* hot path is the concern."""
+    from src.config.model_registry import FALLBACK_CHAINS
+
+    chain = FALLBACK_CHAINS["deepseek-v4-pro"]
+    assert "nvidia-deepseek-v4-pro" not in chain, (
+        "nvidia-deepseek-v4-pro (164s mean) must not be a fallback in the "
+        f"deepseek-v4-pro reasoning chain; chain={chain}"
+    )
+
+
+@pytest.mark.parametrize(
+    "primary",
+    ["qwen3.5-flash", "gpt-4o-mini-2024-07-18"],
+)
+def test_slow_nvidia_demoted_to_last_or_absent_in_cheap_chains(primary: str) -> None:
+    """In the TRIVIAL/CHEAP primary chains, any NVIDIA free-tier entry must be
+    LAST or absent — fast paid tiers (qwen/gpt/glm, ~5-14s) must precede the
+    silently-slow NVIDIA tail (nvidia-qwen3-next-80b 47s/719s-max,
+    nvidia-nemotron-ultra-550b 120s)."""
+    from src.config.model_registry import FALLBACK_CHAINS
+
+    chain = FALLBACK_CHAINS[primary]
+    nvidia_idx = [i for i, m in enumerate(chain) if m.startswith("nvidia-")]
+    for idx in nvidia_idx:
+        assert idx == len(chain) - 1, (
+            f"{primary}: NVIDIA entry {chain[idx]!r} at index {idx} must be "
+            f"last (chain len {len(chain)}); demote fast tiers ahead of the "
+            f"silently-slow NVIDIA tail. chain={chain}"
+        )
+
+
+def test_groq_fast_fallback_present_in_cheap_chains() -> None:
+    """llama-3.1-8b-instant (Groq, VERY_CHEAP, ~1s, now keyed) must be reachable
+    as a fallback in at least one TRIVIAL/CHEAP primary chain so the fast
+    Groq tier is actually used (it had ZERO prior calls — buried at the tail)."""
+    from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY, ModelTier
+
+    cheap_primaries = [
+        prim
+        for prim, chain in FALLBACK_CHAINS.items()
+        if prim in MODEL_REGISTRY
+        and MODEL_REGISTRY[prim].tier in {ModelTier.VERY_CHEAP, ModelTier.CHEAP}
+        and "llama-3.1-8b-instant" in chain
+    ]
+    assert cheap_primaries, (
+        "llama-3.1-8b-instant (Groq fast tier) must be a fallback in at least "
+        "one VERY_CHEAP/CHEAP primary chain"
+    )
+
+
+def test_every_fallback_chain_entry_is_registered() -> None:
+    """Rebalance invariant: every primary key and every fallback entry resolves
+    to a MODEL_REGISTRY spec (no dangling refs introduced by hand-editing the
+    chains; model_registry is a LEAF and cannot synthesize keys)."""
+    from src.config.model_registry import FALLBACK_CHAINS, MODEL_REGISTRY
+
+    for primary, chain in FALLBACK_CHAINS.items():
+        assert primary in MODEL_REGISTRY, (
+            f"chain primary {primary!r} missing from MODEL_REGISTRY"
+        )
+        for entry in chain:
+            assert entry in MODEL_REGISTRY, (
+                f"chain[{primary!r}] entry {entry!r} missing from MODEL_REGISTRY"
+            )
+
+
+def test_route_resolves_every_complexity() -> None:
+    """Rebalance must not break routing: route() returns a registered model for
+    each TaskComplexity (deterministic — asserts the returned id is in the
+    registry, independent of which provider keys are present in .env)."""
+    from src.config.model_registry import MODEL_REGISTRY
+    from src.config.settings import Settings
+    from src.graph.enums import TaskComplexity
+    from src.llm.model_router import ModelRouter
+
+    router = ModelRouter(Settings())
+    for complexity in TaskComplexity:
+        resolved = router.route(complexity)
+        assert resolved in MODEL_REGISTRY, (
+            f"route({complexity.name})={resolved!r} is not in MODEL_REGISTRY "
+            "— rebalance broke routing"
+        )
+
+
 def test_router_caches_overlay_in_init() -> None:
     """ModelRouter resolves the overlay ONCE in __init__ (not per call), so the
     gateway hot path does not re-parse FALLBACK_CHAINS_JSON."""

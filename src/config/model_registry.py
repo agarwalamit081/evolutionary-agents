@@ -732,11 +732,13 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
 FALLBACK_CHAINS: dict[str, list[str]] = {
     # ── Tier 0 (Very Cheap) fallbacks ─────────────────────────────
     "qwen3.5-flash": [
+        # Latency-ordered (Phase 3.5 Cluster B): fast tiers first, the slow
+        # NVIDIA-hosted free model demoted to LAST (47s mean / 719s max).
         "qwen3.6-flash",
         "gpt-4o-mini-2024-07-18",
         "glm-4.7-flash",
-        "nvidia-qwen3-next-80b",
         "llama-3.1-8b-instant",
+        "nvidia-qwen3-next-80b",
     ],
     "qwen3.6-flash": [
         "qwen3.5-flash",
@@ -751,10 +753,12 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
         "glm-4.7-flash",
     ],
     "gpt-4o-mini-2024-07-18": [
+        # Latency-ordered (Phase 3.5 Cluster B): nvidia-nemotron-ultra-550b
+        # (120s mean) demoted to LAST behind the fast tiers.
         "qwen3.5-flash",
-        "nvidia-nemotron-ultra-550b",
         "glm-4.7-flash",
         "llama-3.1-8b-instant",
+        "nvidia-nemotron-ultra-550b",
     ],
     "glm-4.7-flash": [
         "qwen3.5-flash",
@@ -783,12 +787,15 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
         # quota — directly survives a standalone "Insufficient Balance" (the
         # blocker that killed battery-04 q08 run2) by serving the same model
         # via DASHSCOPE_API_KEY instead.
+        # Latency-ordered (Phase 3.5 Cluster B): nvidia-deepseek-v4-flash
+        # demoted to LAST (20s mean — the least-bad NVIDIA, but still slower
+        # than the paid tiers above it).
         "alibaba-deepseek-v4-flash",
         "claude-haiku-4-5-20251001",
-        "nvidia-deepseek-v4-flash",
         "qwen3.7-plus",
         "glm-4.5-air",
         "gpt-4.1-mini-2025-04-14",
+        "nvidia-deepseek-v4-flash",
     ],
     "qwen3.7-plus": [
         "deepseek-v4-flash",
@@ -828,11 +835,17 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
         "qwen3.7-plus",
     ],
     # ── Tier 2 (Moderate) fallbacks ───────────────────────────────
+    # Latency-ordered (Phase 3.5 Cluster B): mistral-medium-3-5 (946s mean /
+    # 1358s max — a hard latency bomb per cost_ledger.latency_ms) REMOVED from
+    # every Moderate chain; nvidia-deepseek-v4-pro (164s) dropped from the
+    # reasoning chain. Remaining peers ordered fast→slow; kimi-k2.6 kept as the
+    # depth tail. (mistral-medium-3-5's own chain below is retained — it is
+    # never a routing primary and is reached only by the exhaustion tier-scan.)
     "claude-sonnet-4-6": [
         "deepseek-v4-pro",
         "glm-5-turbo",
-        "mistral-medium-3-5",
         "gemini-3-flash-preview",
+        "kimi-k2.6",
     ],
     # glm-4.7 is the CRITICAL/reasoning primary (zai) — same Moderate-tier peer
     # set as Sonnet's chain, minus the (quota-blocked) Anthropic entry. Verified
@@ -840,21 +853,20 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     "glm-4.7": [
         "deepseek-v4-pro",
         "glm-5-turbo",
-        "mistral-medium-3-5",
         "gemini-3-flash-preview",
+        "kimi-k2.6",
     ],
     "deepseek-v4-pro": [
         "claude-sonnet-4-6",
-        "nvidia-deepseek-v4-pro",
         "glm-5-turbo",
-        "mistral-medium-3-5",
+        "gemini-3-flash-preview",
         "kimi-k2.6",
     ],
     "glm-5-turbo": [
         "claude-sonnet-4-6",
         "deepseek-v4-pro",
-        "mistral-medium-3-5",
         "gemini-3-flash-preview",
+        "kimi-k2.6",
     ],
     # Plan-node primary (findings-06 retier / phase-2). Order matches the owner
     # spec: claude-sonnet-4-6 first, then glm-4.7. The gateway pre-filters a

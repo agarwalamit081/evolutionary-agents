@@ -171,6 +171,36 @@ Operational scripts added this sweep: `scripts/cve_sweep.py` (non-fatal `pip-aud
 over `requirements*.txt`, JSON to `logs/`, #19) and `scripts/analyze_vector_queries.py`
 (read-only `EXPLAIN ANALYZE` over the HNSW-backed tables, #20).
 
+### Cost & convergence knobs (Phase 3.5 Cluster A + B1)
+
+Tuning knobs for token/cost waste and verify-loop non-convergence. All ship with the shown
+defaults; production behavior is unchanged until set in `.env`.
+
+| Knob | Default | Purpose |
+|------|---------|---------|
+| `LLM_REQUEST_TOTAL_TIMEOUT` | `300` | **B1** — master wall-clock deadline wrapping the *whole* LLM fallback chain, so a slow chain can't amplify to `N×attempt_timeout`. `asyncio.TimeoutError` is excluded from tenacity's retriable set, so timeouts are never retried. |
+| `LLM_VERIFY_MAX_TOKENS` / `LLM_CLASSIFY_MAX_TOKENS` / `LLM_PLAN_MAX_TOKENS` / `LLM_REFLECT_MAX_TOKENS` | `512` / `256` / `2048` / `1024` | **A3** — per-node output-token caps (execute keeps the model default). Verify pass/fail needs no 4K prose; capping verify at 512 cuts ~180K tokens/run with no quality loss. |
+| `VERIFY_MAX_CYCLES` | `12` | **A4** — verify-pass hard cap; terminates via `store_memory` (best-so-far) independent of the global iteration cap. |
+| `VERIFY_OSCILLATION_REPEAT` | `3` | **A4** — if the blocking-failure fingerprint is identical for N consecutive verify passes, abort early (stuck on one blocker). |
+| `CONVERGENCE_STABLE_THRESHOLD` | `3` | **B3** — if the verify output fingerprint is stable for N passes *and* the plan is exhausted, accept the partial result. |
+| `PER_RUN_TOKEN_LIMIT_ABSOLUTE` | `0` (off) | **A5** — cumulative token ceiling *across all attempts* (no baseline subtraction). Mandatory backstop for free/$0 tiers (a $0-model runaway never trips the USD cap). 0 = disabled. |
+
+### Benchmark curves
+
+The battery-04 suite (9 goals, suffix-isolated run_ids) is scored by the eval harness
+(`python main.py --eval`) and trended via `src/eval/curve.py`. Score = mean of all eval rows
+in each goal's latest attempt, then mean-of-per-goal-means. Results live in `logs/curve_*.json`:
+
+| Curve | Suffix | Battery mean | Ex-q06 | Change |
+|-------|--------|--------------|--------|--------|
+| #1 | 20260701 | 0.7735 | 0.7785 | baseline |
+| #2 (per-step routing) | 20260702 | 0.7362 | 0.7977 | −0.037 (neutral) |
+| #3 (Cluster A + B1) | 20260704 | 0.7663 | 0.8482 | +0.030 (neutral recovery; ex-q06 best of three) |
+
+The reliability/cost stack is now proven (q06 redelivery bounded 40% by the A5 token cap;
+timeout amplification killed by B1). Three consecutive neutral curves — the unproven pillar
+remains self-improvement.
+
 ---
 
 ## License

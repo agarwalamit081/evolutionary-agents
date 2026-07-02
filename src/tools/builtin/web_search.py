@@ -1019,10 +1019,10 @@ TOOL_DEFINITION = {
     "handler": web_search,
     "description": (
         "Ground facts, figures, dates, and current events here — search the web "
-        "via SearXNG (free, primary) with automatic paid fallback, rather than "
-        "answering from memory (which risks stale or fabricated detail). Returns "
-        "top results with titles, snippets, and URLs. For anything newer than "
-        "your training, set `timelimit` ('d'/'w'/'m'/'y'); narrow with "
+        "(keyless primary with automatic fallback) rather than answering from "
+        "memory (which risks stale or fabricated detail). Returns top results "
+        "with titles, snippets, and URLs. For anything newer than your training, "
+        "set `timelimit` ('d'/'w'/'m'/'y'); narrow with "
         "`site`/`filetype`/`exact`/`exclude`; set `multi_query=true` to issue "
         "several phrasings and merge the unique hits for higher recall; or pass "
         "`queries` (a list) to run several searches in parallel. To read a "
@@ -1071,8 +1071,8 @@ TOOL_DEFINITION = {
             "deep_crawl": {
                 "type": "boolean",
                 "description": (
-                    "Engage heavy providers (Firecrawl). Off by default — "
-                    "requires DEEP_CRAWL_ENABLED=true and a provider key."
+                    "Engage deep page crawling (slower, higher fidelity). Off by "
+                    "default — must be enabled server-side."
                 ),
                 "default": False,
             },

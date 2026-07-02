@@ -52,3 +52,70 @@ def test_tags_are_non_empty_strings() -> None:
         assert isinstance(tags, list), f"{name} tags not a list"
         for tag in tags:
             assert isinstance(tag, str) and tag, f"{name} has empty/non-str tag: {tag!r}"
+
+
+# ── Phase 3.5 A8 (rec #16): tool-description/schema token-budget invariant ──
+# The ~23 always-on builtins are injected into EVERY execute/plan prompt, so
+# their aggregate schema is a fixed per-call token tax. Rec #16 proposed trimming
+# descriptions from "~500 tok"; this audit found they are ALREADY lean
+# (max code_executor @ 797c ≈ 199 tok; web_search full-schema ≈ 610 tok incl. its
+# 10 params). These budgets lock that leanness so a future edit can't silently
+# re-bloat a description and inflate every call without forcing a deliberate
+# update. The real per-call lever is the always-on COUNT (governance/retire) +
+# RAG-over-tools top-K (A7), not description prose. Headroom is generous so a
+# legitimate new param doesn't trip the gate.
+_DESC_BUDGET_CHARS = 900      # ≈ 225 tok (code_executor 797c today)
+_SCHEMA_BUDGET_CHARS = 2600   # ≈ 650 tok (web_search 2433c today)
+
+
+def _schema_view(td: dict) -> dict:
+    return {k: v for k, v in td.items() if k in ("name", "description", "parameters")}
+
+
+def test_builtin_descriptions_under_char_budget() -> None:
+    """No builtin description exceeds the token budget (locks rec #16 leanness)."""
+    over = []
+    for td in ALL_TOOL_DEFINITIONS:
+        desc = td.get("description", "")
+        if len(desc) > _DESC_BUDGET_CHARS:
+            over.append((td.get("name", "?"), len(desc)))
+    assert not over, f"descriptions over {_DESC_BUDGET_CHARS}c: {over}"
+
+
+def test_builtin_schemas_under_char_budget() -> None:
+    """No builtin's full LLM-facing schema (name+description+parameters) exceeds
+    the budget — the per-call token tax stays bounded."""
+    import json
+
+    over = []
+    for td in ALL_TOOL_DEFINITIONS:
+        size = len(json.dumps(_schema_view(td), default=str))
+        if size > _SCHEMA_BUDGET_CHARS:
+            over.append((td.get("name", "?"), size))
+    assert not over, f"schemas over {_SCHEMA_BUDGET_CHARS}c: {over}"
+
+
+def test_descriptions_leak_no_internal_env_flags() -> None:
+    """Descriptions must not leak internal implementation detail (mcp-patterns
+    rule: no internal stack traces / config-flag names). Catches the
+    DEEP_CRAWL_ENABLED-style leak A8 removed from web_search. Only flags
+    ALL-CAPS underscored names (env-var style); lowercase parameter hints like
+    ``multi_query=true`` are legitimate and left through."""
+    import re
+
+    _ENV_FLAG = re.compile(r"\b[A-Z][A-Z0-9_]*_[A-Z0-9_]+=(?:true|false)\b")
+    leaks = []
+    for td in ALL_TOOL_DEFINITIONS:
+        desc = td.get("description", "")
+        # parameter descriptions too
+        params = td.get("parameters", {})
+        blobs = [desc]
+        if isinstance(params, dict):
+            for p in params.get("properties", {}).values():
+                if isinstance(p, dict) and isinstance(p.get("description"), str):
+                    blobs.append(p["description"])
+        for i, blob in enumerate(blobs):
+            m = _ENV_FLAG.search(blob)
+            if m:
+                leaks.append((td.get("name", "?"), i, m.group(0)))
+    assert not leaks, f"internal env-flag leaks in descriptions: {leaks}"

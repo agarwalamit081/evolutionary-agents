@@ -41,6 +41,27 @@ COMPUTE_DELIVERABLE_EXTS: frozenset[str] = frozenset(
     {".csv", ".tsv", ".jsonl", ".jsonlines", ".xlsx", ".xls", ".parquet", ".feather"}
 )
 
+# Side-effect-free HTTP verbs whose responses are safe to cache (Phase 3.5 A9,
+# rec #17). http_request is cacheable=True but only GET/HEAD are idempotent;
+# POST/PUT/PATCH/DELETE mutate state and must never be served a stale cached
+# result. ``_call_is_cacheable`` gates the cache get/set on this.
+_HTTP_CACHEABLE_METHODS: frozenset[str] = frozenset({"GET", "HEAD"})
+
+
+def _call_is_cacheable(tool_name: str, args: dict[str, Any]) -> bool:
+    """Per-call supplement to the static ``cacheable`` flag.
+
+    The static flag says "this tool's results MAY be cached"; this says "this
+    SPECIFIC call is safe to cache". Today the only method-bearing cacheable
+    tool is ``http_request`` — gate it on the verb so a mutating POST/DELETE is
+    never cached (and never served stale). All other cacheable tools are
+    read-only by contract and pass through.
+    """
+    if tool_name == "http_request":
+        method = str(args.get("method", "GET") or "GET").strip().upper()
+        return method in _HTTP_CACHEABLE_METHODS
+    return True
+
 
 def _is_compute_deliverable(path: str) -> bool:
     """True if ``path`` is a data deliverable that must be produced by code."""
@@ -914,8 +935,13 @@ async def _execute_tool_call(
                 error=f"Destructive tool '{tool_name}' blocked by HITL gate (not approved).",
             )
 
-    # Cache lookup — only for opt-in cacheable tools.
-    if cache is not None and tools.is_cacheable(tool_name):
+    # Cache lookup — only for opt-in cacheable tools, and only idempotent calls
+    # (http_request GET/HEAD; a mutating POST is never served from cache).
+    if (
+        cache is not None
+        and tools.is_cacheable(tool_name)
+        and _call_is_cacheable(tool_name, args)
+    ):
         cached = await cache.get(tool_name, args)
         if cached is not None:
             logger.debug(f"Tool cache HIT: {tool_name}")
@@ -976,7 +1002,12 @@ async def _execute_tool_call(
         # contract failure is a non-success surface (e.g. ``"ERROR: …"``) and is
         # NOT cached, mirroring the "never errors" intent — so a transient
         # failure is never served from the cache on a later identical call.
-        if cache is not None and tools.is_cacheable(tool_name) and real_success:
+        if (
+            cache is not None
+            and tools.is_cacheable(tool_name)
+            and _call_is_cacheable(tool_name, args)
+            and real_success
+        ):
             await cache.set(
                 tool_name,
                 args,

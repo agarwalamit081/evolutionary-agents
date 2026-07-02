@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.graph.nodes.execute import _execute_tool_call
+from src.graph.nodes.execute import _call_is_cacheable, _execute_tool_call
 from src.tools.registry import ToolRegistry
 from src.tools.result_cache import ToolResultCache
 
@@ -358,6 +358,14 @@ class TestExecuteToolCallRouting:
             description="mutating, never cached",
             cacheable=False,
         )
+        # http_request is cacheable=True but only GET/HEAD are side-effect-free;
+        # the per-call _call_is_cacheable guard gates the verb (Phase 3.5 A9).
+        reg.register(
+            name="http_request",
+            handler=_write_handler,
+            description="cacheable for GET/HEAD only",
+            cacheable=True,
+        )
         return reg
 
     @pytest.mark.asyncio
@@ -459,4 +467,61 @@ class TestExecuteToolCallRouting:
         assert result.success is False
         assert "Invalid arguments" in (result.error or "")
         cache.get.assert_not_called()
+        cache.set.assert_not_called()
+
+    # ── Phase 3.5 A9 (rec #17): http_request method-aware caching ──
+
+    def test_call_is_cacheable_http_get_passes(self) -> None:
+        """http_request GET/HEAD/default are idempotent → cacheable."""
+        assert _call_is_cacheable("http_request", {"method": "GET", "url": "u"}) is True
+        assert _call_is_cacheable("http_request", {"method": "head", "url": "u"}) is True
+        # No method arg → defaults to GET.
+        assert _call_is_cacheable("http_request", {"url": "u"}) is True
+
+    def test_call_is_cacheable_http_mutating_blocked(self) -> None:
+        """http_request POST/PUT/PATCH/DELETE mutate → never cacheable."""
+        for verb in ("POST", "PUT", "PATCH", "DELETE"):
+            assert _call_is_cacheable("http_request", {"method": verb, "url": "u"}) is False
+
+    def test_call_is_cacheable_other_tools_passthrough(self) -> None:
+        """Non-http_request cacheable tools pass through (read-only by contract)."""
+        assert _call_is_cacheable("web_search", {"query": "x"}) is True
+        assert _call_is_cacheable("arxiv_search", {"query": "x"}) is True
+
+    @pytest.mark.asyncio
+    async def test_http_get_is_cached(
+        self, registry: ToolRegistry
+    ) -> None:
+        """A cacheable http_request GET miss invokes the handler and caches."""
+        cache = MagicMock()
+        cache.get = AsyncMock(return_value=None)
+        cache.set = AsyncMock()
+
+        result = await _execute_tool_call(
+            _tc("http_request", {"method": "GET", "url": "https://example.com"}),  # type: ignore[arg-type]
+            registry,
+            cache,
+        )
+
+        assert result.success is True
+        cache.get.assert_awaited_once()  # GET → cache consulted
+        cache.set.assert_awaited_once()  # success → cached
+
+    @pytest.mark.asyncio
+    async def test_http_post_bypasses_cache(
+        self, registry: ToolRegistry
+    ) -> None:
+        """A mutating http_request POST never touches the cache (no stale serve)."""
+        cache = MagicMock()
+        cache.get = AsyncMock()
+        cache.set = AsyncMock()
+
+        result = await _execute_tool_call(
+            _tc("http_request", {"method": "POST", "url": "https://example.com"}),  # type: ignore[arg-type]
+            registry,
+            cache,
+        )
+
+        assert result.success is True
+        cache.get.assert_not_called()  # POST → cache bypassed
         cache.set.assert_not_called()

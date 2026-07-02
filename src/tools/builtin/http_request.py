@@ -115,8 +115,10 @@ TOOL_DEFINITION = {
         "code. Only public http(s) URLs are allowed (private/loopback hosts "
         "are blocked)."
     ),
-    # Handles mutating methods (POST/PUT/DELETE) — never cache.
-    "cacheable": False,
+    # Cacheable for idempotent GET/HEAD only; the per-call guard in execute
+    # (``_call_is_cacheable``) gates out POST/PUT/PATCH/DELETE so a mutating
+    # call is never served a stale cached result (Phase 3.5 A9, rec #17).
+    "cacheable": True,
     "parameters": {
         "type": "object",
         "properties": {

@@ -152,7 +152,6 @@ class TestLoadActiveAgents:
         recalled = registry.get("recall_agent")
         assert recalled is not None
         assert recalled.is_active is True
-        assert "recall_agent" in registry.describe_agents()
 
     @pytest.mark.asyncio
     async def test_db_error_returns_empty(

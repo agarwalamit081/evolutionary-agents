@@ -115,29 +115,6 @@ class SubAgentRegistry:
         """List all registered sub-agent names."""
         return list(self._agents.keys())
 
-    # ── Description for LLM ────────────────────────────────────────────
-
-    def describe_agents(self) -> str:
-        """Generate a text description of active agents for LLM prompts.
-
-        Returns:
-            Formatted string describing each active sub-agent's
-            name, description, tool scope, and success rate.
-        """
-        active = self.list_active()
-        if not active:
-            return "No active sub-agents available."
-
-        lines: list[str] = []
-        for agent in active:
-            lines.append(
-                f"- **{agent.name}**: {agent.description} "
-                f"(success_rate={agent.success_rate:.0%}, "
-                f"runs={agent.total_runs}, "
-                f"tools={agent.tool_scope})"
-            )
-        return "\n".join(lines)
-
     # ── Spawn ──────────────────────────────────────────────────────────
 
     def spawn(

@@ -155,43 +155,6 @@ class TestUnregister:
         assert registry.unregister("unknown_agent") is False
 
 
-class TestDescribeAgents:
-    """Tests for describe_agents() method."""
-
-    def test_describe_agents_returns_formatted_string(self, registry: SubAgentRegistry) -> None:
-        """describe_agents() returns formatted string for LLM consumption."""
-        spec = SubAgentSpec(
-            name="data_processor",
-            description="Processes data efficiently",
-            goal="process data",
-            parent_thread_id="thread-001",
-            tool_scope="inherit_all",
-            success_rate=0.85,
-            total_runs=20,
-        )
-        registry.register(spec)
-
-        description = registry.describe_agents()
-        assert "data_processor" in description
-        assert "Processes data efficiently" in description
-        assert "85%" in description
-        assert "runs=20" in description
-        assert "inherit_all" in description
-
-    def test_describe_agents_empty_returns_message(self, registry: SubAgentRegistry) -> None:
-        """describe_agents() returns 'No active sub-agents available.' when empty."""
-        assert registry.describe_agents() == "No active sub-agents available."
-
-    def test_describe_agents_filters_inactive(self, registry: SubAgentRegistry, sample_spec: SubAgentSpec, inactive_spec: SubAgentSpec) -> None:
-        """describe_agents() excludes inactive agents."""
-        registry.register(sample_spec)
-        registry.register(inactive_spec)
-
-        description = registry.describe_agents()
-        assert "test_agent" in description
-        assert "inactive_agent" not in description
-
-
 class TestCheckDeprecation:
     """Tests for check_deprecation() method."""
 

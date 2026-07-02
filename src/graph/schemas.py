@@ -202,11 +202,3 @@ class SubAgentProposal(BaseModel):
     )
     goal_description: str = Field(description="The subtask category this agent handles")
     rationale: str = Field(default="", description="Why a dedicated sub-agent is needed")
-
-
-class DelegationPlan(BaseModel):
-    """Structured output from delegate node's LLM call for agent selection."""
-
-    sub_agent_name: str = Field(description="Name of sub-agent to delegate to")
-    goal: str = Field(description="Specific subtask goal")
-    expected_output: str = Field(description="What the sub-agent should produce")

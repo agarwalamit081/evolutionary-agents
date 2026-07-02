@@ -1274,6 +1274,125 @@ class TestAcompletion:
         assert seen_eb[0] is None
 
     @pytest.mark.asyncio
+    async def test_proactive_thinking_disable_for_qwen_trivial(
+        self,
+        gateway: LLMGateway,
+        simple_messages: list[dict[str, Any]],
+    ) -> None:
+        """P0 — the qwen3 family (qwen3.6-flash TRIVIAL primary) reasons BY
+        DEFAULT via DashScope, burning ~100-800 reasoning tokens + 3-7x latency
+        on a trivial one-word classify. The gateway must DISABLE thinking
+        proactively (``enable_thinking: False``, the DashScope-native flag) for
+        a TRIVIAL alibaba/qwen call so no reasoning tokens are burned. Verified
+        live: reasoning 111→0, latency 2141→628ms, answer intact.
+        """
+        mock_resp = _make_litellm_response(content="ok")
+        seen_eb: list[Any] = []
+        seen_calls = 0
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            nonlocal seen_calls
+            seen_calls += 1
+            seen_eb.append(kwargs.get("extra_body"))
+            return mock_resp
+
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            result = await gateway.acompletion(
+                messages=simple_messages,
+                model="qwen3.6-flash",
+                complexity=TaskComplexity.TRIVIAL,
+            )
+
+        assert seen_calls == 1
+        assert result.content == "ok"
+        # Thinking disabled proactively on the very first (only) call.
+        assert seen_eb[0] == {"enable_thinking": False}
+
+    @pytest.mark.asyncio
+    async def test_no_proactive_qwen_disable_for_complex(
+        self,
+        gateway: LLMGateway,
+        simple_messages: list[dict[str, Any]],
+    ) -> None:
+        """Scope safety — a qwen model reached as a FALLBACK during a COMPLEX
+        task (complexity=COMPLEX) must KEEP its reasoning (the only place
+        reasoning pays off). The disable is TRIVIAL-scoped only.
+        """
+        mock_resp = _make_litellm_response(content="ok")
+        seen_eb: list[Any] = []
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            seen_eb.append(kwargs.get("extra_body"))
+            return mock_resp
+
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model="qwen3.6-flash",
+                complexity=TaskComplexity.COMPLEX,
+            )
+
+        # No thinking-disable injected for a non-trivial task.
+        assert seen_eb[0] is None
+
+    @pytest.mark.asyncio
+    async def test_no_proactive_qwen_disable_when_thinking_explicit(
+        self,
+        gateway: LLMGateway,
+        simple_messages: list[dict[str, Any]],
+    ) -> None:
+        """Caller wins — if the caller explicitly requests thinking on a TRIVIAL
+        qwen call, the proactive disable must NOT override it.
+        """
+        mock_resp = _make_litellm_response(content="ok")
+        seen_eb: list[Any] = []
+
+        async def fake_acompletion(
+            messages: list[dict[str, Any]],  # pyright: ignore[reportUnusedParameter]
+            **kwargs: Any,
+        ) -> Any:
+            seen_eb.append(kwargs.get("extra_body"))
+            return mock_resp
+
+        gateway._model_router._has_provider_key = MagicMock(return_value=True)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = fake_acompletion
+            mock_litellm.Usage = MagicMock
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model="qwen3.6-flash",
+                complexity=TaskComplexity.TRIVIAL,
+                thinking={"type": "enabled"},
+            )
+
+        # Caller's explicit thinking is preserved; no enable_thinking injected.
+        assert seen_eb[0] is None
+
+    @pytest.mark.asyncio
     async def test_uses_complexity_routing_when_no_model(
         self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
     ) -> None:

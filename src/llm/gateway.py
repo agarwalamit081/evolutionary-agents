@@ -919,6 +919,35 @@ class LLMGateway:
                         f"(forced tool_choice pre-flight)"
                     )
 
+                # P0 — proactive qwen3 thinking-disable on TRIVIAL tasks. The qwen3
+                # family (qwen3.6-flash TRIVIAL primary, qwen3.5-flash fallback)
+                # reasons BY DEFAULT via DashScope — verified live (probe): a
+                # trivial one-word classify burns 111 reasoning tokens (qwen3.6)
+                # / 798 (qwen3.5) and 3-7x latency despite ``max_tokens`` capping
+                # only the answer, not the reasoning budget. ``enable_thinking:
+                # False`` is the DashScope-native flag (verified live: reasoning
+                # 111→0, latency 2141→628ms, answer intact). Scoped to TRIVIAL so
+                # a qwen fallback reached during a COMPLEX/CRITICAL task keeps its
+                # reasoning (the only place reasoning pays off). Caller's explicit
+                # ``thinking``/``enable_thinking`` always wins. ``litellm.drop_params``
+                # makes the extra_body a harmless no-op for any provider ignoring it.
+                if (
+                    complexity == TaskComplexity.TRIVIAL
+                    and attempt_provider == "alibaba"
+                    and "qwen" in attempt_model
+                    and not kwargs.get("thinking")
+                    and "enable_thinking" not in (kwargs.get("extra_body") or {})
+                    and "thinking" not in (kwargs.get("extra_body") or {})
+                ):
+                    kwargs["extra_body"] = {
+                        **(kwargs.get("extra_body") or {}),
+                        "enable_thinking": False,
+                    }
+                    logger.debug(
+                        f"Proactively disabled thinking for {attempt_model} "
+                        f"(trivial-tier qwen3 default-on)"
+                    )
+
                 # Provider-native prompt caching (Anthropic cache_control).
                 # Opt-in; disabled → passthrough (same list object). Computed
                 # per-attempt because fallback may cross providers and

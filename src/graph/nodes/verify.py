@@ -398,6 +398,23 @@ def _stamp_verify_cycle(
     if bool(state_update.get("is_complete")):
         return state_update
 
+    # C1 step-output memoization clear (default-off but clears unconditionally
+    # of the STEP_MEMOIZATION_ENABLED flag — cheaper and safer than threading
+    # the flag here, and a no-op when step_outputs is empty). When verify
+    # rejects AND the plan is exhausted, route_after_verify routes to "plan"
+    # (gap re-plan) to address the unsatisfied goal. That is the one path where
+    # prior step outputs are suspect — without a clear, a downstream step could
+    # return a stale cached result computed from pre-gap upstream content. Clear
+    # the memo so the fresh plan executes every step from scratch. Mid-plan
+    # verify→execute retries keep has_remaining_steps and do NOT clear — the
+    # cache must survive for the tool_create/agent_spawn re-plan savings. This
+    # condition mirrors route_after_verify's "plan" branch exactly.
+    plan_steps = state.get("plan_steps") or []
+    step_index = int(state.get("current_step_index", 0) or 0)
+    has_remaining_steps = bool(plan_steps) and step_index < len(plan_steps)
+    if not has_remaining_steps:
+        state_update["step_outputs"] = {}
+
     deliverable_problems = list(state_update.get("missing_deliverables") or [])
     missing = sorted(str(p) for p in deliverable_problems)
     blocking = current_blocking_errors(state.get("errors") or [], deliverable_problems)

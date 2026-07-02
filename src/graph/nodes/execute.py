@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -46,6 +47,20 @@ COMPUTE_DELIVERABLE_EXTS: frozenset[str] = frozenset(
 # POST/PUT/PATCH/DELETE mutate state and must never be served a stale cached
 # result. ``_call_is_cacheable`` gates the cache get/set on this.
 _HTTP_CACHEABLE_METHODS: frozenset[str] = frozenset({"GET", "HEAD"})
+
+
+def _step_cache_key(description: str) -> str:
+    """Stable cache key for a plan step (C1 step-output memoization).
+
+    A short sha256 over the step's description text — byte-identity. The cache
+    is only reused when the planner re-emits the identical step description,
+    which is the planner's implicit assertion that the step's prior output is
+    still what it wants. A step rewritten to address a verify gap (different
+    wording) hashes differently and naturally misses. See the skip path in
+    :func:`execute_node`, the record in :func:`_llm_execute`, and the gap-clear
+    in ``verify._stamp_verify_cycle``.
+    """
+    return hashlib.sha256(description.encode("utf-8")).hexdigest()[:16]
 
 
 def _call_is_cacheable(tool_name: str, args: dict[str, Any]) -> bool:
@@ -459,6 +474,52 @@ async def execute_node(
         f"{current_step.description[:60]}..."
     )
 
+    # C1 step-output memoization (default-off). On a re-plan the plan node
+    # resets ``current_step_index`` to 0 WITHOUT clearing completed_steps, so a
+    # step that already succeeded would be re-executed and re-billed. When
+    # enabled, skip any step whose description-hash already has a cached output.
+    # The key is byte-identity over the description, so a step is reused only
+    # when the planner re-emitted it verbatim; a step rewritten to fix a verify
+    # gap hashes differently and re-executes. Verify clears the cache on a
+    # goal-gap re-plan (``_stamp_verify_cycle``), the one path where prior
+    # outputs are suspect. ``tool_create``/``agent_spawn`` replans bypass
+    # verify, so their cache survives and THIS skip is where the cost saving
+    # lands. Opt-in (STEP_MEMOIZATION_ENABLED) — correctness-sensitive; validate
+    # in isolation before enabling for a battery curve. The settings read is
+    # guarded: a partial/mock settings object (some unit-test fixtures) lacks
+    # the flag — default to disabled rather than crash the execute path.
+    try:
+        memo_enabled = bool(get_settings().agent.step_memoization_enabled)
+    except AttributeError:
+        memo_enabled = False
+    step_outputs = state.get("step_outputs") or {}
+    cache_key = _step_cache_key(current_step.description)
+    if memo_enabled and cache_key in step_outputs:
+        cached = step_outputs[cache_key]
+        logger.info(
+            f"Step {step_index + 1}/{len(plan_steps)} memoized "
+            f"(step_outputs cache hit) — skipping re-execution"
+        )
+        current_step.status = GoalStatus.COMPLETED
+        current_step.result = cached
+        # Keep the message thread coherent: a synthesized turn carries the
+        # cached result so a later step that depends on it can still read it.
+        memo_message = {
+            "role": "user",
+            "content": (
+                f"Step {step_index + 1}/{len(plan_steps)} (cached, not re-run): "
+                f"{current_step.description}\n"
+                f"Prior result: {cached}"
+            ),
+        }
+        return {
+            "phase": Phase.REFLECT,
+            "messages": [memo_message],
+            "current_step_index": step_index + 1,
+            "iteration_count": iteration_count + 1,
+            "completed_steps": [current_step],
+        }
+
     # Mark current step as active
     current_step.status = GoalStatus.ACTIVE
 
@@ -805,6 +866,12 @@ async def _llm_execute(
             current_step.tool_name = "file_writer"
             current_step.tool_input = _tool_call_args(file_tc)
 
+        # C1: record this step's output under its description-hash so a later
+        # re-plan (e.g. tool_create/agent_spawn) can skip re-running it. Merged
+        # into the prior dict and returned in full (overwrite semantics — no
+        # reducer); cleared on a verify gap-replan. Truncated to match
+        # ``current_step.result`` so the cached text == the recorded result.
+        prior_outputs = state.get("step_outputs") or {}
         return {
             "phase": Phase.REFLECT,
             "messages": turn_messages,
@@ -812,6 +879,10 @@ async def _llm_execute(
             "iteration_count": iteration_count + 1,
             "completed_steps": [current_step],
             "tool_results": new_tool_results,
+            "step_outputs": {
+                **prior_outputs,
+                _step_cache_key(step_description): result_text[:500],
+            },
         }
     except Exception as e:
         logger.debug(f"LLM execution failed, using simulated: {e}")

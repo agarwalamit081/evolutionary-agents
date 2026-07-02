@@ -207,6 +207,15 @@ class AgentState(TypedDict, total=False):
     tools_called: Annotated[list[dict[str, Any]], operator.add]
     tool_results: Annotated[list[ToolResult], operator.add]
     completed_steps: Annotated[list[PlanStep], operator.add]
+    # C1 step-output memoization (default-off): maps a stable hash of a step's
+    # description -> its cached result text. Execute skips re-running a step
+    # whose hash is present; verify clears this dict on a goal-gap re-plan (the
+    # one path where prior outputs are suspect). Overwrite (no reducer): each
+    # updater returns the full merged dict so an absent key never drops prior
+    # entries — a node that omits step_outputs preserves what's already there.
+    # Keys are independent of completed_steps (PlanStep objects); this is a
+    # pure text cache for the re-plan skip path.
+    step_outputs: dict[str, str]
 
     # ─── Memory ─────────────────────────────────────────────────────────
     retrieved_memories: list[dict[str, Any]]

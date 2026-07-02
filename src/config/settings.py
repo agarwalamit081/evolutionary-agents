@@ -1162,6 +1162,15 @@ class AgentSettings(BaseSettings):
     max_iterations_simple: int = 15
     max_iterations_complex: int = 60
     max_iterations_critical: int = 60
+    # C1 step-output memoization (default-off). When enabled, execute skips
+    # re-running a plan step whose description-hash already has a cached output
+    # — the cost saving on a re-plan (plan resets current_step_index to 0, so
+    # without this every completed step re-executes and re-bills). The cache is
+    # keyed on byte-identity over the step description (a rewritten step
+    # naturally misses) and cleared on a verify gap-replan. Opt-in because it is
+    # correctness-sensitive: validate in isolation (single q01, recomputation
+    # eval passes) before enabling for a battery curve. Env: STEP_MEMOIZATION_ENABLED.
+    step_memoization_enabled: bool = False
     # Convergence early-exit (B3). When ``verify`` emits an identical output
     # fingerprint across this many consecutive passes AND the plan is
     # exhausted, ``route_after_verify`` accepts the partial result via

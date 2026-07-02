@@ -31,6 +31,7 @@ from src.config.settings import Settings
 from src.graph.enums import TaskComplexity
 from src.graph.models import CostRecord
 from src.llm.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
+from src.llm.latency_gate import LatencyGate, LatencyGateOpenError
 from src.llm.cache import PromptCache
 from src.llm.cost_tracker import CostTracker
 from src.llm.exceptions import BudgetExhaustedError
@@ -209,6 +210,18 @@ class LLMGateway:
             failure_threshold=settings.circuit_breaker.cb_failure_threshold,
             recovery_timeout=settings.circuit_breaker.cb_recovery_timeout,
             half_open_max_calls=settings.circuit_breaker.cb_half_open_max_calls,
+        )
+        # Per-provider latency demotion gate (complement to the breaker above):
+        # the breaker skips providers that are DOWN; this skips providers that
+        # are persistently SLOW on success. When demoted for a provider, the
+        # fallback loop skips to the next provider in the chain. Default-off.
+        lg = settings.latency_gate
+        self._latency_gate = LatencyGate(
+            threshold_ms=lg.latency_gate_threshold_ms,
+            min_samples=lg.latency_gate_min_samples,
+            cooldown_s=lg.latency_gate_cooldown_s,
+            alpha=lg.latency_gate_alpha,
+            enabled=lg.latency_gate_enabled,
         )
         self._structured_output = StructuredOutputManager()
         self._cost_tracker: CostTracker | None = None
@@ -493,6 +506,15 @@ class LLMGateway:
                 run_id=self._run_id,
                 cached_tokens=response.cache_read_tokens,
             )
+
+        # Latency gate: feed this call's effective latency (attributed to the
+        # provider that served it) so persistently-slow providers get demoted
+        # on future calls. Observability-only and non-fatal (mirrors the
+        # cost-ledger resilience pattern — a gate hiccup never aborts a run).
+        try:
+            await self._latency_gate.record_call(response.provider, latency_ms)
+        except Exception as exc:  # noqa: BLE001 — never let the gate break a run
+            logger.debug(f"latency_gate record failed: {exc}")
 
         # Cache store
         if self._cache:
@@ -807,6 +829,16 @@ class LLMGateway:
             except CircuitBreakerOpenError:
                 logger.info(
                     f"Circuit open for {attempt_provider}, skipping to next fallback"
+                )
+                continue
+            try:
+                # Latency gate: skip providers whose recent *successful* calls
+                # are persistently slow (slow-success demotion, outage-agnostic).
+                await self._latency_gate.before_call(attempt_provider)
+            except LatencyGateOpenError:
+                logger.info(
+                    f"Latency gate demoting {attempt_provider}, "
+                    f"skipping to next fallback"
                 )
                 continue
             try:

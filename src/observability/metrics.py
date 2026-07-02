@@ -98,6 +98,12 @@ CIRCUIT_BREAKER_STATE_TRANSITIONS = _counter(
     ["provider", "state"],
 )
 
+LATENCY_GATE_DEMOTIONS = _counter(
+    "latency_gate_demotions_total",
+    "Per-provider latency-gate demotions (EWMA latency exceeded threshold)",
+    ["provider"],
+)
+
 # ─── Graph Metrics ──────────────────────────────────────────────────
 
 GRAPH_NODE_DURATION = _histogram(

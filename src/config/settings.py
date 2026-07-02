@@ -291,6 +291,59 @@ class CircuitBreakerSettings(BaseSettings):
         return v
 
 
+class LatencyGateSettings(BaseSettings):
+    """Per-provider latency demotion gate (complement to the circuit breaker).
+
+    The breaker opens on *failures* (outage); this gate demotes on *slow
+    successes* — a provider that returns 200 but at 200–280 s/call silently
+    burns wall-clock without tripping any outage or retriable-timeout signal.
+    Demotion is EWMA-based and cooldown-bounded (self-healing), so unlike a
+    static chain edit a recovered provider is re-admitted automatically.
+
+    Default-off (``latency_gate_enabled=False``): opt-in, matching the
+    project's provider-native-capability convention. The 150 s default sits
+    above the moderate-tier primaries observed in production (glm-4.7 ~36 s,
+    deepseek-v4-pro ~65 s mean) but catches egregious slow fallbacks.
+    """
+
+    latency_gate_enabled: bool = False  # Env: LATENCY_GATE_ENABLED
+    latency_gate_threshold_ms: float = 150_000.0  # Env: LATENCY_GATE_THRESHOLD_MS
+    latency_gate_min_samples: int = 3  # Env: LATENCY_GATE_MIN_SAMPLES
+    latency_gate_cooldown_s: float = 120.0  # Env: LATENCY_GATE_COOLDOWN_S
+    latency_gate_alpha: float = 0.5  # Env: LATENCY_GATE_ALPHA
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    @field_validator("latency_gate_min_samples")
+    @classmethod
+    def validate_positive_int(cls, v: int) -> int:
+        """Ensure positive integer."""
+        if v < 1:
+            raise ValueError(f"Must be a positive integer. Got: {v}")
+        return v
+
+    @field_validator("latency_gate_threshold_ms", "latency_gate_cooldown_s")
+    @classmethod
+    def validate_positive_float(cls, v: float) -> float:
+        """Ensure positive float."""
+        if v <= 0:
+            raise ValueError(f"Must be a positive float. Got: {v}")
+        return v
+
+    @field_validator("latency_gate_alpha")
+    @classmethod
+    def validate_alpha(cls, v: float) -> float:
+        """EWMA weight must be in (0, 1]."""
+        if not (0.0 < v <= 1.0):
+            raise ValueError(f"alpha must be in (0, 1]. Got: {v}")
+        return v
+
+
 # ─── Rate Limiter Settings ──────────────────────────────────────────
 
 
@@ -2509,6 +2562,7 @@ class Settings(BaseSettings):
     tool_cache: ToolCacheSettings = ToolCacheSettings()  # type: ignore[assignment]
     resilience: ResilienceSettings = ResilienceSettings()  # type: ignore[assignment]
     circuit_breaker: CircuitBreakerSettings = CircuitBreakerSettings()  # type: ignore[assignment]
+    latency_gate: LatencyGateSettings = LatencyGateSettings()  # type: ignore[assignment]
     rate_limiter: RateLimiterSettings = RateLimiterSettings()  # type: ignore[assignment]
     routing: RoutingSettings = RoutingSettings()  # type: ignore[assignment]
     prompt_cache: PromptCacheControlSettings = PromptCacheControlSettings()  # type: ignore[assignment]

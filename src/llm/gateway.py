@@ -61,6 +61,23 @@ _TRANSIENT_ERRORS = (
     asyncio.TimeoutError,
 )
 
+# B1a — the per-MODEL tenacity retry set. Timeouts (``litellm.Timeout`` and the
+# ``asyncio.wait_for`` backstop's ``asyncio.TimeoutError``) are deliberately
+# EXCLUDED: a timeout on a slow model (e.g. a reasoning model on a heavy
+# generation that legitimately exceeds the per-call timeout) is deterministic —
+# retrying the SAME model just burns ``llm_max_retries`` × the per-call timeout
+# of chain budget before the fallback ever reaches a faster model. That was the
+# live amplifier: one tool_create call stalled battery runs ~30 min in timeout
+# loops and tripped the run-timeout watchdog before glm-4.7 (9s) was tried.
+# Rate-limit / 5xx / connection errors stay retryable here (a retry can help);
+# timeouts remain in ``_TRANSIENT_ERRORS`` so ``_execute_with_fallback`` still
+# ADVANCES to the next provider on a timeout — just without same-model retries.
+_RETRIABLE_FOR_TENACITY: tuple[type[BaseException], ...] = (
+    litellm.RateLimitError,  # type: ignore[attr-defined]
+    litellm.ServiceUnavailableError,  # type: ignore[attr-defined]
+    litellm.APIConnectionError,  # type: ignore[attr-defined]
+)
+
 # Tier ordering for cheaper fallback selection
 _TIER_ORDER: dict[ModelTier, int] = {
     ModelTier.VERY_CHEAP: 0,
@@ -760,8 +777,27 @@ class LLMGateway:
         if available_chain:
             fallback_chain = available_chain
 
+        # B1 — master wall-clock budget over the whole fallback chain. With B1a
+        # each model times out at most once (≤ per-call timeout), so checking the
+        # deadline per model bounds the chain to ``master + one timeout``. Cancel
+        # -immune by design: no asyncio.timeout (a cancel-absorbing litellm task
+        # could hang that — see the run-watchdog gotcha); the inner
+        # asyncio.wait_for in _retry_call already bounds each individual attempt.
+        # ``request_total_timeout <= 0`` disables the chain cap.
+        master_budget = float(self._settings.resilience.request_total_timeout)
+        chain_deadline = (
+            time.monotonic() + master_budget if master_budget > 0 else None
+        )
+
         last_error: Exception | None = None
         for attempt_model in fallback_chain:
+            if chain_deadline is not None and time.monotonic() >= chain_deadline:
+                logger.warning(
+                    f"Master call budget {master_budget:.0f}s exceeded for "
+                    f"{model}; stopping fallback chain before {attempt_model} "
+                    f"(last error: {last_error})"
+                )
+                break
             attempt_provider = self._extract_provider(attempt_model)
             try:
                 # Circuit breaker: skip providers whose breaker is open, falling
@@ -1034,7 +1070,7 @@ class LLMGateway:
             kwargs.get("max_tokens") or 0
         )
         async for attempt in AsyncRetrying(
-            retry=retry_if_exception_type(_TRANSIENT_ERRORS),
+            retry=retry_if_exception_type(_RETRIABLE_FOR_TENACITY),
             stop=stop_after_attempt(resilience.llm_max_retries),
             wait=wait_exponential_jitter(
                 initial=resilience.llm_retry_initial_delay,

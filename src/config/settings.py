@@ -195,6 +195,17 @@ class ResilienceSettings(BaseSettings):
     # tenacity is the SINGLE retry authority (it already backs off with jitter).
     # Applies to EVERY provider — GLM is hosted on zai/nvidia/etc. alike.
     llm_litellm_num_retries: int = 0  # Env: LLM_LITELLM_NUM_RETRIES
+    # B1 — hard wall-clock cap over the WHOLE per-call fallback chain (every
+    # model × every attempt for one logical call). Without it, a slow primary
+    # (e.g. a reasoning model on a heavy generation that exceeds the per-call
+    # timeout) amplifies across the fallback chain into a multi-minute stall
+    # that trips the run-timeout watchdog BEFORE any faster fallback (observed
+    # live: one tool_create call burned ~30 min in timeout loops). Distinct
+    # from ``LLMProviderSettings.request_timeout`` (the per-CALL bound); this is
+    # the per-CHAIN bound on top of it. Checked per model (cancel-immune — no
+    # asyncio.timeout, so a cancel-absorbing litellm task can't hang it). ``0``
+    # disables the chain cap; each call is still bounded by request_timeout.
+    request_total_timeout: float = 300.0  # Env: LLM_REQUEST_TOTAL_TIMEOUT
     # Hard cap on the default max_tokens when a caller omits it. Without this,
     # _build_kwargs falls back to spec.max_output (128_000 for glm-4.7) on EVERY
     # classify/plan/verify/codegen call. A 128K max_tokens reserves that whole

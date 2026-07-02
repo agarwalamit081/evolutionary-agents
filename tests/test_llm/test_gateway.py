@@ -761,6 +761,87 @@ class TestAcompletion:
         assert elapsed < 0.5, f"hard-timeout backstop did not cap the hang: {elapsed:.2f}s"
 
     @pytest.mark.asyncio
+    async def test_retry_call_does_not_retry_on_timeout(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """B1a regression: a timeout is NOT retried at the model level. A timeout
+        on a slow model is deterministic (e.g. a reasoning model on a heavy
+        generation that legitimately exceeds the per-call timeout) — retrying the
+        SAME model just burns ``llm_max_retries`` × the per-call timeout of chain
+        budget before the fallback ever reaches a faster model. That was the live
+        amplifier: one tool_create call stalled battery runs ~30 min in timeout
+        loops and tripped the run-timeout watchdog before glm-4.7 (9s) was tried.
+        Timeouts stay transient (so the fallback chain still ADVANCES on one);
+        they are simply carved out of the per-MODEL tenacity retry set."""
+        import asyncio
+
+        gateway._WAIT_FOR_GRACE = 0.0
+        gateway._settings.resilience.llm_max_retries = 3
+        attempts = 0
+
+        async def _timeout_immediately(**_kw: Any) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise asyncio.TimeoutError()
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = _timeout_immediately
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+
+            with pytest.raises(asyncio.TimeoutError):
+                await gateway._retry_call(
+                    simple_messages, provider="zai", timeout=1.0
+                )
+
+        # With llm_max_retries=3 a retriable error would attempt 3×; a timeout
+        # must attempt EXACTLY ONCE (the carve-out).
+        assert attempts == 1, f"timeout must not be retried, got {attempts} attempts"
+
+    @pytest.mark.asyncio
+    async def test_retry_call_retries_on_rate_limit(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """B1a counterpoint: rate-limit errors ARE still retried at the model
+        level (a retry can help once the window resets). Proves the carve-out is
+        timeouts specifically — not a blanket retry disable that would hurt
+        transient 429/5xx recovery."""
+        class _RateLimit(Exception):
+            pass
+
+        gateway._WAIT_FOR_GRACE = 0.0
+        gateway._settings.resilience.llm_max_retries = 3
+        gateway._settings.resilience.llm_retry_initial_delay = 0.0
+        gateway._settings.resilience.llm_retry_max_delay = 0.0
+        gateway._settings.resilience.llm_retry_jitter = 0.0
+        attempts = 0
+
+        async def _rate_limited(**_kw: Any) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise _RateLimit("429")
+
+        with patch("src.llm.gateway.litellm") as mock_litellm, \
+             patch("src.llm.gateway._RETRIABLE_FOR_TENACITY", (_RateLimit,)):
+            mock_litellm.acompletion = _rate_limited
+            mock_litellm.RateLimitError = _RateLimit
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+
+            with pytest.raises(_RateLimit):
+                await gateway._retry_call(
+                    simple_messages, provider="zai", timeout=1.0
+                )
+
+        # Rate-limit IS retried — all llm_max_retries=3 attempts fire before the
+        # final reraise (proves the retry mechanism still works; timeouts were the
+        # only carve-out).
+        assert attempts == 3, f"rate-limit must be retried, got {attempts} attempts"
+
+    @pytest.mark.asyncio
     async def test_tool_choice_conflict_deepseek_retries_with_thinking_disabled(
         self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
     ) -> None:
@@ -1460,6 +1541,50 @@ class TestFallbackChain:
                         messages=simple_messages,
                         model="claude-sonnet-4-6",
                     )
+
+    @pytest.mark.asyncio
+    async def test_master_budget_stops_fallback_chain(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """B1b regression: the master wall-clock budget bounds the WHOLE fallback
+        chain. Before B1, a slow primary amplified across every fallback model
+        (each timing out, each retried) into a multi-minute stall that tripped the
+        run-timeout watchdog (~30 min/tool_create observed live) BEFORE a faster
+        fallback was ever reached. Here every model deterministically times out
+        after a short sleep; with a tight master budget the chain must STOP before
+        exhausting — not walk all models."""
+        import asyncio
+
+        full_chain = ["claude-sonnet-4-6"] + gateway._model_router.get_fallback_chain(
+            "claude-sonnet-4-6"
+        )
+        assert len(full_chain) >= 3, "test requires a ≥3-model fallback chain"
+        tried: list[str] = []
+
+        async def _slow_timeout(
+            messages: list[dict[str, Any]], *, provider: str, **_kw: Any
+        ) -> None:
+            tried.append(provider)
+            await asyncio.sleep(0.045)
+            raise asyncio.TimeoutError("slow model")
+
+        # Tight master budget: 2 models × 0.045s ≈ 0.09s, so the chain stops at
+        # the 3rd model's start-check. Only 2 transient failures are recorded —
+        # well under the breaker threshold (cb_failure_threshold=3) — so the
+        # master DEADLINE (not the breaker) is the binding constraint here.
+        gateway._settings.resilience.request_total_timeout = 0.07
+
+        with patch.object(gateway, "_retry_call", new=_slow_timeout):
+            with pytest.raises(RuntimeError, match="All fallbacks exhausted"):
+                await gateway._execute_with_fallback(
+                    messages=simple_messages, model="claude-sonnet-4-6"
+                )
+
+        # The multi-model chain was NOT exhausted — the master budget bounded it.
+        assert 1 <= len(tried) < len(full_chain), (
+            f"master budget did not bound the chain: tried {len(tried)}/"
+            f"{len(full_chain)}"
+        )
 
 
 # ─── Test _configure_litellm ─────────────────────────────────────────

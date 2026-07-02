@@ -1282,6 +1282,18 @@ class AgentSettings(BaseSettings):
     # RETIRE_UNUSED_DAYS. Default 30 mirrors retire_recency_days (the existing
     # "stale" bar) so it is effective whenever GOVERNANCE_PRUNE_ENABLED is on.
     retire_unused_days: int = 30
+    # Low-call abandonware tier (battery-04 q01 probe follow-up). The base
+    # retire_unused pass above only catches calls == 0 dead weight, so a
+    # generated tool used a handful of times then never again (e.g. a one-off
+    # q02 auditor) survives forever and slowly saturates the cap alongside
+    # un-deduped semantic duplicates. This widens the gate to tools with
+    # calls <= retire_unused_max_calls (still gated by retire_unused_days age,
+    # so a freshly-spawned tool is never retired on a transient drought).
+    # Default 0 preserves the exact calls == 0 behavior; raise (e.g. 3) for a
+    # more aggressive debloat. Retirement is reversible (is_active=false) and
+    # the agent regenerates a tool on demand, so a low default is safe. Env:
+    # RETIRE_UNUSED_MAX_CALLS.
+    retire_unused_max_calls: int = 0
     # Per-tool success-metrics recording (M4). When true, the execute chokepoint
     # records each tool invocation (success/empty/latency) to tool_call_metrics
     # and updates the running aggregates on tool_registrations, which the

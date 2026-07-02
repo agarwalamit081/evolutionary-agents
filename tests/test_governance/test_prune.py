@@ -59,8 +59,9 @@ async def test_run_applies_real_knobs_and_enforces_tool_cap() -> None:
         captured["enforce_max_active"] = max_active
         return 3
 
-    async def fake_unused_enforcer(min_age_days: int) -> int:
+    async def fake_unused_enforcer(min_age_days: int, max_calls: int) -> int:
         captured["unused_min_age_days"] = min_age_days
+        captured["unused_max_calls"] = max_calls
         return 2  # 2 never-invoked dead-weight tools retired
 
     pruner = GovernancePruner(
@@ -79,8 +80,10 @@ async def test_run_applies_real_knobs_and_enforces_tool_cap() -> None:
     assert kwargs["success_floor"] == settings.retire_success_floor
     assert kwargs["empty_output_floor"] == settings.retire_empty_output_floor
     assert captured["enforce_max_active"] == settings.max_active_tools
-    # The unused dead-weight age gate threads through verbatim (default 30).
+    # The unused dead-weight age gate + the max-calls floor thread through
+    # verbatim (defaults 30 / 0 — calls <= 0 == the original never-invoked pass).
     assert captured["unused_min_age_days"] == settings.retire_unused_days
+    assert captured["unused_max_calls"] == settings.retire_unused_max_calls
     # 1 redundant-tool plan + 1 redundant-agent plan + 1 underperformer + 2 unused + 3 cap-excess = 8.
     # (redundant_* count MergePlan objects, not retired items — see ConsolidationReport.)
     assert result == {
@@ -124,7 +127,7 @@ async def test_run_never_raises_on_cap_enforce_error() -> None:
 
     # Inject the unused enforcer so this resilience test never opens a real DB
     # session via _retire_unused (runs before the exploding cap-enforce).
-    async def fake_unused_enforcer(_min_age_days: int) -> int:
+    async def fake_unused_enforcer(_min_age_days: int, _max_calls: int) -> int:
         return 0
 
     pruner = GovernancePruner(

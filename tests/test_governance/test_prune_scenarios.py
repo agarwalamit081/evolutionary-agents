@@ -217,12 +217,13 @@ class TestPrunerResilienceAndJob:
 
 class TestRetireUnused:
     async def test_should_retire_unused_when_days_set(self) -> None:
-        # retire_unused_days=30 → the unused enforcer is called with 30 and its
-        # freed count is reported + counted in the total.
-        calls: list[int] = []
+        # retire_unused_days=30 → the unused enforcer is called with (30, 0) and
+        # its freed count is reported + counted in the total. The second arg is
+        # retire_unused_max_calls (default 0 == the original never-invoked pass).
+        calls: list[tuple[int, int]] = []
 
-        async def _unused(min_age_days: int) -> int:
-            calls.append(min_age_days)
+        async def _unused(min_age_days: int, max_calls: int) -> int:
+            calls.append((min_age_days, max_calls))
             return 4  # 4 never-invoked dead-weight tools retired
 
         pruner = GovernancePruner(
@@ -234,8 +235,29 @@ class TestRetireUnused:
         out = await pruner.run()
         assert out["pruned"] is True
         assert out["unused"] == 4
-        assert calls == [30]  # the age gate was threaded through verbatim
+        # Both the age gate AND the max-calls floor thread through verbatim.
+        assert calls == [(30, 0)]
         assert out["total_freed"] == 4
+
+    async def test_should_thread_max_calls_floor_to_unused_enforcer(self) -> None:
+        # retire_unused_max_calls=3 → the unused enforcer now receives (30, 3) so
+        # the periodic prune can also retire low-call abandonware (calls <= 3),
+        # not just zero-call dead weight. Default-off (0) preserves the legacy
+        # behavior pinned in the test above.
+        calls: list[tuple[int, int]] = []
+
+        async def _unused(_days: int, max_calls: int) -> int:
+            calls.append((_days, max_calls))  # type: ignore[arg-type]
+            return 0
+
+        pruner = GovernancePruner(
+            _agent_settings(retire_unused_days=30, retire_unused_max_calls=3),
+            consolidate=AsyncMock(return_value=ConsolidationReport()),
+            tool_cap_enforcer=AsyncMock(return_value=0),
+            unused_enforcer=_unused,
+        )
+        await pruner.run()
+        assert calls == [(30, 3)]
 
     async def test_should_disable_unused_pass_when_days_zero(self) -> None:
         # retire_unused_days=0 → the unused pass is a no-op: the enforcer is

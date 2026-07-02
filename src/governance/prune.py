@@ -46,9 +46,9 @@ from src.governance.consolidate import consolidate_all
 # ``Callable[[int], Awaitable[int]]``: takes max_active, returns the count retired.
 ToolCapEnforcer = Callable[[int], Awaitable[int]]
 
-# The unused-tool retire method on ToolPersister (retire 0-call tools aged past
-# the gate). Same shape as ToolCapEnforcer: takes min_age_days, returns count.
-UnusedToolEnforcer = Callable[[int], Awaitable[int]]
+# The unused-tool retire method on ToolPersister (retire <=max-call tools aged
+# past the gate). Takes (min_age_days, max_calls), returns count retired.
+UnusedToolEnforcer = Callable[[int, int], Awaitable[int]]
 
 
 class GovernancePruner:
@@ -77,6 +77,7 @@ class GovernancePruner:
         self._empty_output_floor = s.retire_empty_output_floor
         self._max_active_tools = s.max_active_tools
         self._retire_unused_days = s.retire_unused_days
+        self._retire_unused_max_calls = s.retire_unused_max_calls
         # Injectable for tests (mirrors CurveRegressionGate.telemetry). Defaults
         # resolve the real deps lazily inside run() so importing this module needs
         # no DB — and so a unit test never opens a session.
@@ -159,9 +160,10 @@ class GovernancePruner:
         ``retire_underperforming`` spares untried tools (a fair chance before a
         performance verdict), so a 0-call tool that is neither redundant, nor
         over-cap, nor has enough calls to underperform would survive forever.
-        This retires that objective dead weight (calls == 0, older than the age
-        gate). Injectable for tests so the unit never opens a session.
-        ``retire_unused_days <= 0`` disables the pass (returns 0, touches nothing).
+        This retires that objective dead weight (calls <= retire_unused_max_calls,
+        older than the age gate). Injectable for tests so the unit never opens a
+        session. ``retire_unused_days <= 0`` disables the pass (returns 0,
+        touches nothing).
         """
         if self._retire_unused_days <= 0:
             return 0
@@ -170,7 +172,10 @@ class GovernancePruner:
             from src.tools.dynamic.persister import ToolPersister  # noqa: PLC0415
 
             enforcer = ToolPersister().retire_unused
-        return int(await enforcer(self._retire_unused_days) or 0)
+        return int(
+            await enforcer(self._retire_unused_days, self._retire_unused_max_calls)
+            or 0
+        )
 
 
 async def enforce_caps_now(settings: AgentSettings | None = None) -> dict[str, Any]:

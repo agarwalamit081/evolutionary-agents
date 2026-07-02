@@ -166,7 +166,7 @@ class TestUnusedTools:
 
     @pytest.mark.asyncio
     async def test_filter_uses_calls_zero_and_age_gate(self) -> None:
-        """The scan emits the calls==0 + created_at age-gate predicates."""
+        """The scan emits the calls + created_at age-gate predicates."""
         session = _CapturingSession()
         with patch("src.db.session.get_session", lambda: session):
             await ToolPersister().unused_tools(30)
@@ -174,6 +174,20 @@ class TestUnusedTools:
         assert "calls" in sql
         assert "created_at" in sql
         assert "is_active" in sql
+
+    @pytest.mark.asyncio
+    async def test_filter_uses_le_predicate_for_max_calls(self) -> None:
+        """The scan uses ``calls <= max_calls`` (inclusive), so a non-zero floor
+        retires low-call abandonware too. Default max_calls=0 == the original
+        never-invoked pass; a raised floor widens the selection without changing
+        the predicate shape."""
+        session = _CapturingSession()
+        with patch("src.db.session.get_session", lambda: session):
+            await ToolPersister().unused_tools(30, max_calls=3)
+        sql = str(session.statements[0])
+        # The predicate is ``calls <= :param`` (NOT equality to a literal 0).
+        assert "<=" in sql
+        assert "calls" in sql
 
 
 class TestRetireUnused:
@@ -192,8 +206,21 @@ class TestRetireUnused:
         p.retire = AsyncMock(return_value=2)  # type: ignore[method-assign]
         count = await p.retire_unused(30)
         assert count == 2
-        p.unused_tools.assert_awaited_once_with(30)
+        # Default max_calls=0 forwards to unused_tools as a keyword (preserves
+        # the original "never invoked" semantics).
+        p.unused_tools.assert_awaited_once_with(30, max_calls=0)
         p.retire.assert_awaited_once_with(["dead_a", "dead_b"])
+
+    @pytest.mark.asyncio
+    async def test_forwards_max_calls_floor_to_unused_tools(self) -> None:
+        """retire_unused(max_calls=N) forwards the floor so low-call abandonware
+        (calls <= N) is also retired, not just zero-call dead weight."""
+        p = ToolPersister()
+        p.unused_tools = AsyncMock(return_value=["dead_a"])  # type: ignore[method-assign]
+        p.retire = AsyncMock(return_value=1)  # type: ignore[method-assign]
+        await p.retire_unused(30, max_calls=3)
+        p.unused_tools.assert_awaited_once_with(30, max_calls=3)
+        p.retire.assert_awaited_once_with(["dead_a"])
 
     @pytest.mark.asyncio
     async def test_disabled_age_zero_returns_zero(self) -> None:

@@ -916,8 +916,8 @@ class ToolPersister:
             )
         return retired
 
-    async def unused_tools(self, min_age_days: int) -> list[str]:
-        """Active generated tools never invoked and older than ``min_age_days``.
+    async def unused_tools(self, min_age_days: int, max_calls: int = 0) -> list[str]:
+        """Active generated tools barely invoked and older than ``min_age_days``.
 
         Phase-4 dead-weight scan. A tool qualifies when ``calls == 0`` (never
         exercised — ``last_run_at`` is NULL) AND it was created more than
@@ -932,6 +932,11 @@ class ToolPersister:
         Args:
             min_age_days: Minimum ``created_at`` age in days. ``<= 0`` disables
                 the pass (returns ``[]``).
+            max_calls: Upper bound (inclusive) on ``calls`` for a tool to
+                qualify. ``0`` (default) preserves the original "never invoked"
+                semantics; raise to also retire low-call abandonware that would
+                otherwise slowly saturate the cap alongside un-deduped
+                semantic duplicates.
 
         Returns:
             Names of qualifying tools (sorted).
@@ -953,7 +958,7 @@ class ToolPersister:
                     .where(
                         ToolRegistration.is_active.is_(True),
                         ToolRegistration.tool_type == "generated",
-                        ToolRegistration.calls == 0,
+                        ToolRegistration.calls <= max_calls,
                         ToolRegistration.created_at < cutoff,
                     )
                 )
@@ -963,8 +968,8 @@ class ToolPersister:
             logger.debug(f"Unused-tool scan failed: {e}")
             return []
 
-    async def retire_unused(self, min_age_days: int) -> int:
-        """Retire never-invoked generated tools older than ``min_age_days``.
+    async def retire_unused(self, min_age_days: int, max_calls: int = 0) -> int:
+        """Retire barely-invoked generated tools older than ``min_age_days``.
 
         The Phase-4 complement to :meth:`retire_underperforming`: that removes
         chronic low *performers* (enough calls, poor outcomes); this removes
@@ -974,15 +979,18 @@ class ToolPersister:
 
         Args:
             min_age_days: Minimum ``created_at`` age in days; ``<= 0`` disables.
+            max_calls: Upper bound (inclusive) on ``calls`` for a tool to
+                qualify ( forwarded to :meth:`unused_tools`). ``0`` (default)
+                keeps the original "never invoked" semantics.
         """
-        names = await self.unused_tools(min_age_days)
+        names = await self.unused_tools(min_age_days, max_calls=max_calls)
         if not names:
             return 0
         retired = await self.retire(names)
         if retired:
             logger.info(
-                f"Retired {retired} unused tools (0 calls, older than "
-                f"{min_age_days}d): {', '.join(names)}"
+                f"Retired {retired} unused tools (<= {max_calls} calls, older "
+                f"than {min_age_days}d): {', '.join(names)}"
             )
         return retired
 

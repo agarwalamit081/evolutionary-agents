@@ -340,22 +340,36 @@ class TestVerifyNodeLLM:
         assert result2["is_complete"] is False
 
     @pytest.mark.asyncio
-    async def test_critical_complexity_threaded_to_gateway(self) -> None:
-        """A CRITICAL goal routes verification to a stronger model (§5 C.1)."""
+    async def test_critical_complexity_threaded_to_gateway(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CRITICAL goal routes its FINAL-lead verify passes to a stronger
+        model (§5 C.1). Phase 3.5 A6 demotes ROUTINE verify passes to SIMPLE
+        (cheap tier); only the last ``verify_final_lead`` passes keep the goal's
+        real complexity. Pin the cycle into the final window so this asserts the
+        strong-model threading it was written for — deterministic regardless of
+        the live .env verify_* knobs. (Pre-fix this asserted CRITICAL on a
+        routine cycle-0 pass, which the shipped demotion correctly demotes.)"""
+        from src.config.settings import get_settings
+
+        agent = get_settings().agent
+        monkeypatch.setattr(agent, "verify_max_cycles", 12)
+        monkeypatch.setattr(agent, "verify_final_lead", 2)  # final window = cycles >= 10
+
         state = self._build_complete_state()
+        state["verify_cycle"] = 11  # final-lead pass → keeps goal complexity
         state["current_goal"] = Goal(
             text="test goal for LLM verify",
             status=GoalStatus.ACTIVE,
             complexity=TaskComplexity.CRITICAL,
         )
 
-        llm_json = (
-            '{"is_complete": true, "completion_percentage": 100.0, '
-            '"gaps": [], "quality_assessment": "Excellent", "should_evolve": false}'
-        )
         gateway = MagicMock()
         gateway.acompletion = AsyncMock(return_value=LLMResponse(
-            content=llm_json,
+            content=(
+                '{"is_complete": true, "completion_percentage": 100.0, '
+                '"gaps": [], "quality_assessment": "Excellent", "should_evolve": false}'
+            ),
             model="gpt-4o-mini-2024-07-18",
             provider="openai",
             input_tokens=10,
@@ -368,7 +382,51 @@ class TestVerifyNodeLLM:
 
         assert (
             gateway.acompletion.call_args.kwargs["complexity"]
-            == TaskComplexity.CRITICAL
+            is TaskComplexity.CRITICAL
+        )
+
+    @pytest.mark.asyncio
+    async def test_routine_verify_threads_simple_for_critical_goal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A6 demotion end-to-end: a CRITICAL goal's ROUTINE (early) verify pass
+        threads SIMPLE complexity to the gateway (→ cheap tier), the
+        ~180K-tokens/run cost saving. Integration companion to the final-lead
+        test above; the demotion function itself is covered in
+        TestResolveVerifyComplexity."""
+        from src.config.settings import get_settings
+
+        agent = get_settings().agent
+        monkeypatch.setattr(agent, "verify_max_cycles", 12)
+        monkeypatch.setattr(agent, "verify_final_lead", 2)
+
+        state = self._build_complete_state()
+        state["verify_cycle"] = 3  # routine pass (well within the routine window)
+        state["current_goal"] = Goal(
+            text="test goal for LLM verify",
+            status=GoalStatus.ACTIVE,
+            complexity=TaskComplexity.CRITICAL,
+        )
+
+        gateway = MagicMock()
+        gateway.acompletion = AsyncMock(return_value=LLMResponse(
+            content=(
+                '{"is_complete": true, "completion_percentage": 100.0, '
+                '"gaps": [], "quality_assessment": "Excellent", "should_evolve": false}'
+            ),
+            model="gpt-4o-mini-2024-07-18",
+            provider="openai",
+            input_tokens=10,
+            output_tokens=50,
+            total_tokens=60,
+            cost_usd=0.0001,
+        ))
+
+        await verify_node(state, gateway=gateway)
+
+        assert (
+            gateway.acompletion.call_args.kwargs["complexity"]
+            is TaskComplexity.SIMPLE
         )
 
     @pytest.mark.asyncio

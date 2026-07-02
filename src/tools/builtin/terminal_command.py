@@ -24,7 +24,7 @@ from typing import Optional
 from loguru import logger
 
 from src.config.settings import get_settings
-from src.tools._paths import project_root
+from src.tools._paths import isolated_results_root, project_root
 
 # Layer 1: commands the agent may invoke. All read-oriented.
 _ALLOWED_COMMANDS = frozenset(
@@ -84,6 +84,18 @@ def _resolve_cwd(cwd: Optional[str]) -> tuple[Optional[Path], str]:
     """
     root = project_root()
     if cwd is None:
+        # Per-run isolation: default to the active run's results cell so a
+        # shell redirect like ``> results/q01/x.csv`` lands under
+        # ``results/<run_id>/...`` — the SAME location file_writer/code_executor
+        # write to and verify's cell-scoped ``resolve_deliverable`` reads from.
+        # Without this, terminal ran from the flat project root and its writes
+        # were invisible to verify (the remaining flat-write leak after
+        # code_executor was scoped in 29f982a), driving false "missing
+        # deliverable" replan loops. ``None`` when isolation is off → unchanged.
+        cell = isolated_results_root()
+        if cell is not None:
+            cell.mkdir(parents=True, exist_ok=True)
+            return cell, ""
         return root, ""
     # Path joining: if `cwd` is absolute it replaces; if relative it appends.
     candidate = (root / cwd).resolve()

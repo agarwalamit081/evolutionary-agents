@@ -648,6 +648,104 @@ class TestCodeExecutorHostCwd:
         assert subprocess_cwd == (tmp_path / "results").resolve().parent
 
 
+class TestTerminalCommandCwd:
+    """The remaining flat-write leak after code_executor was scoped (29f982a):
+    ``terminal_command`` ran from the flat project root, so any file it touched
+    via a relative path landed OUTSIDE the run cell — invisible to verify's
+    cell-scoped ``resolve_deliverable``. The fix: when isolation is on, default
+    cwd = the run cell (``results/<run_id>/``), matching code_executor. Without
+    a run_id the cwd stays the project root (unchanged host-CLI contract)."""
+
+    @pytest.mark.asyncio
+    async def test_default_cwd_is_run_cell_when_isolated(
+        self, tmp_path: Path
+    ) -> None:
+        from src.config.settings import AgentSettings
+        from src.tools._paths import set_active_run_id
+
+        agent = AgentSettings(
+            _env_file=None,
+            results_root=str(tmp_path / "results"),
+            workspace_root=str(tmp_path / "workspace"),
+            results_per_run_subdir=True,
+        )
+        tools = type(
+            "T",
+            (),
+            {"terminal_command_timeout": 10.0, "terminal_max_output_bytes": 8192},
+        )()
+        set_active_run_id("q09")
+        try:
+            with patch(
+                "src.config.settings.get_settings",
+                return_value=type("S", (), {"agent": agent, "tools": tools}),
+            ):
+                # ``pwd`` is allowlisted and prints the subprocess's cwd.
+                result = await terminal_command("pwd")
+        finally:
+            set_active_run_id(None)
+
+        cwd = Path(result.strip())
+        assert cwd.name == "q09"  # the run cell, not the flat project root
+        assert cwd.parent == (tmp_path / "results").resolve()
+        # The cell was created on disk by the fix (cell.mkdir side effect) — a
+        # flat project-root cwd would have left results/q09 absent.
+        assert (tmp_path / "results" / "q09").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_default_cwd_is_project_root_when_not_isolated(
+        self, tmp_path: Path
+    ) -> None:
+        """No run_id bound → isolation off → cwd is the flat project root, the
+        documented host-CLI contract (unchanged legacy behavior)."""
+        from src.config.settings import AgentSettings
+        from src.tools._paths import set_active_run_id
+
+        agent = AgentSettings(
+            _env_file=None,
+            results_root=str(tmp_path / "results"),
+            workspace_root=str(tmp_path / "workspace"),
+        )
+        tools = type(
+            "T",
+            (),
+            {"terminal_command_timeout": 10.0, "terminal_max_output_bytes": 8192},
+        )()
+        set_active_run_id(None)
+        with patch(
+            "src.config.settings.get_settings",
+            return_value=type("S", (), {"agent": agent, "tools": tools}),
+        ):
+            result = await terminal_command("pwd")
+        cwd = Path(result.strip())
+        assert cwd == tmp_path  # project_root = parent of results_root
+        assert cwd == (tmp_path / "results").resolve().parent
+
+    @pytest.mark.asyncio
+    async def test_explicit_cwd_traversal_rejected(self, tmp_path: Path) -> None:
+        """An explicit cwd escaping the project root is still rejected — the
+        sandbox guard is unchanged by the run-cell default."""
+        from src.config.settings import AgentSettings
+
+        agent = AgentSettings(
+            _env_file=None,
+            results_root=str(tmp_path / "results"),
+            workspace_root=str(tmp_path / "workspace"),
+        )
+        tools = type(
+            "T",
+            (),
+            {"terminal_command_timeout": 10.0, "terminal_max_output_bytes": 8192},
+        )()
+        with patch(
+            "src.config.settings.get_settings",
+            return_value=type("S", (), {"agent": agent, "tools": tools}),
+        ):
+            result = await terminal_command("pwd", cwd="../../etc")
+        assert result.startswith("ERROR:")
+        assert "outside allowed roots" in result
+
+
 class TestFileWriterResultsDir:
     """Tests for file_writer defaulting to results_root."""
 

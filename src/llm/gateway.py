@@ -353,6 +353,16 @@ class LLMGateway:
 
         temperature = self._resolve_temperature(temperature)
 
+        # Per-node output-token default (Phase 3.5 A3): when the caller omits
+        # max_tokens, apply the node's cap (verify=512, classify=256, plan=2048,
+        # reflect=1024) instead of the generic 4096 default. verify averaged
+        # ~3,300 output tokens/call for no quality gain; pass/fail needs no 4K
+        # prose. Resolved here (where ``node`` is in scope) so it flows into the
+        # cache key + _build_kwargs. ``_node_max_tokens`` returns None for nodes
+        # without a cap (execute) → _build_kwargs keeps its model/default logic.
+        if max_tokens is None:
+            max_tokens = self._node_max_tokens(node)
+
         # Compress older messages to reduce token consumption
         messages = self._history_compressor.compress(messages)
 
@@ -1113,6 +1123,31 @@ class LLMGateway:
         # litellm versions and mocked responses.
         cache_read_tokens = int(getattr(usage, "_cache_read_input_tokens", 0) or 0)
         cache_creation_tokens = int(getattr(usage, "_cache_creation_input_tokens", 0) or 0)
+        # Multi-provider prefix-cache observability (Phase 3.5 A2). OpenAI does
+        # automatic server-side prefix caching (no client flag) and surfaces hits
+        # on Usage.prompt_tokens_details.cached_tokens; DeepSeek surfaces
+        # prompt_cache_hit_tokens. Sum into cache_read_tokens (observability-only
+        # — cost is computed from prompt/completion tokens above, unaffected) so
+        # the prefix-cache win is measurable across providers. Fully defensive: a
+        # usage object that reports these fields as non-int junk (incl. a mocked
+        # MagicMock usage, where every attribute is itself a truthy MagicMock) is
+        # skipped via isinstance guards, leaving the Anthropic-only value above.
+        # Observability must never abort the parse (mirrors the recorder contract).
+        try:
+            prompt_details = getattr(usage, "prompt_tokens_details", None)
+            if isinstance(prompt_details, dict):
+                cached = prompt_details.get("cached_tokens", 0)
+            elif prompt_details is not None:
+                cached = getattr(prompt_details, "cached_tokens", 0)
+            else:
+                cached = 0
+            if isinstance(cached, (int, float)):
+                cache_read_tokens += int(cached)
+            deepseek_hit = getattr(usage, "prompt_cache_hit_tokens", 0)
+            if isinstance(deepseek_hit, (int, float)):
+                cache_read_tokens += int(deepseek_hit)
+        except (TypeError, ValueError):
+            pass
         if cache_read_tokens or cache_creation_tokens:
             logger.debug(
                 f"Prompt cache ({model}): read={cache_read_tokens} "
@@ -1148,6 +1183,31 @@ class LLMGateway:
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
         )
+
+    # Per-node max_tokens setting attr (Phase 3.5 A3). node string → attr on
+    # ResilienceSettings. Nodes without an entry (execute) keep the default
+    # model/cap logic in _build_kwargs.
+    _NODE_MAX_TOKENS_ATTR: dict[str, str] = {
+        "classify": "llm_classify_max_tokens",
+        "plan": "llm_plan_max_tokens",
+        "reflect": "llm_reflect_max_tokens",
+        "verify": "llm_verify_max_tokens",
+    }
+
+    def _node_max_tokens(self, node: str | None) -> int | None:
+        """Per-node output-token cap, or None when the node has none / cap is 0.
+
+        ``None`` lets ``_build_kwargs`` keep its model/default max_tokens logic
+        (so execute and any unmapped node are unaffected). ``0`` (owner opt-out
+        in .env) also maps to ``None``.
+        """
+        if not node:
+            return None
+        attr = self._NODE_MAX_TOKENS_ATTR.get(node)
+        if not attr:
+            return None
+        value = int(getattr(self._settings.resilience, attr, 0) or 0)
+        return value or None
 
     def _build_kwargs(
         self,

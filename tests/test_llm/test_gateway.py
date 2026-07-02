@@ -532,6 +532,95 @@ class TestParseResponse:
 # ─── Test acompletion ────────────────────────────────────────────────
 
 
+class TestNodeMaxTokens:
+    """Per-node output-token caps (Phase 3.5 A3, rec #11).
+
+    ``_node_max_tokens`` resolves a node -> ``ResilienceSettings`` attr so a verify
+    call caps output at 512 (not the 4096 default), classify at 256, etc. — saving
+    ~180K tokens/run with no quality loss (verify averaged ~3,300 output tokens for
+    a pass/fail verdict that needs no 4K prose). Nodes without an entry (execute)
+    and a None/0 setting return None (-> _build_kwargs keeps the model/default cap).
+    """
+
+    def test_verify_node_resolves_cap(self, gateway: LLMGateway) -> None:
+        assert gateway._node_max_tokens("verify") == (
+            gateway._settings.resilience.llm_verify_max_tokens
+        )
+
+    def test_each_mapped_node_resolves_its_own_cap(self, gateway: LLMGateway) -> None:
+        assert gateway._node_max_tokens("classify") == 256
+        assert gateway._node_max_tokens("plan") == 2048
+        assert gateway._node_max_tokens("reflect") == 1024
+        assert gateway._node_max_tokens("verify") == 512
+
+    def test_unmapped_node_returns_none(self, gateway: LLMGateway) -> None:
+        """execute (and any unmapped node) has no per-node cap -> None -> model default."""
+        assert gateway._node_max_tokens("execute") is None
+        assert gateway._node_max_tokens("unknown") is None
+
+    def test_none_node_returns_none(self, gateway: LLMGateway) -> None:
+        assert gateway._node_max_tokens(None) is None
+
+    def test_zero_setting_maps_to_none(self, gateway: LLMGateway) -> None:
+        """An owner opt-out (cap=0 in .env) disables the per-node cap for that node."""
+        gateway._settings.resilience.llm_verify_max_tokens = 0
+        assert gateway._node_max_tokens("verify") is None
+
+    @pytest.mark.asyncio
+    async def test_acompletion_applies_verify_node_cap(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """End-to-end: a verify-node acompletion with no explicit max_tokens threads the
+        node cap (512) into the litellm call kwargs — not the 4096 default. Regression
+        for the central resolution in acompletion (where ``node`` is in scope)."""
+        mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model="gpt-4o-mini-2024-07-18",
+                node="verify",
+            )
+
+        assert mock_litellm.acompletion.call_args.kwargs["max_tokens"] == 512
+
+    @pytest.mark.asyncio
+    async def test_acompletion_explicit_max_tokens_wins_over_node_cap(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """A caller-provided max_tokens always wins — the node cap only fills in when
+        max_tokens is None."""
+        mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model="gpt-4o-mini-2024-07-18",
+                node="verify",
+                max_tokens=2048,
+            )
+
+        assert mock_litellm.acompletion.call_args.kwargs["max_tokens"] == 2048
+
+
 class TestAcompletion:
     """Tests for LLMGateway.acompletion end-to-end flow."""
 

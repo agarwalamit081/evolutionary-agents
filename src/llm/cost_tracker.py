@@ -153,6 +153,16 @@ class CostTracker:
            per-attempt value so it only catches a genuine runaway, never a normal
            resume. Only enforced when a ``run_id`` is bound AND the limit is
            ``> 0`` (default ``0`` = disabled — opt-in).
+        5. **Cumulative-absolute per-run TOKEN** cap (``per_run_token_limit_absolute``)
+           — the free-tier guard (recommendation #10). A $0 / free-tier model
+           (Groq, OpenRouter ``:free``, NVIDIA build.nvidia.com) bypasses the USD
+           caps entirely (#3/#4 measure DOLLAR spend), so a runaway on a free
+           model can spin unbounded in tokens without ever tripping a cost cap.
+           This measures the run's TOTAL tokens across ALL attempts with NO
+           baseline subtraction (like #4's $ backstop) and is the SOLE bound for
+           free tiers. Only enforced when a ``run_id`` is bound AND the limit is
+           ``> 0`` (default ``0`` = disabled — opt-in; mandatory when free tiers
+           are enabled).
 
         All caps reuse the gateway's existing not-within-budget path: it
         downgrades to a cheaper model, and only hard-``raise``s when no cheaper
@@ -173,6 +183,18 @@ class CostTracker:
             return False, f"Daily budget exhausted: ${daily_total:.2f} / ${daily_limit:.2f}"
 
         per_run_limit = self._budget.per_task_token_limit
+        absolute_token_limit = self._budget.per_run_token_limit_absolute
+        # Fetch the run's cumulative TOKEN usage ONCE for both token tiers
+        # (2 + 5) when either is active. Tier 2 is attempt-relative (baseline-
+        # subtracted) so a resumed run does not inherit its prior debt; tier 5
+        # is cumulative-absolute (no baseline) so a $0-model runaway — which can
+        # NEVER trip the USD caps (#3/#4 measure $ spend) — is still bounded
+        # across attempts (recommendation #10; mandatory prerequisite for free
+        # tiers, which bypass the cost caps entirely).
+        cumulative_tokens = 0
+        if run_id is not None and (per_run_limit > 0 or absolute_token_limit > 0):
+            cumulative_tokens = await self.get_run_token_usage(run_id)
+
         if run_id is not None and per_run_limit > 0:
             # Measure THIS attempt's spend: cumulative-all-time for the run_id
             # minus the tokens already attributed to it when this attempt
@@ -180,14 +202,32 @@ class CostTracker:
             # baseline a re-enqueued or resumed run inherits its prior token debt
             # and trips the cap before doing any work (battery-04 q09 re-enqueue
             # inherited 407K tokens -> instantly over the 200K cap).
-            cumulative = await self.get_run_token_usage(run_id)
-            spent = max(0, cumulative - self._run_baseline_tokens)
+            spent = max(0, cumulative_tokens - self._run_baseline_tokens)
             if spent >= per_run_limit:
                 return (
                     False,
                     f"Per-run token cap reached: {spent} / {per_run_limit} "
                     f"tokens this attempt (run {run_id}; "
                     f"baseline {self._run_baseline_tokens})",
+                )
+
+        if run_id is not None and absolute_token_limit > 0:
+            # Tier 5 — cumulative-absolute TOKEN backstop (free-tier guard,
+            # recommendation #10). NO baseline subtraction: the run's TOTAL
+            # tokens across ALL attempts. A $0 / free-tier model (Groq, OpenRouter
+            # :free, NVIDIA build.nvidia.com) bypasses the USD caps entirely
+            # (#3/#4 measure DOLLAR spend), so a runaway on a free model can spin
+            # unbounded in tokens without ever tripping a cost cap. This token
+            # ceiling bounds that. Disabled by default (0); opt-in. For paid
+            # models set it ABOVE per_run_cost_limit_absolute's equivalent token
+            # volume so it never fires on a normal run; for free tiers it is the
+            # SOLE backstop.
+            if cumulative_tokens >= absolute_token_limit:
+                return (
+                    False,
+                    f"Cumulative run token cap reached: "
+                    f"{cumulative_tokens} / {absolute_token_limit} tokens "
+                    f"total across attempts (run {run_id})",
                 )
 
         per_run_cost_limit = self._budget.per_run_cost_limit

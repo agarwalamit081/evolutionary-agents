@@ -205,6 +205,18 @@ class ResilienceSettings(BaseSettings):
     # explicitly. Sits ABOVE spec.max_output in min() so it also bounds models
     # that over-declare (e.g. deepseek-v4-flash ~384K).
     llm_max_output_cap: int = 16384  # Env: LLM_MAX_OUTPUT_CAP
+    # Per-node output-token caps (Phase 3.5 A3). The 4096 default is wasteful
+    # for nodes that emit short structured output — deepseek-v4-pro verify
+    # averaged ~3,300 output tokens/call against the 4096 default; capping
+    # verify at 512 saves ~180K tokens/run with zero quality loss (pass/fail
+    # needs no 4K prose). Each node passes its cap explicitly to the gateway
+    # call; ``0`` falls back to ``llm_default_max_tokens``. Execute is
+    # intentionally uncapped (codegen may need the headroom). Env:
+    # LLM_<NODE>_MAX_TOKENS.
+    llm_classify_max_tokens: int = 256  # Env: LLM_CLASSIFY_MAX_TOKENS
+    llm_plan_max_tokens: int = 2048  # Env: LLM_PLAN_MAX_TOKENS
+    llm_reflect_max_tokens: int = 1024  # Env: LLM_REFLECT_MAX_TOKENS
+    llm_verify_max_tokens: int = 512  # Env: LLM_VERIFY_MAX_TOKENS
     # #1b — opt-in ``tool_choice="required"`` intermediate fallback. When a
     # NON-DeepSeek model rejects a forced-FUNCTION tool_choice (400), retry once
     # with ``tool_choice="required"`` (call ANY tool) before the final
@@ -847,6 +859,16 @@ class BudgetSettings(BaseSettings):
     # genuine runaway, never a normal resume. ``0`` (default) = DISABLED — opt-in.
     # Env: PER_RUN_COST_LIMIT_ABSOLUTE.
     per_run_cost_limit_absolute: float = 0.0
+    # CUMULATIVE-ABSOLUTE per-run TOKEN cap (Phase 3.5 A5) — the token analogue
+    # of ``per_run_cost_limit_absolute``. ``per_task_token_limit`` is
+    # ATTEMPT-relative (baseline-subtracted), so it cannot bound a $0-model
+    # runaway: a free-tier model never trips the USD cap, and each redelivered
+    # attempt resets its own token baseline. This measures the run's TOTAL
+    # token spend across ALL attempts (``get_run_token_usage``, no baseline) and
+    # is the mandatory prerequisite for free tiers — without it a $0-model
+    # runaway is unbounded. ``0`` (default) = DISABLED (opt-in; owner sets it
+    # before enabling free-tier fallbacks). Env: PER_RUN_TOKEN_LIMIT_ABSOLUTE.
+    per_run_token_limit_absolute: int = 0
     max_cost_usd: float = 10.0
     budget_warn_threshold: float = 0.70
     budget_critical_threshold: float = 0.90
@@ -1085,6 +1107,28 @@ class AgentSettings(BaseSettings):
     # an unchanged step); 3 consecutive unchanged passes is a real plateau.
     # Env: CONVERGENCE_STABLE_THRESHOLD.
     convergence_stable_threshold: int = 3
+    # Verify-cycle cap + oscillation detection (Phase 3.5 A4). A dedicated
+    # verify-cycle ceiling — SEPARATE from the global ``max_iterations_*`` — so a
+    # stuck goal terminates with best-so-far instead of looping 10-20 verify
+    # cycles. ``route_after_verify`` routes to ``store_memory`` once
+    # ``verify_cycle >= verify_max_cycles``. Oscillation is sharper than the flat
+    # cap: if the same blocking-failure fingerprint repeats
+    # ``verify_oscillation_repeat`` consecutive times, abort early (stuck) even
+    # below the cap; changing failures = slow progress, allowed to continue. Env:
+    # VERIFY_MAX_CYCLES, VERIFY_OSCILLATION_REPEAT.
+    verify_max_cycles: int = 12  # Env: VERIFY_MAX_CYCLES
+    verify_oscillation_repeat: int = 3  # Env: VERIFY_OSCILLATION_REPEAT
+    # Routine-vs-final verify split (Phase 3.5 A6, rec #7). Verify is a pass/fail
+    # gate that rarely needs the strong reasoning model on routine (early) passes.
+    # ``verify_final_lead`` = how many of the LAST verify cycles count as "final"
+    # (about to converge or the last allowed pass) and so keep the goal's real
+    # complexity → ``route_reasoning`` (strong). All EARLIER (routine) verifies are
+    # demoted to SIMPLE complexity → the CHEAP tier (deepseek-v4-flash), cutting
+    # ~180K tokens/run with no quality loss (a pass/fail gate needs no 4K prose and
+    # no flagship verifier). The demotion never DOWNGRADES an already-trivial goal;
+    # it only caps a COMPLEX/CRITICAL goal's routine verifies at SIMPLE. Env:
+    # VERIFY_FINAL_LEAD.
+    verify_final_lead: int = 2  # Env: VERIFY_FINAL_LEAD
     # Capability-cap gap-loop break (battery-04 q09 fix B). When the active
     # tool/sub-agent population is at its cumulative cap (max_active_tools /
     # max_active_sub_agents), ``agent_spawn`` converts agent-gaps→tool-gaps and
@@ -1219,7 +1263,14 @@ class AgentSettings(BaseSettings):
     # (only tool_create/agent_spawn persist embeddings). Env:
     # TOOL_RETRIEVAL_ENABLED, TOOL_RETRIEVAL_TOP_K.
     tool_retrieval_enabled: bool = False
-    tool_retrieval_top_k: int = 8
+    # Tightened from 8 -> 5 (A7, rec #8): the dynamic-retrieved set's tool
+    # schemas are injected verbatim into every execute prompt, so each retrieved
+    # tool costs ~150-250 tokens of description/schema per call. Built-ins
+    # (always-on) already dominate the tool-schema token share; pulling 8 vs 5
+    # dynamic tools inflates the prompt with marginal-relevance candidates that
+    # the step rarely selects. 5 keeps the high-relevance subset and trims the
+    # rest. (RAG-over-tools must retrieve a SMALL subset — rec #8.)
+    tool_retrieval_top_k: int = 5
     # E2 — success-metric score-blend. When on, tool retrieval widens to a pool
     # (top_k × ``tool_retrieval_blend_pool``) by cosine, then RE-RANKS by
     # ``cosine · (1 + blend_weight · success_rate · (1 − empty_output_rate))``

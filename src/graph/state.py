@@ -116,6 +116,19 @@ class AgentState(TypedDict, total=False):
     consecutive_stable_verifies: int
     last_verify_fingerprint: str | None
 
+    # ─── Verify-cycle cap + oscillation detection (A4, recs #5/#15) ────────
+    # ``verify_cycle`` counts verify passes (overwrite — verify computes the full
+    # new value each pass). ``route_after_verify`` terminates the run via
+    # ``store_memory`` (best-so-far) once it reaches ``verify_max_cycles``,
+    # bounding wasted verify cycles independent of the global iteration cap
+    # (rec #5). ``recent_verify_failures`` accumulates a sha256 fingerprint of
+    # the BLOCKING failure set each NON-completing verify pass (operator.add); if
+    # the last ``verify_oscillation_repeat`` fingerprints are identical the run
+    # is oscillating on the same blocker with no forward progress — sharper than
+    # the flat cycle cap, so it terminates early (rec #15).
+    verify_cycle: int
+    recent_verify_failures: Annotated[list[str], operator.add]
+
     # ─── Capability-cap gap-loop break (q09 run-control B) ───────────────
     # When both capability caps saturate (sub-agents at max_active_sub_agents,
     # generated tools at max_active_tools), agent_spawn converts agent gaps to

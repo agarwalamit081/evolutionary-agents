@@ -34,11 +34,13 @@ def mock_settings() -> MagicMock:
     settings.budget.budget_warn_threshold = 0.7
     settings.budget.budget_critical_threshold = 0.9
     # Mirror the full BudgetSettings surface so check_budget reads (every cap
-    # field incl. the cumulative-absolute tier-4 backstop) never hit a stray
-    # MagicMock-attribute — defaults match BudgetSettings (0.0 = disabled).
+    # field incl. the cumulative-absolute tier-4 backstop and the tier-5
+    # cumulative-absolute TOKEN backstop) never hits a stray MagicMock-attribute
+    # — defaults match BudgetSettings (0 = disabled).
     settings.budget.per_task_token_limit = 0
     settings.budget.per_run_cost_limit = 0.0
     settings.budget.per_run_cost_limit_absolute = 0.0
+    settings.budget.per_run_token_limit_absolute = 0
     return settings
 
 
@@ -366,6 +368,7 @@ class TestCheckBudget:
         settings.budget.budget_warn_threshold = 0.5
         settings.budget.budget_critical_threshold = 0.8
         settings.budget.per_run_cost_limit_absolute = 0.0
+        settings.budget.per_run_token_limit_absolute = 0
         tracker = CostTracker(session=MagicMock(), settings=settings)
 
         tracker.get_daily_spend = AsyncMock(return_value=4.0)  # 40%
@@ -409,6 +412,7 @@ class TestCheckBudgetPerRunTokenCap:
         settings.budget.per_task_token_limit = per_task_token_limit
         settings.budget.per_run_cost_limit = 0.0
         settings.budget.per_run_cost_limit_absolute = 0.0
+        settings.budget.per_run_token_limit_absolute = 0
         tracker = CostTracker(session=MagicMock(), settings=settings)
         tracker.get_daily_spend = AsyncMock(return_value=0.5)
         return tracker
@@ -462,6 +466,86 @@ class TestCheckBudgetPerRunTokenCap:
         tracker.get_run_token_usage.assert_not_called()
 
 
+# ─── check_budget — tier-5 cumulative-absolute TOKEN backstop (A5, rec #10) ─
+
+
+class TestCheckBudgetAbsoluteTokenCap:
+    """Tier 5 — the cumulative-absolute TOKEN backstop (A5, rec #10).
+
+    Unlike tier 2 (``per_task_token_limit``, attempt-relative via baseline), tier
+    5 (``per_run_token_limit_absolute``) measures the run's TOTAL tokens across
+    ALL attempts with NO baseline subtraction — the SOLE bound for free/$0-tier
+    models, which bypass the USD caps (#3/#4 measure DOLLAR spend). Disabled by
+    default (0); opt-in (mandatory when free tiers are enabled).
+    """
+
+    @staticmethod
+    def _make_tracker(per_run_token_limit_absolute: int) -> CostTracker:
+        """A tracker whose daily spend is low ($0.50 / $10.00) and whose other
+        caps are disabled, so only the tier-5 absolute-token cap can trip."""
+        settings = MagicMock()
+        settings.budget.max_cost_usd = 10.0
+        settings.budget.budget_warn_threshold = 0.7
+        settings.budget.budget_critical_threshold = 0.9
+        settings.budget.per_task_token_limit = 0
+        settings.budget.per_run_cost_limit = 0.0
+        settings.budget.per_run_cost_limit_absolute = 0.0
+        settings.budget.per_run_token_limit_absolute = per_run_token_limit_absolute
+        tracker = CostTracker(session=MagicMock(), settings=settings)
+        tracker.get_daily_spend = AsyncMock(return_value=0.5)
+        return tracker
+
+    @pytest.mark.asyncio
+    async def test_over_absolute_token_cap_returns_false(self) -> None:
+        """At/over the cumulative-absolute token cap -> (False, 'Cumulative run token cap')."""
+        tracker = self._make_tracker(per_run_token_limit_absolute=1_000_000)
+        tracker.get_run_token_usage = AsyncMock(return_value=1_500_000)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-runaway")
+
+        assert is_ok is False
+        assert "Cumulative run token cap" in msg
+        assert "cli-runaway" in msg
+
+    @pytest.mark.asyncio
+    async def test_under_absolute_token_cap_passes(self) -> None:
+        """Below the absolute token cap -> allowed (falls through to OK)."""
+        tracker = self._make_tracker(per_run_token_limit_absolute=1_000_000)
+        tracker.get_run_token_usage = AsyncMock(return_value=100_000)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-ok")
+
+        assert is_ok is True
+        assert "Budget OK" in msg
+
+    @pytest.mark.asyncio
+    async def test_absolute_cap_ignores_baseline(self) -> None:
+        """Tier 5 is cumulative-absolute — NO baseline subtraction. A run that set
+        a token baseline (resume scenario) still trips on the cumulative total,
+        unlike tier 2 which subtracts the baseline. This is the free-tier backstop
+        property: a $0-model runaway churns tokens regardless of attempt resets."""
+        tracker = self._make_tracker(per_run_token_limit_absolute=1_000_000)
+        tracker.get_run_token_usage = AsyncMock(return_value=1_500_000)
+        # A resume captured a baseline — tier 5 must IGNORE it (cumulative).
+        tracker.set_run_baseline(1_400_000)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-q06")
+
+        assert is_ok is False
+        assert "Cumulative run token cap" in msg
+
+    @pytest.mark.asyncio
+    async def test_disabled_when_zero(self) -> None:
+        """per_run_token_limit_absolute=0 disables tier 5 entirely."""
+        tracker = self._make_tracker(per_run_token_limit_absolute=0)
+        tracker.get_run_token_usage = AsyncMock(return_value=999_999_999)
+
+        is_ok, msg = await tracker.check_budget(run_id="cli-uncapped")
+
+        assert is_ok is True
+        assert "Budget OK" in msg
+
+
 # ─── check_budget — per-attempt baseline (token-inheritance fix) ───────────
 
 
@@ -486,6 +570,7 @@ class TestCheckBudgetBaselineDelta:
         settings.budget.per_task_token_limit = per_task_token_limit
         settings.budget.per_run_cost_limit = 0.0
         settings.budget.per_run_cost_limit_absolute = 0.0
+        settings.budget.per_run_token_limit_absolute = 0
         tracker = CostTracker(session=MagicMock(), settings=settings)
         tracker.get_daily_spend = AsyncMock(return_value=0.5)
         return tracker
@@ -570,6 +655,7 @@ class TestCheckBudgetPerRunCostCap:
         settings.budget.per_task_token_limit = 0
         settings.budget.per_run_cost_limit = per_run_cost_limit
         settings.budget.per_run_cost_limit_absolute = 0.0
+        settings.budget.per_run_token_limit_absolute = 0
         tracker = CostTracker(session=MagicMock(), settings=settings)
         tracker.get_daily_spend = AsyncMock(return_value=0.5)
         return tracker

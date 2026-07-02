@@ -401,6 +401,35 @@ def route_after_verify(state: AgentState) -> str:
         )
         return "store_memory"
 
+    # Verify-cycle cap + oscillation (A4, recs #5/#15): bound wasted verify cycles
+    # independently of the global iteration cap, and detect a verify oscillating
+    # on the same blocker (last N failure fingerprints identical). Both terminate
+    # with best-so-far via ``store_memory`` rather than looping verify→plan→execute
+    # to the iteration hard-cap. Like the iteration cap above: accept partial, do
+    # NOT set is_complete (a capped/oscillating partial is stuck, not done —
+    # declaring success on a missing deliverable violates the verify-completion
+    # discipline).
+    agent_cfg = get_settings().agent
+    verify_cycle = int(state.get("verify_cycle", 0) or 0)
+    if verify_cycle >= agent_cfg.verify_max_cycles:
+        logger.info(
+            f"Verify-cycle cap reached ({verify_cycle}/{agent_cfg.verify_max_cycles}); "
+            f"accepting partial result"
+        )
+        return "store_memory"
+
+    recent_failures = list(state.get("recent_verify_failures", []) or [])
+    osc_repeat = agent_cfg.verify_oscillation_repeat
+    if (
+        len(recent_failures) >= osc_repeat
+        and len(set(recent_failures[-osc_repeat:])) == 1
+    ):
+        logger.info(
+            f"Verify oscillation: blocking failure unchanged for "
+            f"{osc_repeat} consecutive pass(es); accepting partial result"
+        )
+        return "store_memory"
+
     has_remaining_steps = bool(plan_steps) and step_index < len(plan_steps)
 
     # Convergence early-exit (B3): verify has produced an identical output

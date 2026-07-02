@@ -242,7 +242,7 @@ async def verify_node(
             # Mirror the heuristic path: refresh the missing-deliverable list so
             # plan_node can target the next plan at whatever is still absent.
             result["missing_deliverables"] = list(deliverable_problems)
-            return result
+            return _stamp_verify_cycle(result, state)
 
     result = _heuristic_verify(
         state,
@@ -255,7 +255,8 @@ async def verify_node(
         confidence,
         deliverable_problems,
     )
-    return _stamp_convergence_fingerprint(result, state, goal_paths, completed_steps)
+    result = _stamp_convergence_fingerprint(result, state, goal_paths, completed_steps)
+    return _stamp_verify_cycle(result, state)
 
 
 def _heuristic_verify(
@@ -373,6 +374,65 @@ def _stamp_convergence_fingerprint(
     return state_update
 
 
+def _stamp_verify_cycle(
+    state_update: dict[str, Any],
+    state: AgentState,
+) -> dict[str, Any]:
+    """Append verify-cycle / oscillation fields to a verify state update (A4).
+
+    Increments ``verify_cycle`` once per verify pass (overwrite — the node
+    computes the full new value each pass). When this pass did NOT mark the run
+    complete it also pushes a sha256 fingerprint of the BLOCKING failure set
+    (sorted missing deliverables + sorted current blocking errors) onto
+    ``recent_verify_failures`` (operator.add reducer). ``route_after_verify``
+    reads both: (i) ``verify_cycle`` reaching ``verify_max_cycles`` -> accept
+    best-so-far via ``store_memory`` (bounds wasted cycles, rec #5); (ii) the
+    last ``verify_oscillation_repeat`` fingerprints being identical -> the verify
+    is oscillating on the same blocker with no forward progress -> terminate
+    early (sharper than the flat cap, rec #15). A completing pass pushes nothing
+    so it can never seed a false oscillation.
+    """
+    prior_cycle = int(state.get("verify_cycle", 0) or 0)
+    state_update["verify_cycle"] = prior_cycle + 1
+
+    if bool(state_update.get("is_complete")):
+        return state_update
+
+    deliverable_problems = list(state_update.get("missing_deliverables") or [])
+    missing = sorted(str(p) for p in deliverable_problems)
+    blocking = current_blocking_errors(state.get("errors") or [], deliverable_problems)
+    blocking_sorted = sorted(str(b) for b in blocking)
+    fingerprint_input = "missing=" + "|".join(missing) + ";blocking=" + "|".join(blocking_sorted)
+    fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
+    state_update["recent_verify_failures"] = [fingerprint]
+    return state_update
+
+
+def _resolve_verify_complexity(state: AgentState, goal: Any) -> TaskComplexity:
+    """Routine-vs-final verify complexity (Phase 3.5 A6, rec #7).
+
+    Verify is a pass/fail gate that rarely needs the strong reasoning model on
+    routine (early) passes. Only the LAST ``verify_final_lead`` passes — the ones
+    about to converge or the final allowed cycle — keep the goal's real
+    complexity so a hard goal's terminal verifies reach ``route_reasoning``
+    (strong model). Every earlier (routine) pass is demoted to SIMPLE complexity,
+    which ``route()`` resolves to the CHEAP tier (deepseek-v4-flash), cutting
+    ~180K tokens/run with no quality loss (a pass/fail gate needs no flagship
+    verifier). The demotion only CAPS a COMPLEX/CRITICAL routine verify at SIMPLE;
+    a SIMPLE/TRIVIAL goal is unchanged (already CHEAP-or-cheaper).
+    """
+    base = goal.complexity if goal and goal.complexity else TaskComplexity.SIMPLE
+    agent_cfg = get_settings().agent
+    # ``verify_cycle`` in ``state`` here is the PRE-increment count (the node
+    # stamps the increment after the LLM call), so it is 0-indexed by pass.
+    verify_cycle = int(state.get("verify_cycle", 0) or 0)
+    final_lead = max(0, int(agent_cfg.verify_final_lead))
+    is_final = verify_cycle >= max(0, int(agent_cfg.verify_max_cycles) - final_lead)
+    if is_final:
+        return base
+    return TaskComplexity.SIMPLE
+
+
 async def _llm_verify(
     gateway: LLMGateway,
     state: AgentState,
@@ -444,9 +504,11 @@ async def _llm_verify(
             grounding_warning=grounding_warning or "(no grounding warnings)",
         )
 
-        verify_complexity = (
-            goal.complexity if goal and goal.complexity else TaskComplexity.SIMPLE
-        )
+        # Routine-vs-final verify split (A6, rec #7): routine (early) passes
+        # demote to SIMPLE → CHEAP tier (deepseek-v4-flash); only the final
+        # ``verify_final_lead`` passes keep the goal's real complexity →
+        # route_reasoning (strong) on a hard goal. Saves ~180K tokens/run.
+        verify_complexity = _resolve_verify_complexity(state, goal)
         techniques = select_techniques_for_node(
             complexity=verify_complexity,
             node=NODE_VERIFY,

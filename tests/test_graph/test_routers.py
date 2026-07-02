@@ -392,6 +392,96 @@ class TestRouteAfterVerify:
         result = route_after_verify(sample_state)
         assert result == "plan"
 
+    def test_route_after_verify_cycle_cap_terminates(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """A4 (rec #5): once ``verify_cycle`` reaches ``verify_max_cycles`` the run
+        terminates with best-so-far via ``store_memory`` — independent of the global
+        iteration cap. Steps are left REMAINING and the iteration count is kept well
+        below the cap so neither the iteration terminator, the convergence branch,
+        nor the retry branch can mask this — the verify-cycle cap is the sole
+        terminator."""
+        cap = get_settings().agent.verify_max_cycles
+        sample_state["is_complete"] = False
+        sample_state["confidence"] = Confidence.MEDIUM
+        sample_state["verify_cycle"] = cap
+        sample_state["consecutive_stable_verifies"] = 0
+        # Steps remain (so the convergence-with-exhausted-plan branch cannot fire).
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="step 1", status="completed", result="ok"),
+            PlanStep(id="s2", description="step 2", status="pending"),
+        ]
+        sample_state["current_step_index"] = 1
+        sample_state["iteration_count"] = 0
+        sample_state["max_iterations"] = 50
+        result = route_after_verify(sample_state)
+        assert result == "store_memory"
+
+    def test_route_after_verify_oscillation_terminates(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """A4 (rec #15): when the last ``verify_oscillation_repeat`` blocking-failure
+        fingerprints are identical the verify is oscillating on the same blocker
+        with no forward progress → terminate via ``store_memory``. ``verify_cycle``
+        is kept BELOW the cap so the cycle cap cannot mask this — oscillation is the
+        sole (sharper) terminator."""
+        repeat = get_settings().agent.verify_oscillation_repeat
+        cap = get_settings().agent.verify_max_cycles
+        sample_state["is_complete"] = False
+        sample_state["confidence"] = Confidence.MEDIUM
+        sample_state["verify_cycle"] = min(repeat, max(cap - 1, 1))
+        sample_state["consecutive_stable_verifies"] = 0
+        # A full window of identical fingerprints at the configured repeat count.
+        sample_state["recent_verify_failures"] = ["fp"] * repeat
+        sample_state["plan_steps"] = [
+            PlanStep(id="s1", description="step 1", status="completed", result="ok"),
+            PlanStep(id="s2", description="step 2", status="pending"),
+        ]
+        sample_state["current_step_index"] = 1
+        sample_state["iteration_count"] = 0
+        sample_state["max_iterations"] = 50
+        result = route_after_verify(sample_state)
+        assert result == "store_memory"
+
+    def test_route_after_verify_oscillation_distinct_failures_continue(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """A4 guard: three verify passes with DIFFERENT blockers are making forward
+        progress (the gap set is changing each cycle), so oscillation must NOT fire.
+        Plan exhausted + iteration below cap + below convergence → falls through to
+        re-plan (``plan``), not ``store_memory``."""
+        repeat = get_settings().agent.verify_oscillation_repeat
+        sample_state["is_complete"] = False
+        sample_state["confidence"] = Confidence.MEDIUM
+        sample_state["consecutive_stable_verifies"] = 0
+        # `max(repeat, 3)` distinct fingerprints — never identical in the window.
+        sample_state["recent_verify_failures"] = [f"fp{i}" for i in range(max(repeat, 3))]
+        sample_state["plan_steps"] = []
+        sample_state["current_step_index"] = 0
+        sample_state["iteration_count"] = 0
+        sample_state["max_iterations"] = 50
+        result = route_after_verify(sample_state)
+        assert result == "plan"
+
+    def test_route_after_verify_below_cycle_cap_and_repeat_continue(
+        self, sample_state: dict[str, Any]
+    ) -> None:
+        """A4 guard: below the verify-cycle cap AND below the oscillation window →
+        no early termination; the run continues. Plan exhausted + iteration below
+        cap + below convergence → re-plan."""
+        sample_state["is_complete"] = False
+        sample_state["confidence"] = Confidence.MEDIUM
+        sample_state["verify_cycle"] = 1
+        sample_state["consecutive_stable_verifies"] = 0
+        # One identical fingerprint — below the oscillation window.
+        sample_state["recent_verify_failures"] = ["fp"]
+        sample_state["plan_steps"] = []
+        sample_state["current_step_index"] = 0
+        sample_state["iteration_count"] = 0
+        sample_state["max_iterations"] = 50
+        result = route_after_verify(sample_state)
+        assert result == "plan"
+
 
 class TestRouteAfterError:
     """Tests for route_after_error routing function."""

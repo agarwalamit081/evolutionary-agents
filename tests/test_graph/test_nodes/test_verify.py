@@ -17,6 +17,7 @@ from src.graph.nodes.verify import (
     _failure_reason,
     _force_complete_on_evidence,
     _load_deliverable_content,
+    _resolve_verify_complexity,
     _spot_check_cited_paths,
     _summarize_data_tool_outputs,
     verify_node,
@@ -1493,4 +1494,85 @@ class TestCorrectnessFailureReason:
 
     def test_empty_evidence_yields_default(self) -> None:
         assert _failure_reason(self._check()) == "failed"
+
+
+class TestResolveVerifyComplexity:
+    """Routine-vs-final verify complexity demotion (A6, rec #7)."""
+
+    @pytest.fixture(autouse=True)
+    def _cfg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # verify_max_cycles=12, verify_final_lead=2 → final window = cycles >= 10.
+        from src.config.settings import get_settings
+
+        agent = get_settings().agent
+        monkeypatch.setattr(agent, "verify_max_cycles", 12)
+        monkeypatch.setattr(agent, "verify_final_lead", 2)
+
+    def test_routine_verify_demotes_complex_to_simple(self) -> None:
+        """A COMPLEX goal's EARLY (routine) verify → SIMPLE (cheap tier)."""
+        goal = Goal(text="x", complexity=TaskComplexity.COMPLEX)
+        state = initial_state("x", "t")
+        state["verify_cycle"] = 3  # well within the routine window
+        assert _resolve_verify_complexity(state, goal) is TaskComplexity.SIMPLE
+
+    def test_routine_verify_demotes_critical_to_simple(self) -> None:
+        goal = Goal(text="x", complexity=TaskComplexity.CRITICAL)
+        state = initial_state("x", "t")
+        state["verify_cycle"] = 9  # last routine cycle (final starts at 10)
+        assert _resolve_verify_complexity(state, goal) is TaskComplexity.SIMPLE
+
+    def test_final_verify_keeps_complex(self) -> None:
+        """The last ``verify_final_lead`` passes keep the goal's real complexity
+        so a hard goal's terminal verifies reach route_reasoning (strong)."""
+        goal = Goal(text="x", complexity=TaskComplexity.COMPLEX)
+        state = initial_state("x", "t")
+        state["verify_cycle"] = 10  # first final-cycle (>= 12-2)
+        assert _resolve_verify_complexity(state, goal) is TaskComplexity.COMPLEX
+
+    def test_final_verify_keeps_critical(self) -> None:
+        goal = Goal(text="x", complexity=TaskComplexity.CRITICAL)
+        state = initial_state("x", "t")
+        state["verify_cycle"] = 11  # final allowed pass
+        assert _resolve_verify_complexity(state, goal) is TaskComplexity.CRITICAL
+
+    def test_simple_goal_unchanged_routine_and_final(self) -> None:
+        """Demotion never DOWNGRADES an already-trivial goal."""
+        goal = Goal(text="x", complexity=TaskComplexity.SIMPLE)
+        for cycle in (0, 5, 11):
+            state = initial_state("x", "t")
+            state["verify_cycle"] = cycle
+            assert _resolve_verify_complexity(state, goal) is TaskComplexity.SIMPLE
+
+    def test_no_goal_falls_back_to_simple(self) -> None:
+        state = initial_state("x", "t")
+        state["verify_cycle"] = 0
+        assert _resolve_verify_complexity(state, None) is TaskComplexity.SIMPLE
+
+    def test_large_lead_disables_demotion(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """lead >= max_cycles → every pass is 'final' → no demotion anywhere
+        (the documented way to opt out: keep the strong verifier on all passes)."""
+        from src.config.settings import get_settings
+
+        monkeypatch.setattr(get_settings().agent, "verify_final_lead", 12)
+        goal = Goal(text="x", complexity=TaskComplexity.COMPLEX)
+        for cycle in (0, 5, 11):
+            state = initial_state("x", "t")
+            state["verify_cycle"] = cycle
+            assert _resolve_verify_complexity(state, goal) is TaskComplexity.COMPLEX
+
+    def test_lead_zero_demotes_every_pass(self) -> None:
+        """lead=0 → zero 'final' passes → every routine verify is demoted to
+        SIMPLE (literal semantics: no strong final window configured)."""
+        from src.config.settings import get_settings
+
+        # default lead from the autouse fixture is 2; force 0 locally
+        get_settings().agent.verify_final_lead = 0
+        try:
+            goal = Goal(text="x", complexity=TaskComplexity.COMPLEX)
+            for cycle in (0, 5, 11):
+                state = initial_state("x", "t")
+                state["verify_cycle"] = cycle
+                assert _resolve_verify_complexity(state, goal) is TaskComplexity.SIMPLE
+        finally:
+            get_settings().agent.verify_final_lead = 2
 

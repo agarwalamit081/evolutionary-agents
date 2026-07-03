@@ -98,11 +98,25 @@ def _strip_date_suffix(run_id: str) -> str | None:
     stripped id, or ``None`` when no 8-digit suffix follows a hyphen. String-only
     (no ``re`` import) — ``rpartition`` splits on the LAST hyphen so a spec id
     containing no hyphen (``battery04_q01``) returns ``None`` untouched.
+
+    Also strips an optional generation tag (``-gen0``/``-gen1``/``-gen2``) that
+    precedes the date suffix: the multi-generation self-improvement curve enqueues
+    each generation under ``{spec_id}-gen{N}-YYYYMMDD`` so a G0/G1/G2 run share a
+    date yet stay isolated. The tag is dropped too so the resolver still maps
+    ``q01-gen0-20260703`` back to ``battery04_q01`` (otherwise eval scoring is
+    silently skipped and the generation curve has no score signal).
     """
     if "-" not in run_id:
         return None
     base, _, tail = run_id.rpartition("-")
-    return base if len(tail) == 8 and tail.isdigit() else None
+    if len(tail) != 8 or not tail.isdigit():
+        return None
+    # Drop an optional ``-gen<N>`` generation tag preceding the date suffix.
+    if "-" in base:
+        gbase, _, gtail = base.rpartition("-")
+        if gtail.startswith("gen") and gtail[3:].isdigit():
+            base = gbase
+    return base if base else None
 
 
 def _resolve_eval_spec_id(run_id: str | None) -> str | None:

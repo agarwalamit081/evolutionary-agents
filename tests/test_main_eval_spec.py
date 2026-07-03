@@ -31,6 +31,50 @@ class TestResolveEvalSpecId:
         """An ordinary run_id with no matching spec is untouched (no eval)."""
         assert runner._resolve_eval_spec_id("ordinary-run-xyz") is None
 
+    def test_date_suffix_strips_to_spec(self) -> None:
+        """Nightly ``-YYYYMMDD`` suffix maps back to the spec for scoring."""
+        assert (
+            runner._resolve_eval_spec_id("battery04_q01-20260622")
+            == "battery04_q01"
+        )
+        assert runner._resolve_eval_spec_id("q01-20260703") == "battery04_q01"
+
+    def test_generation_tag_plus_date_strips_to_spec(self) -> None:
+        """Multi-generation curve: ``-gen{N}-YYYYMMDD`` must still resolve.
+
+        Regression: the self-improvement G0→G1→G2 curve enqueues each generation
+        under ``{spec_id}-gen{N}-YYYYMMDD``. If the resolver left ``-gen0`` on,
+        ``_resolve_eval_spec_id`` returned None and the verify node silently
+        skipped eval scoring — the generation curve would have NO score signal.
+        """
+        assert (
+            runner._resolve_eval_spec_id("q01-gen0-20260703") == "battery04_q01"
+        )
+        assert (
+            runner._resolve_eval_spec_id("q01-gen1-20260703") == "battery04_q01"
+        )
+        assert (
+            runner._resolve_eval_spec_id("q01-gen2-20260703") == "battery04_q01"
+        )
+        # Long-form spec + generation tag + date.
+        assert (
+            runner._resolve_eval_spec_id("battery04_q01-gen2-20260703")
+            == "battery04_q01"
+        )
+        # A probe spec (underscores, no internal hyphen) also resolves.
+        assert (
+            runner._resolve_eval_spec_id("probe_create_tool-gen0-20260703")
+            == "probe_create_tool"
+        )
+
+    def test_non_gen_hyphen_segment_is_preserved(self) -> None:
+        """Only a ``-gen<N>`` tag is dropped — a stray hyphen segment is kept.
+
+        ``my-spec-20260703`` has no ``gen<N>`` tag, so the resolver returns the
+        date-stripped ``my-spec`` which matches no spec → None (no false match).
+        """
+        assert runner._resolve_eval_spec_id("my-spec-20260703") is None
+
     def test_none_returns_none(self) -> None:
         """No run_id → no spec (a plain goal run, eval-free)."""
         assert runner._resolve_eval_spec_id(None) is None

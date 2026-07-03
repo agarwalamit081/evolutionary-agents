@@ -65,23 +65,33 @@ class ToolPersister:
                 existing = result.scalar_one_or_none()
 
                 if existing is not None:
+                    # A regenerated tool is intended to be LIVE: re-activate the
+                    # registration so a prior clean_state reset / governance
+                    # retirement (which set is_active=False) does not leave the
+                    # new version invisible. load_active_tools / find_similar
+                    # filter on ToolRegistration.is_active=True, so without this
+                    # a G0 run after a clean_state that deactivated a same-name
+                    # tool would bump its version yet keep it deactivated — and
+                    # G1 could never recall it, breaking the channel-A create→
+                    # reuse circuit (the deeper n=2 root cause).
+                    #
                     # Refresh the capability embedding only when a real vector
                     # is supplied — a version bump without one must not clobber
                     # a previously stored embedding with NULL. An explicit UPDATE
                     # (not attribute assignment) hands pgvector the raw list and
                     # keeps pyright clean (Mapped[Vector] attrs are typed as the
                     # SQLCore wrapper, not plain list[float]).
-                    if capability_embedding is not None:
-                        from sqlalchemy import update as _update
+                    from sqlalchemy import update as _update
 
-                        await session.execute(
-                            _update(ToolRegistration)
-                            .where(ToolRegistration.id == existing.id)
-                            .values(
-                                capability_embedding=capability_embedding,
-                                capability_text=capability_text,
-                            )
-                        )
+                    reg_values: dict[str, Any] = {"is_active": True}
+                    if capability_embedding is not None:
+                        reg_values["capability_embedding"] = capability_embedding
+                        reg_values["capability_text"] = capability_text
+                    await session.execute(
+                        _update(ToolRegistration)
+                        .where(ToolRegistration.id == existing.id)
+                        .values(**reg_values)
+                    )
 
                     # Create a new version of the existing tool
                     version_stmt = select(ToolVersion).where(

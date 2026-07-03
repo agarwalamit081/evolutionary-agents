@@ -626,7 +626,7 @@ services:
   # phoenix:6006 in the anchor above. Each is least-privilege + resource-bounded.
   prometheus:
     profiles: ["observability"]
-    image: prom/prometheus:v3.6.0
+    image: prom/prometheus:v3.13.0
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -659,14 +659,15 @@ services:
 
   grafana:
     profiles: ["observability"]
-    image: grafana/grafana-oss:13.2.0
+    image: grafana/grafana-oss:13.0.2
     volumes:
       # Auto-provisioned datasource + dashboard providers + the dashboard JSON.
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafanadata:/var/lib/grafana
     ports:
-      - "3000:3000"           # Grafana UI (admin/admin on first boot)
+      # Host 3001 (host :3000 is owned by another app). Container stays 3000.
+      - "3001:3000"           # Grafana UI (admin/admin on first boot)
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}

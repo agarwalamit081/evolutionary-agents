@@ -29,6 +29,7 @@ from typing import Any
 from loguru import logger
 
 from src.config import get_settings
+from src.observability import init_process_observability
 from src.observability.logging import setup_logging
 from src.worker.executors import default_agent_executor
 from src.worker.queue import RunsQueue
@@ -67,6 +68,13 @@ async def _run() -> int:
     """Build the consumer and drain the queue until stopped. Returns exit code."""
     settings = get_settings()
     setup_logging(settings.logging)
+
+    # Observability (OTel tracing + Prometheus scrape server). Opt-in, idempotent,
+    # best-effort. The worker runs the execute node (most LLM calls + the metrics
+    # recorder fire here), so it is the primary metrics source; each replica
+    # binds its own PROMETHEUS_PORT in its own container netns (no clash).
+    init_process_observability(settings.observability, component="worker")
+
     worker_settings = settings.worker.model_copy(
         update={"consumer_name": _resolve_consumer_name(settings.worker)}
     )

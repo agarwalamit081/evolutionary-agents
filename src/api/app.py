@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import Response
 from loguru import logger
 
 from src.config import get_settings
@@ -21,18 +22,55 @@ async def lifespan(app: FastAPI):
     logger.info("Turing Agent API shutting down")
 
 
+async def _metrics() -> Response:
+    """Prometheus scrape endpoint.
+
+    Returns the default registry rendered by ``prometheus_client``; an empty
+    body when ``prometheus_client`` is absent (the endpoint stays up but reports
+    no metrics). Observability-only — never raises into a scrape.
+    """
+    from src.observability.metrics import metrics_response
+
+    body, content_type = metrics_response()
+    return Response(content=body, media_type=content_type)
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
     Returns:
         Configured FastAPI instance with routes registered.
     """
+    settings = get_settings()
     app = FastAPI(
         title="Turing Agent API",
         description="Self-evolving AI agent built with LangGraph",
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # Observability: OTel tracing. The process-global provider + asyncpg/httpx
+    # auto-instrumentors initialize once (opt-in via OTEL_ENABLED); the FastAPI
+    # request-span instrumentor is app-scoped. Both are idempotent + best-effort
+    # (a missing exporter/instrumentor disables only itself, never app boot).
+    # Configured here so spans are ready before the first request arrives.
+    obs = settings.observability
+    if obs.otel_enabled:
+        from src.observability.tracing import setup_tracing
+
+        setup_tracing(
+            service_name=obs.otel_service_name,
+            endpoint=obs.otel_endpoint,
+            sampling_rate=obs.otel_sampling_rate,
+        )
+    from src.observability.tracing import instrument_fastapi_app
+
+    instrument_fastapi_app(app)
+
+    # Prometheus scrape endpoint. Registered unconditionally — it returns an
+    # empty body when prometheus_client is absent or metrics are off, so it is
+    # harmless; meaningful only when the recorder call sites have fired.
+    app.add_api_route("/metrics", _metrics, tags=["observability"])
 
     # Register routes
     from src.api.routes.health import router as health_router

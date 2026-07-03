@@ -233,3 +233,43 @@ def record_memory_operation(operation: str, tier: str) -> None:
     """Record metrics for a memory operation."""
     if MEMORY_OPERATIONS:
         MEMORY_OPERATIONS.labels(operation=operation, tier=tier).inc()
+
+
+# ─── /metrics exposure ────────────────────────────────────────────────────────
+
+
+def metrics_response() -> tuple[bytes, str]:
+    """Render the default Prometheus registry for a ``/metrics`` scrape.
+
+    Returns ``(body_bytes, content_type)`` for a FastAPI ``Response``. An empty
+    body + text/plain content type when ``prometheus_client`` is absent (the
+    endpoint stays up but reports no metrics).
+    """
+    if not _PROMETHEUS_AVAILABLE:
+        return b"", "text/plain; version=0.0.4; charset=utf-8"
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+    return generate_latest(), CONTENT_TYPE_LATEST
+
+
+def start_metrics_server(port: int, host: str = "0.0.0.0") -> bool:
+    """Start a background HTTP server exposing ``/metrics`` on ``port``.
+
+    For non-FastAPI processes (the worker / scheduler / optimizer): each runs in
+    its own container, so binding the same port across them never collides. The
+    api exposes ``/metrics`` as a FastAPI route instead (no separate server).
+    Returns True if the server started, False if ``prometheus_client`` is absent
+    or the port is already bound (best-effort — metrics are observability-only).
+    """
+    if not _PROMETHEUS_AVAILABLE:
+        return False
+    try:
+        from prometheus_client import start_http_server
+
+        start_http_server(port, addr=host)
+        return True
+    except OSError:
+        # Port already in use (e.g. two servers in one process) — non-fatal.
+        return False
+    except Exception:  # noqa: BLE001 — metrics must never abort the process
+        return False

@@ -42,11 +42,51 @@ from src.llm.model_router import ModelRouter
 from src.llm.models import BatchRequest, BatchResponse, LLMResponse, ToolCallResponse
 from src.llm.rate_limiter import RateLimiterRegistry
 from src.observability.metrics import record_prompt_cache_tokens
+from src.observability.tracing import get_tracer
 from src.llm.structured_output import (
     StructuredOutputManager,
     build_native_response_format,
     is_anthropic_4x_or_newer,
 )
+
+
+# ─── LLM-call tracing (manual OpenInference-convention spans) ─────────────────
+# The gateway is the single chokepoint that sees every completion regardless of
+# provider, so one manual span per logical request (covering the full retry +
+# fallback chain) captures each call robustly across every litellm version.
+# Attributes follow OpenInference conventions so Phoenix's LLM views populate.
+# All helpers are NoOp-safe (real span OR tracing's _NoOpSpan when OTel is off).
+
+def _set_llm_span_request_attrs(
+    span: Any, model: str, provider: str, node: str | None, complexity: Any
+) -> None:
+    """Stamp the request-side LLM span attributes (set before the call)."""
+    try:
+        span.set_attribute("openinference.span.kind", "LLM")
+        span.set_attribute("llm.model_name", model)
+        span.set_attribute("llm.provider", provider)
+        if node:
+            span.set_attribute("turing.node", node)
+        if complexity is not None:
+            span.set_attribute("turing.complexity", str(complexity))
+    except Exception:  # noqa: BLE001 — tracing must never raise into a run
+        pass
+
+
+def _set_llm_span_response_attrs(span: Any, response: Any, latency_ms: int) -> None:
+    """Stamp the response-side LLM span attributes (tokens/cost/latency)."""
+    try:
+        span.set_attribute("llm.token_count.prompt", response.input_tokens)
+        span.set_attribute("llm.token_count.completion", response.output_tokens)
+        span.set_attribute(
+            "llm.token_count.total", response.input_tokens + response.output_tokens
+        )
+        span.set_attribute("llm.token_count.cache_read", response.cache_read_tokens)
+        span.set_attribute("llm.cost", response.cost_usd)
+        span.set_attribute("llm.latency_ms", latency_ms)
+        span.set_attribute("llm.response_model", response.model)
+    except Exception:  # noqa: BLE001 — tracing must never raise into a run
+        pass
 
 
 # Transient errors that warrant retry (litellm exposes these at runtime)
@@ -461,24 +501,33 @@ class LLMGateway:
             if native is not None:
                 response_format = native
 
-        # Execute with retry and fallback
+        # Execute with retry and fallback under a manual LLM span. One span covers
+        # the whole retry+fallback chain, so each logical request is a single LLM
+        # span in Phoenix regardless of provider or fallback depth. OTel's
+        # context manager auto-records any exception (ERROR status) on exit; the
+        # _NoOpSpan (tracing off) is a transparent pass-through. Observability-
+        # only — never alters control flow.
+        _tracer = get_tracer("turing-agent.llm.gateway")
         start_time = time.monotonic()
-        response = await self._execute_with_fallback(
-            messages=messages,
-            model=model,
-            complexity=complexity,
-            tools=tools,
-            response_format=response_format,
-            tool_choice=tool_choice,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            metadata=metadata,
-            thinking=thinking,
-            reasoning_effort=reasoning_effort,
-            timeout=timeout,
-            require_vision=require_vision,
-        )
-        latency_ms = int((time.monotonic() - start_time) * 1000)
+        with _tracer.start_as_current_span("llm.acompletion") as _span:
+            _set_llm_span_request_attrs(_span, model, provider, node, complexity)
+            response = await self._execute_with_fallback(
+                messages=messages,
+                model=model,
+                complexity=complexity,
+                tools=tools,
+                response_format=response_format,
+                tool_choice=tool_choice,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                metadata=metadata,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                timeout=timeout,
+                require_vision=require_vision,
+            )
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+            _set_llm_span_response_attrs(_span, response, latency_ms)
 
         # Accumulate this real (non-cached) call's cost in memory so it can be
         # flushed into graph state (cost_records / total_tokens_used) by the

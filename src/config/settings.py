@@ -1633,7 +1633,12 @@ class ObservabilitySettings(BaseSettings):
     otel_sampling_rate: float = 0.10
 
     prometheus_enabled: bool = False
-    prometheus_port: int = 9090
+    # Workers/scheduler/optimizer each bind this port for their own /metrics
+    # server; the api exposes /metrics as a FastAPI route instead. Default 9100
+    # (not 9090): 9090 is the Prometheus *server*'s own port — exposing app
+    # metrics there would clash with the scraper on the same host. Env:
+    # PROMETHEUS_PORT
+    prometheus_port: int = 9100
 
     # Record provider-native prompt-cache token counts (Anthropic cache read /
     # creation tokens surfaced by litellm on the Usage object) as Prometheus

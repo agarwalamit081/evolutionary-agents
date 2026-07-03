@@ -27,6 +27,7 @@ from loguru import logger
 
 from src.config import get_settings
 from src.eval.golden import BATTERY04_GOALS
+from src.observability import init_process_observability
 from src.observability.logging import setup_logging
 from src.scheduler.battery import BatteryEnqueuer, make_battery_scheduler
 from src.worker.queue import RunsQueue
@@ -36,6 +37,8 @@ async def _run() -> int:
     """Build the enqueuer + scheduler and run until stopped. Returns exit code."""
     settings = get_settings()
     setup_logging(settings.logging)
+    # Observability (OTel tracing + Prometheus scrape server); opt-in, idempotent.
+    init_process_observability(settings.observability, component="scheduler")
     sched_settings = settings.scheduler
 
     if not sched_settings.enabled:

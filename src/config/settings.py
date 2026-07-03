@@ -1037,6 +1037,22 @@ class EvolutionSettings(BaseSettings):
     # benchmark contexts only, NOT for live worker runs. Env:
     # PROMOTION_CANARY_TIMEOUT_S.
     promotion_canary_timeout_s: float = 180.0
+    # The golden goal id(s) the INLINE promotion canary (``GoldenCanary.score``)
+    # runs to score a candidate PROMPT mutation. Defaults to ``battery04_q01``
+    # (byte-identical to the prior hardcoded canary). Override — ideally with a
+    # goal that CONVERGES reliably under the active stack — when the default is
+    # non-converging: a goal that cannot score within ``promotion_canary_timeout_s``
+    # makes the canary inconclusive (``None``) on every evolve, so channel-B
+    # prompt promotion NEVER fires (observed live: q01 non-converges under
+    # glm-5.1 + Anthropic-disabled, looping 40 min / 111 calls). Accepted as a
+    # comma-separated list (``PROMOTION_CANARY_GOALS=probe_analytics_recall`` or
+    # ``a,b``) or a JSON list; each id must resolve in ``GOLDEN_SPECS``
+    # (battery04_q* + LEARNING_PROBES); unresolvable ids are skipped by the
+    # canary. Env: PROMOTION_CANARY_GOALS.
+    promotion_canary_goals_csv: str = Field(
+        default="battery04_q01",
+        validation_alias=AliasChoices("PROMOTION_CANARY_GOALS"),
+    )
     # Directory holding promoted, versioned handler artifacts (prompts first).
     # Layout: ``<dir>/prompts/<node>.<sha>.json`` (immutable versions) +
     # ``<dir>/prompts/current.json`` (the live pointer manifest the builder reads).
@@ -1129,6 +1145,32 @@ class EvolutionSettings(BaseSettings):
         if not 0.0 <= v <= 2.0:
             raise ValueError(f"Temperature must be between 0 and 2. Got: {v}")
         return v
+
+    @property
+    def promotion_canary_goals(self) -> list[str]:
+        """Parsed canary goal ids from ``promotion_canary_goals_csv``.
+
+        Accepts a JSON list (``["a","b"]``) or a comma-separated string
+        (``a,b``); a blank/empty value falls back to the default (an empty suite
+        would make the canary always inconclusive → no promotion ever). Stored as
+        a CSV string field so pydantic-settings reads the env var plainly (a
+        ``list``-typed field would force JSON-decode and reject ``a,b``).
+        """
+        import json as _json
+
+        raw = (self.promotion_canary_goals_csv or "").strip()
+        if not raw:
+            return ["battery04_q01"]
+        if raw.startswith("["):
+            try:
+                parsed = _json.loads(raw)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, list):
+                out = [str(x).strip() for x in parsed if str(x).strip()]
+                return out or ["battery04_q01"]
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        return parts or ["battery04_q01"]
 
     @field_validator("evolution_max_tokens_factor")
     @classmethod

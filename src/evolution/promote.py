@@ -838,8 +838,27 @@ class GoldenCanary:
             from src.eval.harness import BenchmarkHarness
 
             self._harness = BenchmarkHarness(gateway, tools, sub_agent_registry)
+        if goal_ids is None:
+            # Default canary goals are operator-configurable (EvolutionSettings.
+            # promotion_canary_goals) so a non-converging benchmark — e.g. q01
+            # under a trimmed stack that loops past the inline budget — does not
+            # permanently gate channel-B prompt promotion. ``getattr`` keeps older
+            # settings fakes (lacking the field) on the historical default.
+            from src.config import get_settings
+
+            configured = getattr(
+                get_settings().evolution, "promotion_canary_goals", None
+            )
+            if configured:
+                goal_ids = list(configured)
         ids = goal_ids or ["battery04_q01"]
         self._suite = [GOLDEN_SPECS[i] for i in ids if i in GOLDEN_SPECS]
+        if len(self._suite) != len(ids):
+            missing = [i for i in ids if i not in GOLDEN_SPECS]
+            logger.warning(
+                f"Promotion canary goal(s) not resolvable in GOLDEN_SPECS, "
+                f"skipped: {missing} (suite={list(ids)})"
+            )
 
     async def score(self, node: str, suffixes: list[str]) -> float | None:
         """Run the golden suite with ``suffixes`` active for ``node``; mean score.

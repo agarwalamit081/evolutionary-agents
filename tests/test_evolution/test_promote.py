@@ -44,6 +44,7 @@ def _fake_settings(
     handlers_dir: Any | None = None,
     min_score: float = 0.8,
     canary_timeout_s: float = 180.0,
+    canary_goals: list[str] | None = None,
 ) -> SimpleNamespace:
     """Minimal settings fake for the promotion gate + canary.
 
@@ -59,6 +60,9 @@ def _fake_settings(
             evolution_promote_to_live=promote_on,
             evolved_handlers_dir=str(handlers_dir or (tmp_path / "evolved")),
             promotion_canary_timeout_s=canary_timeout_s,
+            promotion_canary_goals=(
+                list(canary_goals) if canary_goals is not None else ["battery04_q01"]
+            ),
         ),
         eval=SimpleNamespace(eval_canary_min_score=min_score),
     )
@@ -923,4 +927,87 @@ class TestClassifyPayload:
         assert "None" not in classify_payload(good)
         assert parse_prompt_payload(bad) is None
         assert "None" in classify_payload(bad)
+
+
+# ---------------------------------------------------------------------------
+# promotion_canary_goals — configurable canary benchmark (channel-B unblock)
+# ---------------------------------------------------------------------------
+
+
+class TestPromotionCanaryGoalsConfig:
+    """``EvolutionSettings.promotion_canary_goals`` env parsing.
+
+    The canary benchmark was hardcoded to ``battery04_q01``; under a stack where
+    q01 non-converges (loops past the inline budget) the canary was always
+    inconclusive → channel-B prompt promotion never fired. The field makes the
+    benchmark operator-configurable (CSV/JSON/list) so a CONVERGING goal can be
+    chosen. Default is unchanged (``battery04_q01``).
+    """
+
+    def test_default_is_q01(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src.config.settings import EvolutionSettings
+
+        monkeypatch.delenv("PROMOTION_CANARY_GOALS", raising=False)
+        assert EvolutionSettings().promotion_canary_goals == ["battery04_q01"]
+
+    def test_csv_env_splits_and_strips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src.config.settings import EvolutionSettings
+
+        monkeypatch.setenv("PROMOTION_CANARY_GOALS", "a, b ,c")
+        assert EvolutionSettings().promotion_canary_goals == ["a", "b", "c"]
+
+    def test_single_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src.config.settings import EvolutionSettings
+
+        monkeypatch.setenv("PROMOTION_CANARY_GOALS", "probe_analytics_recall")
+        assert EvolutionSettings().promotion_canary_goals == ["probe_analytics_recall"]
+
+    def test_json_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src.config.settings import EvolutionSettings
+
+        monkeypatch.setenv("PROMOTION_CANARY_GOALS", '["x", "y"]')
+        assert EvolutionSettings().promotion_canary_goals == ["x", "y"]
+
+    def test_blank_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src.config.settings import EvolutionSettings
+
+        monkeypatch.setenv("PROMOTION_CANARY_GOALS", "")
+        assert EvolutionSettings().promotion_canary_goals == ["battery04_q01"]
+
+
+class TestGoldenCanaryGoalSelection:
+    """``GoldenCanary`` resolves its suite from settings (``goal_ids=None``) or
+    the explicit override; unresolvable goals are skipped. A dummy harness avoids
+    constructing the real ``BenchmarkHarness`` (suite selection is independent of
+    the gateway/tools/registry)."""
+
+    def test_default_suite_is_q01(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        _fake_settings(monkeypatch, tmp_path)
+        gc = GoldenCanary(None, None, None, harness=object())
+        assert [s.spec_id for s in gc._suite] == ["battery04_q01"]
+
+    def test_settings_goals_override_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        _fake_settings(monkeypatch, tmp_path, canary_goals=["probe_analytics_recall"])
+        gc = GoldenCanary(None, None, None, harness=object())
+        assert [s.spec_id for s in gc._suite] == ["probe_analytics_recall"]
+
+    def test_explicit_goal_ids_override_settings(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        _fake_settings(monkeypatch, tmp_path, canary_goals=["probe_analytics_recall"])
+        gc = GoldenCanary(
+            None, None, None, goal_ids=["battery04_q05"], harness=object()
+        )
+        assert [s.spec_id for s in gc._suite] == ["battery04_q05"]
+
+    def test_unresolvable_goal_skipped(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        _fake_settings(monkeypatch, tmp_path, canary_goals=["does_not_exist"])
+        gc = GoldenCanary(None, None, None, harness=object())
+        assert gc._suite == []
 

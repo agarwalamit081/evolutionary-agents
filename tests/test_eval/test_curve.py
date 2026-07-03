@@ -113,6 +113,64 @@ async def test_per_goal_trend_empty_when_no_rows() -> None:
     assert await curve.per_goal_trend("battery04_q01") == []
 
 
+async def test_per_goal_trend_scores_terminal_verify_state_not_recovery_journey() -> None:
+    # One run-scoped attempt_id spans THREE verify passes of the SAME two checks.
+    # Pass 1 fails both; pass 2 fixes one; pass 3 (the terminal state) passes both.
+    # The curve must score the run by its terminal state (1.0), NOT the mean of
+    # the recovery journey ((0+0 + 1+0 + 1+1)/6 = 0.5). This is the q01 probe
+    # anti-fabrication pattern: the recomputation eval forces re-verification, and
+    # a run that self-corrects to all-pass must score 1.0.
+    attempt = "20260702T23:00:00+00:00_run1"
+    rows = [
+        # pass 1 — both checks fail
+        _row("battery04_q01", attempt, "2026-07-02T23:01:00+00:00", 0.0, "c1"),
+        _row("battery04_q01", attempt, "2026-07-02T23:01:00+00:00", 0.0, "c2"),
+        # pass 2 — c1 fixed, c2 still failing
+        _row("battery04_q01", attempt, "2026-07-02T23:03:00+00:00", 1.0, "c1"),
+        _row("battery04_q01", attempt, "2026-07-02T23:03:00+00:00", 0.0, "c2"),
+        # pass 3 — terminal: both pass
+        _row("battery04_q01", attempt, "2026-07-02T23:05:00+00:00", 1.0, "c1"),
+        _row("battery04_q01", attempt, "2026-07-02T23:05:00+00:00", 1.0, "c2"),
+    ]
+    curve = CapabilityCurve(_FakeStore(rows), _settings())
+    trend = await curve.per_goal_trend("battery04_q01")
+    assert len(trend) == 1
+    assert trend[0].mean_score == pytest.approx(1.0)  # terminal state, not 0.5
+    assert trend[0].n_checks == 2
+
+
+async def test_per_goal_trend_terminal_state_keeps_a_check_the_run_abandoned_failing() -> None:
+    # A check that passed early but the run re-opened and broke it (pass 2) must
+    # score its FINAL (broken) state, not the earlier pass — the terminal state
+    # is what "did the run achieve the goal" means.
+    attempt = "20260702T23:00:00+00:00_run1"
+    rows = [
+        _row("battery04_q01", attempt, "2026-07-02T23:01:00+00:00", 1.0, "c1"),
+        _row("battery04_q01", attempt, "2026-07-02T23:05:00+00:00", 0.0, "c1"),
+    ]
+    curve = CapabilityCurve(_FakeStore(rows), _settings())
+    trend = await curve.per_goal_trend("battery04_q01")
+    assert trend[0].mean_score == pytest.approx(0.0)
+
+
+def test_latest_per_check_picks_most_recent_row_per_check_name() -> None:
+    # Direct unit test of the helper: 3 distinct checks across 2 passes; the
+    # newest created_at per check_name wins regardless of input ordering.
+    rows = [
+        _row("g", "a", "2026-07-02T10:00:00+00:00", 0.0, "c1"),
+        _row("g", "a", "2026-07-02T10:00:00+00:00", 0.0, "c2"),
+        _row("g", "a", "2026-07-02T12:00:00+00:00", 1.0, "c1"),
+        _row("g", "a", "2026-07-02T11:00:00+00:00", 1.0, "c3"),  # c3 only in pass 1
+    ]
+    latest = CapabilityCurve._latest_per_check(rows)
+    by_name = {r["check_name"]: r for r in latest}
+    assert set(by_name) == {"c1", "c2", "c3"}
+    assert by_name["c1"]["score"] == 1.0  # 12:00 beat 10:00
+    assert by_name["c2"]["score"] == 0.0  # only the 10:00 row exists
+    assert by_name["c3"]["score"] == 1.0
+    assert len(latest) == 3  # one row per distinct check, no duplicates
+
+
 # ─── battery_trend ──────────────────────────────────────────────────
 
 

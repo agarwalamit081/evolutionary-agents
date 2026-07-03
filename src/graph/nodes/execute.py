@@ -432,6 +432,54 @@ def _offers_tool(tool_defs: list[dict[str, Any]], name: str) -> bool:
     return False
 
 
+def _offered_tool_names(tool_defs: list[dict[str, Any]]) -> list[str]:
+    """Names of every offered function-calling tool (handles both schema shapes)."""
+    names: list[str] = []
+    for td in tool_defs:
+        if not isinstance(td, dict):
+            continue
+        fn = td.get("function")
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            names.append(fn["name"])
+        elif isinstance(td.get("name"), str):
+            names.append(td["name"])
+    return names
+
+
+def _recalled_tool_named_in_step(
+    tool_defs: list[dict[str, Any]],
+    step_description: str,
+    goal_text: str,
+) -> str | None:
+    """Name of a recalled (non-builtin) tool the step explicitly names, else None.
+
+    Layer-2 channel-A hardening. When a step's text (or the goal's) names a
+    RECALLED dynamic tool verbatim — a tool the RAG selector surfaced from a
+    prior run's persisted capability, NOT a built-in — execute_node locks
+    ``tool_choice`` to it on turn 1 so reuse is deterministic. This cures the
+    Phase-1 n=2 flakiness where the model chose ``code_executor`` over an
+    offered, top-1-recalled tool. Only NON-builtin names are candidates, so a
+    step that merely mentions ``file_writer`` / ``code_executor`` / … is
+    unaffected; and create-steps are naturally excluded (the not-yet-created
+    tool is never offered, so never a candidate). The match is on the tool NAME
+    (word-boundary, case-insensitive), not a reuse signal — so ``reuse`` vs
+    ``reusable`` is irrelevant. Longest name first so a multi-word tool wins
+    over a substring name.
+    """
+    from src.tools.selection import _BUILTIN_TOOL_NAMES
+
+    candidates = [
+        n for n in _offered_tool_names(tool_defs) if n not in _BUILTIN_TOOL_NAMES
+    ]
+    if not candidates:
+        return None
+    text = f"{step_description}\n{goal_text or ''}"
+    for name in sorted(candidates, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE):
+            return name
+    return None
+
+
 async def execute_node(
     state: AgentState,
     *,
@@ -641,6 +689,25 @@ async def _llm_execute(
 
         tool_defs = await select_tools_for_query(step_description, tools, get_settings())
 
+        # Layer-2 channel-A hardening: when this step explicitly NAMES a recalled
+        # (non-builtin) tool, lock tool_choice to it on turn 1 so reuse of a
+        # prior run's persisted capability is deterministic (cures the n=2
+        # flakiness where the model chose code_executor over an offered, top-1-
+        # recalled tool). Gated by ``reuse_tool_choice_hardening`` (default off).
+        # Composed with the file_writer nudge lock below: turn 1 takes the reuse
+        # lock; a later nudge turn that must write a file degrades to file_writer.
+        reuse_locked_tool: str | None = None
+        if get_settings().agent.reuse_tool_choice_hardening:
+            reuse_locked_tool = _recalled_tool_named_in_step(
+                tool_defs, step_description, goal_text
+            )
+            if reuse_locked_tool is not None:
+                logger.debug(
+                    f"Reuse hardening: locking tool_choice to recalled tool "
+                    f"'{reuse_locked_tool}' for step "
+                    f"'{step_description[:60]}'"
+                )
+
         # A step that declares a concrete output file is a write-step: its
         # deliverable must be produced via a file-output tool (file_writer),
         # not narrated as text. Cheaper models frequently emit the deliverable
@@ -735,13 +802,26 @@ async def _llm_execute(
             # writing still can. Cures the q3/q4 "narrates through all nudges"
             # loop. OpenAI / DashScope-compat / NVIDIA-NIM all honor this.
             forced_tool_choice: dict[str, Any] | None = None
+            if (
+                attempt == 0
+                and reuse_locked_tool is not None
+                and _offers_tool(tool_defs, reuse_locked_tool)
+            ):
+                # Turn 1: lock to the explicitly-named recalled tool so the agent
+                # reuses a prior run's capability instead of rebuilding it. A
+                # reuse step whose deliverable is also a file degrades to the
+                # file_writer lock on a later nudge turn (the elif below).
+                forced_tool_choice = {
+                    "type": "function",
+                    "function": {"name": reuse_locked_tool},
+                }
             # Force-lock to file_writer only for TEXT deliverables. A compute
             # deliverable (CSV/JSONL/…) nudge steers to code_executor — locking
             # it to file_writer here would contradict its own nudge and make the
             # instructed tool (code_executor) structurally un-callable, so the
             # agent would hand-write data and re-loop. Leave compute nudge turns
             # free to call code_executor (the disk check still bounds attempts).
-            if (
+            elif (
                 nudge_text is not None
                 and _offers_tool(tool_defs, "file_writer")
                 and not _is_compute_deliverable(expected_path or "")

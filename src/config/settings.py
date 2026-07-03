@@ -1336,6 +1336,28 @@ class AgentSettings(BaseSettings):
     # the agent regenerates a tool on demand, so a low default is safe. Env:
     # RETIRE_UNUSED_MAX_CALLS.
     retire_unused_max_calls: int = 0
+    # Fresh-tool protection window (Phase-1c channel-A hardening). When > 0,
+    # the central ToolPersister.retire() SPARES any generated tool whose
+    # created_at is within this many seconds — so no governance pass (semantic
+    # dedup / cumulative cap / performance / unused) can retire a tool a prior
+    # run created before it has had a chance to be reused. This is insurance:
+    # by construction every pass already favors the newest tool, but a silent
+    # mid-battery retirement of a G0-created tool (the exact failure mode that
+    # took a session to diagnose at Phase-1 n=2, there caused by clean_state's
+    # bulk reset) would silently kill G1 inheritance. clean_state.py (the
+    # intentional G0 reset) bypasses retire() and is unaffected. ``<= 0``
+    # disables (current behavior). Env: TOOL_PROTECTION_WINDOW_S.
+    tool_protection_window_s: int = 0
+    # Deterministic tool-reuse (Phase-1c channel-A hardening, Layer 2). When
+    # true, execute_node locks tool_choice to a RECALLED (non-builtin) tool
+    # that the step explicitly names on turn 1 — so reuse of a prior run's
+    # persisted capability is deterministic instead of left to the model's
+    # choice (which flipped to code_executor at Phase-1 n=2 despite the tool
+    # being offered + top-1-recalled). Only fires for a verbatim-named recalled
+    # tool, so create-steps (tool not yet offered) and builtin-only steps are
+    # unaffected. Default off; enable for the self-improvement battery. Env:
+    # REUSE_TOOL_CHOICE_HARDENING.
+    reuse_tool_choice_hardening: bool = False
     # Per-tool success-metrics recording (M4). When true, the execute chokepoint
     # records each tool invocation (success/empty/latency) to tool_call_metrics
     # and updates the running aggregates on tool_registrations, which the

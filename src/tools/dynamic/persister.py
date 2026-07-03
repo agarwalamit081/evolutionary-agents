@@ -610,25 +610,61 @@ class ToolPersister:
     async def retire(self, names: list[str]) -> int:
         """Mark named generated tools ``is_active=False`` in the DB.
 
+        Optional fresh-tool protection (``tool_protection_window_s``): when the
+        window is > 0, any candidate created within the window is SPARED here
+        so no name-based governance pass (semantic dedup / performance / unused)
+        can retire a prior run's tool before it has had a chance to be reused
+        (Phase-1c channel-A hardening — insurance against a silent mid-battery
+        retirement). The cumulative-cap pass (:meth:`_retire_excess_tools`) is
+        structurally fresh-safe by newest-first ordering and bypasses this
+        method, so it needs no guard. ``clean_state.py`` (the intentional G0
+        reset) also bypasses this method and is unaffected.
+
         Returns:
             Number of tools retired (best-effort; logs on DB error).
         """
         if not names:
             return 0
         try:
-            from sqlalchemy import update
+            from datetime import timedelta
 
+            from sqlalchemy import select, update
+
+            from src.config.settings import get_settings
             from src.db.models import ToolRegistration
             from src.db.session import get_session
 
+            retire_names = list(names)
+            window = get_settings().agent.tool_protection_window_s
             async with get_session() as session:
+                if window > 0:
+                    cutoff = dt.datetime.now(dt.timezone.utc) - timedelta(
+                        seconds=window
+                    )
+                    protected_rows = await session.execute(
+                        select(ToolRegistration.tool_name)
+                        .where(ToolRegistration.tool_name.in_(names))
+                        .where(ToolRegistration.created_at >= cutoff)
+                    )
+                    protected = {row[0] for row in protected_rows.all()}
+                    if protected:
+                        logger.info(
+                            f"tool_protection_window_s={window}s: sparing "
+                            f"{len(protected)} fresh tool(s) from retirement: "
+                            f"{', '.join(sorted(protected))}"
+                        )
+                        retire_names = [n for n in names if n not in protected]
+                        if not retire_names:
+                            return 0
                 await session.execute(
                     update(ToolRegistration)
-                    .where(ToolRegistration.tool_name.in_(names))
+                    .where(ToolRegistration.tool_name.in_(retire_names))
                     .values(is_active=False)
                 )
-            logger.info(f"Retired {len(names)} tools: {', '.join(names)}")
-            return len(names)
+            logger.info(
+                f"Retired {len(retire_names)} tools: {', '.join(retire_names)}"
+            )
+            return len(retire_names)
         except Exception as e:
             logger.warning(f"Failed to retire tools {names}: {e}")
             return 0

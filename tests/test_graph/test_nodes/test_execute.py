@@ -19,6 +19,7 @@ from src.graph.nodes.execute import (
     _first_file_output_call,
     _is_compute_deliverable,
     _is_producing_step,
+    _recalled_tool_named_in_step,
     _tool_call_args,
     _write_nudge,
     execute_node,
@@ -332,6 +333,166 @@ class TestExecuteNodeLLM:
         # Step completed and advanced after the write
         assert result["phase"] == Phase.REFLECT
         assert result["current_step_index"] == 1
+
+    # ── Phase-1c Layer 2: deterministic tool reuse ─────────────────────────
+
+    def test_recalled_tool_locks_when_dynamic_tool_named(self) -> None:
+        """A verbatim-named recalled (non-builtin) tool is the lock target."""
+        tool_defs = [
+            {"type": "function", "function": {"name": "file_writer"}},
+            {"name": "normalize_prices"},
+        ]
+        locked = _recalled_tool_named_in_step(
+            tool_defs,
+            "Invoke the normalize_prices tool to normalize the column.",
+            "reuse goal",
+        )
+        assert locked == "normalize_prices"
+
+    def test_recalled_tool_none_when_only_builtins_offered(self) -> None:
+        """No dynamic tool offered → nothing to lock."""
+        tool_defs = [{"type": "function", "function": {"name": "file_writer"}}]
+        assert _recalled_tool_named_in_step(tool_defs, "use file_writer", "g") is None
+
+    def test_recalled_tool_none_when_step_does_not_name_it(self) -> None:
+        """A dynamic tool offered but not named in the step → no lock."""
+        tool_defs = [{"name": "normalize_prices"}]
+        assert (
+            _recalled_tool_named_in_step(
+                tool_defs, "do something unrelated", "no tool name here"
+            )
+            is None
+        )
+
+    def test_recalled_tool_none_when_only_a_builtin_is_named(self) -> None:
+        """Naming only a builtin is not a reuse signal; the offered dynamic
+        tool must itself be named to lock (create-steps are never offered)."""
+        tool_defs = [
+            {"type": "function", "function": {"name": "code_executor"}},
+            {"name": "normalize_prices"},
+        ]
+        assert (
+            _recalled_tool_named_in_step(
+                tool_defs, "use code_executor to compute", "goal"
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_reuse_step_locks_recalled_tool_choice_on_turn1(
+        self, state_with_plan: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When reuse hardening is ON and the step names a recalled tool,
+        ``tool_choice`` is locked to it on turn 1 — cures the n=2 flakiness
+        where the model chose code_executor over an offered, top-1-recalled
+        normalize_prices."""
+        monkeypatch.setattr(
+            get_settings().agent, "reuse_tool_choice_hardening", True
+        )
+        # A single non-write step that names the recalled tool (no file path →
+        # one turn, no write-nudge path).
+        state_with_plan["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description=(
+                    "Use the normalize_prices tool to normalize the prices "
+                    "column and return the result."
+                ),
+                status="pending",
+            ),
+        ]
+        tool_call = ToolCallResponse(
+            content="",
+            tool_calls=[
+                {
+                    "id": "tc_np",
+                    "type": "function",
+                    "function": {
+                        "name": "normalize_prices",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+            model="glm-5.1",
+            provider="zai",
+            input_tokens=10,
+            output_tokens=10,
+            total_tokens=20,
+            cost_usd=0.0001,
+        )
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(return_value=tool_call)
+        async_handler = AsyncMock(return_value="normalized output")
+        tools = MagicMock()
+        tools.list_tools = MagicMock(
+            return_value=[
+                {"type": "function", "function": {"name": "file_writer"}},
+                {"type": "function", "function": {"name": "code_executor"}},
+                {"name": "normalize_prices"},
+            ]
+        )
+        tools.get_handler = MagicMock(return_value=async_handler)
+
+        await execute_node(state_with_plan, gateway=gateway, tools=tools)
+
+        calls = gateway.acompletion_with_tools.call_args_list
+        # Turn 1 is locked to the recalled tool (not free choice).
+        assert calls[0].kwargs.get("tool_choice") == {
+            "type": "function",
+            "function": {"name": "normalize_prices"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_reuse_hardening_off_leaves_tool_choice_free(
+        self, state_with_plan: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hardening OFF (default) → tool_choice stays free even when the step
+        names a recalled tool (current behavior, unchanged)."""
+        monkeypatch.setattr(
+            get_settings().agent, "reuse_tool_choice_hardening", False
+        )
+        state_with_plan["plan_steps"] = [
+            PlanStep(
+                id="s1",
+                description="Use the normalize_prices tool to normalize prices.",
+                status="pending",
+            ),
+        ]
+        tool_call = ToolCallResponse(
+            content="",
+            tool_calls=[
+                {
+                    "id": "tc_np",
+                    "type": "function",
+                    "function": {
+                        "name": "normalize_prices",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+            model="glm-5.1",
+            provider="zai",
+            input_tokens=10,
+            output_tokens=10,
+            total_tokens=20,
+            cost_usd=0.0001,
+        )
+        gateway = MagicMock()
+        gateway.acompletion_with_tools = AsyncMock(return_value=tool_call)
+        async_handler = AsyncMock(return_value="normalized output")
+        tools = MagicMock()
+        tools.list_tools = MagicMock(
+            return_value=[
+                {"type": "function", "function": {"name": "file_writer"}},
+                {"name": "normalize_prices"},
+            ]
+        )
+        tools.get_handler = MagicMock(return_value=async_handler)
+
+        await execute_node(state_with_plan, gateway=gateway, tools=tools)
+
+        calls = gateway.acompletion_with_tools.call_args_list
+        assert calls[0].kwargs.get("tool_choice") is None
 
     def test_write_nudge_directs_create_dirs_and_file_writer(self) -> None:
         """For a TEXT deliverable the write nudge must tell the model to set
@@ -776,6 +937,9 @@ class TestCodeExecutorWriteSatisfiesWriteStep:
                 # attributes (unlike MagicMock), so every read site must be
                 # listed here or the gate's access raises AttributeError.
                 destructive_tool_hitl_enabled=False,
+                # Phase-1c Layer 2: execute_node reads the reuse-hardening gate
+                # off settings.agent — SimpleNamespace won't auto-vivify it.
+                reuse_tool_choice_hardening=False,
             ),
             # execute dispatches EVERY tool call through sandbox_dispatch
             # (``invoke_generated_tool``), which reads
@@ -787,6 +951,14 @@ class TestCodeExecutorWriteSatisfiesWriteStep:
             tool_sandbox=SimpleNamespace(
                 code_executor_mode="subprocess",
                 code_executor_sandbox_timeout=30,
+                # sandbox_dispatch._is_isolated_runtime reads these on the
+                # subprocess branch (#616). Mirroring the real local-CLI
+                # defaults: worker_process=False short-circuits isolation off,
+                # so the in-process mock handler runs (behavior under test).
+                # SimpleNamespace won't auto-vivify, so all three are listed.
+                isolation_default_to_sandbox=True,
+                auto_promote_subprocess_to_runner=True,
+                worker_process=False,
             ),
         )
 

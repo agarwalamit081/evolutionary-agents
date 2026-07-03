@@ -95,15 +95,19 @@ def _probe_create_tool() -> GoalSpec:
             "capability cold. Paired with probe_reuse_tool for the cross-run recall test."
         ),
         goal_text=(
-            "You are given the following product price table (sku, price, currency):\n"
+            "Create a REUSABLE tool named `normalize_prices` that takes a list of "
+            "product price rows (each row: sku, price, currency) and normalizes every "
+            f"price to USD using fixed rates EUR={_EUR_USD}, GBP={_GBP_USD}, "
+            f"JPY={_JPY_USD}; deduplicates by sku keeping the LAST occurrence; and "
+            "rounds each USD price to 2 decimals (USD passes through unchanged). "
+            "The tool must return the normalized rows. Register the tool so it is "
+            "available for reuse, then USE the `normalize_prices` tool to process "
+            "this input:\n"
             "  A001, 10.00, EUR\n"
             "  A001, 12.50, EUR   # duplicate sku — keep the LAST occurrence\n"
             "  A002, 100,   JPY\n"
             "  A003, 5.00,  GBP\n"
-            f"\nNormalize every price to USD using these fixed rates: "
-            f"EUR={_EUR_USD}, GBP={_GBP_USD}, JPY={_JPY_USD}. "
-            "Deduplicate by sku (last row wins), round each USD price to 2 decimals, "
-            "and write a CSV with columns sku,price_usd to "
+            "and write its output as a CSV with columns sku,price_usd to "
             "results/probe_create/normalized.csv."
         ),
         category="tool_creation",

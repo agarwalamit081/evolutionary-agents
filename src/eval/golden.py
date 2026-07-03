@@ -17,6 +17,7 @@ evolution canary) that must not flake on agent output variance.
 from __future__ import annotations
 
 from src.eval.models import CheckConfig, GoalSpec
+from src.eval.probes import LEARNING_PROBES
 
 
 def _battery04_q01() -> GoalSpec:
@@ -2158,6 +2159,10 @@ GOLDEN_SPECS: dict[str, GoalSpec] = {
         _battery04_q09(),
         _battery04_classify_simple(),
         _battery04_classify_complex(),
+        # Learning probes: registered for lookup + --score-spec, but NOT added to
+        # BATTERY04_GOALS, so the nightly capability-curve battery is unperturbed
+        # (same pattern as the classify canaries above).
+        *LEARNING_PROBES,
     )
 }
 

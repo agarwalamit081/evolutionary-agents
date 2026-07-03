@@ -52,6 +52,18 @@ x-agent-common: &agent-common
     # replicas collide on it. Harmless for the api/agent roles (they don't read
     # it). See src/worker/__main__.py:_resolve_consumer_name.
     WORKER_CONSUMER_NAME: ""
+    # Observability (Track B). The metrics recorder call sites fire UNCONDITIONALLY
+    # (prometheus_client is pinned), so forcing PROMETHEUS_ENABLED=true only starts
+    # the per-process :9100 scrape server (worker/scheduler/optimizer via
+    # init_process_observability) — a near-zero-cost background thread that makes
+    # the `observability` profile's Prometheus scrape data out-of-the-box. The api
+    # exposes /metrics as a route (create_app) and ignores this flag. OTEL_ENDPOINT
+    # is forced at Phoenix so traces flow there WHEN OTEL_ENABLED is flipped on in
+    # .env (tracing stays opt-in — it has sampling cost); harmless when off (never
+    # read). Overrides .env so the container topology is authoritative (mirrors the
+    # CODE_EXECUTOR_MODE / EVOLVED_HANDLERS_DIR forces above).
+    PROMETHEUS_ENABLED: "true"
+    OTEL_ENDPOINT: http://phoenix:6006
   depends_on:
     postgres:
       condition: service_healthy
@@ -604,6 +616,103 @@ services:
           memory: 512m
           cpus: "0.5"
 
+  # ─── Track B — observability backends (metrics + traces) ──────────────────
+  # Profile-gated (opt-in): `docker compose --profile observability up -d`.
+  # Three SEPARATE backend containers (in-process instrumentation already lives in
+  # the app image via #631). Prometheus scrapes api:8000 + worker:9100 over
+  # turing-net via dns_sd (no docker.sock); Grafana auto-provisions the Prometheus
+  # datasource + the starter dashboard; Phoenix is the OTLP trace backend the app
+  # exports to when OTEL_ENABLED is flipped on (.env) — OTEL_ENDPOINT is forced at
+  # phoenix:6006 in the anchor above. Each is least-privilege + resource-bounded.
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v3.6.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      # Host 9090 (Prometheus's own UI/API port; nothing in THIS stack owns 9090 —
+      # app metrics are on 8000/9100, so the 9090 clash the port-rename avoided no
+      # longer applies here).
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - turing-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.5"
+          pids: 512
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana-oss:13.2.0
+    volumes:
+      # Auto-provisioned datasource + dashboard providers + the dashboard JSON.
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "3000:3000"           # Grafana UI (admin/admin on first boot)
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"   # local-dev read-only browse without login
+    networks:
+      - turing-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.25"
+          pids: 256
+
+  phoenix:
+    profiles: ["observability"]
+    # Arize Phoenix — OTLP trace backend. UI + OTLP/HTTP on 6006 (/v1/traces is
+    # where the app's OTLPSpanExporter posts), OTLP/gRPC on 4317. SQLite default
+    # store on the mounted volume (light — no ClickHouse). Pin to a version tag so
+    # the schema/UI don't drift under :latest.
+    image: arizephoenix/phoenix:latest
+    environment:
+      PHOENIX_HOST: 0.0.0.0
+      PHOENIX_PORT: "6006"
+      PHOENIX_SQL_DATABASE_URL: sqlite:////mnt/data/phoenix.db
+    volumes:
+      - phoenixdata:/mnt/data
+    ports:
+      - "6006:6006"           # Phoenix UI + OTLP/HTTP
+    networks:
+      - turing-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+          pids: 512
+
 volumes:
   pgdata:
   redisdata:
@@ -612,6 +721,8 @@ volumes:
   turing-workspace:
   turing-logs:
   registrydata:
+  phoenixdata:
+  grafanadata:
 
 networks:
   turing-net:

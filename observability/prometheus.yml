@@ -1,0 +1,41 @@
+# Prometheus scrape config for the turing-agent stack (observability profile).
+#
+# Brings up with: docker compose --profile observability up -d prometheus grafana
+# Runs on the turing-net bridge, so it resolves the compose service names below.
+#
+# Discovery uses dns_sd_configs (NO docker.sock mount): the `worker` service name
+# resolves to EVERY replica's IP, so each replica's :9100 /metrics server is
+# scraped independently. The api exposes /metrics as a FastAPI route on its app
+# port (8000) — no PROMETHEUS_ENABLED flag needed there; workers/scheduler/
+# optimizer serve :9100 via start_metrics_server (compose forces
+# PROMETHEUS_ENABLED=true on those roles).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    stack: turing-agent
+
+scrape_configs:
+  # API — single FastAPI instance; /metrics is a route on its app port (8000).
+  - job_name: "turing-api"
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: ["api"]
+        type: A
+        port: 8000
+
+  # Worker replicas — each binds :9100. dns_sd resolves `worker` to all replica
+  # IPs → every replica scraped (the execute node + most LLM calls fire here, so
+  # this is the primary metrics source).
+  - job_name: "turing-worker"
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9100
+
+  # Prometheus self-health.
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -1,0 +1,14 @@
+# Grafana dashboard-provider auto-provisioning (observability profile).
+# JSON dashboards under /var/lib/grafana/dashboards are loaded on boot.
+apiVersion: 1
+
+providers:
+  - name: "turing-agent"
+    orgId: 1
+    folder: "Turing Agent"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

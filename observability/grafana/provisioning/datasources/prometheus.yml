@@ -1,0 +1,12 @@
+# Grafana datasource auto-provisioning (observability profile).
+# Prometheus is reached at its compose service name on turing-net.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

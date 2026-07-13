@@ -55,6 +55,14 @@ class BenchmarkResult(BaseModel):
     # goal; otherwise the mean of the non-skipped check scores (0.0–1.0). The
     # per-check breakdown lives in ``checks``.
     correctness_score: float | None = None
+    # Strict per-check pass flag (Track-1 multi-goal canary gate). ``None`` when
+    # no GoalSpec checks ran; ``True`` only when every non-skipped check passed;
+    # ``False`` when ANY non-skipped check failed. The promotion canary returns
+    # 0.0 if ANY scored goal has ``passed=False``, so a total collapse on one
+    # goal is NOT averaged away by the mean ``correctness_score`` (the q04
+    # 1.0→0.167 collapse that passed the canary 15× while multi-goal quality
+    # died). Mirrors :class:`CorrectnessResult.passed`.
+    passed: bool | None = None
     checks: list[CheckResult] = Field(default_factory=list)
 
 

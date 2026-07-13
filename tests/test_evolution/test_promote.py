@@ -1011,3 +1011,92 @@ class TestGoldenCanaryGoalSelection:
         gc = GoldenCanary(None, None, None, harness=object())
         assert gc._suite == []
 
+
+
+# ---------------------------------------------------------------------------
+# Multi-goal canary gate (Track-1): GoldenCanary.score returns 0.0 when ANY
+# scored goal has passed=False — the q04 multi-goal collapse the mean-only
+# aggregation averaged away (1.0→0.167 while the single-goal canary promoted 15×).
+# ---------------------------------------------------------------------------
+
+
+class _PassedHarness:
+    """Stand-in BenchmarkHarness returning BenchmarkResults with controlled
+    ``correctness_score`` AND ``passed`` — so the multi-goal gate (any
+    ``passed is False`` → 0.0) can be exercised independently of the score mean."""
+
+    def __init__(self, results: list[tuple[float | None, bool | None]]) -> None:
+        self._results = list(results)
+        self.call_count = 0
+
+    async def run_benchmark(self, goal: Any, spec: Any | None = None) -> Any:
+        from src.eval.models import BenchmarkResult
+
+        self.call_count += 1
+        score, passed = self._results.pop(0)
+        return BenchmarkResult(
+            goal_name=goal.name,
+            category=goal.category,
+            success=True,
+            total_latency_ms=1,
+            total_tokens=0,
+            total_cost_usd=0.0,
+            iterations=1,
+            correctness_score=score,
+            passed=passed,
+        )
+
+
+class TestGoldenCanaryMultiGoalGate:
+    """Track-1: a single goal whose strict ``passed`` is False fails the whole
+    canary (returns 0.0) even when the mean ``correctness_score`` is high."""
+
+    @pytest.mark.asyncio
+    async def test_one_failed_goal_zeros_score_even_when_mean_is_high(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """The exact q04 shape: goal A perfect (1.0, passed=True); goal B scores
+        0.875 (7/8 checks) but passed=False (one sub-goal collapsed). Mean 0.9375
+        would clear min_score 0.8 and promote under the OLD mean-only aggregation;
+        the multi-goal gate must return 0.0."""
+        _fake_settings(monkeypatch, tmp_path, promote_on=True, min_score=0.8)
+        harness = _PassedHarness([(1.0, True), (0.875, False)])
+        canary = GoldenCanary(
+            None,
+            None,
+            None,
+            harness=harness,
+            goal_ids=["battery04_q01", "battery04_q02"],
+        )
+        score = await canary.score("execute", ["candidate"])
+        assert score == 0.0
+        assert harness.call_count == 2  # both goals ran
+
+    @pytest.mark.asyncio
+    async def test_all_passing_returns_mean(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        _fake_settings(monkeypatch, tmp_path, promote_on=True, min_score=0.8)
+        harness = _PassedHarness([(1.0, True), (0.8, True)])
+        canary = GoldenCanary(
+            None, None, None, harness=harness,
+            goal_ids=["battery04_q01", "battery04_q02"],
+        )
+        score = await canary.score("execute", ["candidate"])
+        assert score == pytest.approx(0.9)
+
+    @pytest.mark.asyncio
+    async def test_none_passed_is_not_treated_as_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """A goal whose checks never ran (passed=None) carries no pass/fail signal
+        — it must NOT trip the gate (only ``passed is False`` does). Its score
+        still counts toward the mean."""
+        _fake_settings(monkeypatch, tmp_path, promote_on=True, min_score=0.8)
+        harness = _PassedHarness([(1.0, None), (0.8, True)])
+        canary = GoldenCanary(
+            None, None, None, harness=harness,
+            goal_ids=["battery04_q01", "battery04_q02"],
+        )
+        score = await canary.score("execute", ["candidate"])
+        assert score == pytest.approx(0.9)

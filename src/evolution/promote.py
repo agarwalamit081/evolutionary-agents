@@ -886,6 +886,14 @@ class GoldenCanary:
         budget = float(get_settings().evolution.promotion_canary_timeout_s)
         set_evolved_candidate(node, suffixes)
         scores: list[float] = []
+        # Multi-goal gate (Track-1): a single goal whose strict per-check
+        # ``passed`` is False fails the whole canary even when the mean
+        # correctness_score looks healthy. The prior mean-only aggregation
+        # averaged away a total collapse on one goal — q04 scored 1.0→0.167
+        # across generations while the single-goal canary reported 1.0 and
+        # promoted 15×. ``passed is False`` (not ``not passed``) so a ``None``
+        # (no checks ran) goal is treated as no signal, never as a failure.
+        any_failed = False
         try:
             for spec in self._suite:
                 try:
@@ -900,6 +908,8 @@ class GoldenCanary:
                         )
                     if result.correctness_score is not None:
                         scores.append(float(result.correctness_score))
+                        if result.passed is False:
+                            any_failed = True
                 except TimeoutError:
                     # The live run must never be parked by a canary goal that
                     # cannot converge in budget. Abandon this goal (no score) and
@@ -920,4 +930,12 @@ class GoldenCanary:
             clear_evolved_candidate(node)
         if not scores:
             return None
-        return sum(scores) / len(scores)
+        mean = sum(scores) / len(scores)
+        if any_failed:
+            logger.info(
+                f"Promotion canary: >=1 goal failed the strict passed-check "
+                f"(mean={mean:.3f} across {len(scores)} goal(s)) → returning 0.0 "
+                f"so a multi-goal collapse is NOT averaged away by the mean."
+            )
+            return 0.0
+        return mean

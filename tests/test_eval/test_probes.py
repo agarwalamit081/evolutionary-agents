@@ -22,7 +22,12 @@ from typing import Any
 from src.eval.golden import BATTERY04_GOALS, GOLDEN_SPECS, lookup_goal_spec
 from src.eval.probes import LEARNING_PROBES
 
-_PROBE_IDS = ["probe_create_tool", "probe_reuse_tool", "probe_analytics_recall"]
+_PROBE_IDS = [
+    "probe_create_tool",
+    "probe_reuse_tool",
+    "probe_analytics_recall",
+    "probe_multi_orchestration",
+]
 
 
 # ─── registration invariants ──────────────────────────────────────────────────
@@ -160,6 +165,7 @@ def test_probe_reuse_recompute_fails_on_wrong_value(tmp_path: Path) -> None:
 
 
 def _write_json(path: Path, obj: dict[str, Any]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj), encoding="utf-8")
     return str(path)
 
@@ -192,3 +198,131 @@ def test_probe_analytics_recompute_is_case_insensitive_on_keys(tmp_path: Path) -
     )
     ok, _ = _run_recompute(_exec_check("probe_analytics_recall"), [dlv], str(tmp_path))
     assert ok
+
+
+# ─── probe_multi_orchestration recompute (Track-1 multi-goal canary) ──────────
+
+
+def _exec_check_by_name(spec_id: str, check_name: str) -> str:
+    """Pull a NAMED execution check's code (probe_multi has 3 execution checks)."""
+    spec = GOLDEN_SPECS[spec_id]
+    for c in spec.checks:
+        if c.check_type == "execution" and c.name == check_name:
+            return c.params["code"]
+    raise AssertionError(f"{spec_id}/{check_name} not found")
+
+
+def test_probe_multi_has_three_deliverables_and_complex_category() -> None:
+    spec = GOLDEN_SPECS["probe_multi_orchestration"]
+    assert spec.category == "complex"
+    assert spec.timeout_seconds == 300
+    assert len(spec.expected_deliverables) == 3
+    # Three execution checks (stats recompute, ranges recompute, summary cross-check).
+    exec_checks = [c for c in spec.checks if c.check_type == "execution"]
+    assert len(exec_checks) == 3
+
+
+def test_probe_multi_stats_recompute_passes_on_correct(tmp_path: Path) -> None:
+    dlv = _write_json(
+        tmp_path / "probe_multi" / "stats.json",
+        {"count": 5, "sum": 150, "mean": 30.0, "median": 30, "min": 10, "max": 50},
+    )
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_multi_orchestration", "probe_multi_stats_recompute"),
+        [dlv], str(tmp_path),
+    )
+    assert ok, out
+
+
+def test_probe_multi_stats_recompute_fails_on_wrong_mean(tmp_path: Path) -> None:
+    dlv = _write_json(
+        tmp_path / "probe_multi" / "stats.json",
+        {"count": 5, "sum": 150, "mean": 999.0, "median": 30, "min": 10, "max": 50},
+    )
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_multi_orchestration", "probe_multi_stats_recompute"),
+        [dlv], str(tmp_path),
+    )
+    assert not ok
+    assert "mean" in out
+
+
+def test_probe_multi_ranges_recompute_passes_on_correct(tmp_path: Path) -> None:
+    dlv = _write_json(
+        tmp_path / "probe_multi" / "ranges.json",
+        {"count": 8, "min": 1, "max": 9, "range": 8, "sum": 31},
+    )
+    ok, _ = _run_recompute(
+        _exec_check_by_name("probe_multi_orchestration", "probe_multi_ranges_recompute"),
+        [dlv], str(tmp_path),
+    )
+    assert ok
+
+
+def test_probe_multi_summary_crosscheck_passes_on_consistent(tmp_path: Path) -> None:
+    """All three deliverables internally consistent → cross-check passes."""
+    stats = _write_json(
+        tmp_path / "probe_multi" / "stats.json",
+        {"count": 5, "sum": 150, "mean": 30.0, "median": 30, "min": 10, "max": 50},
+    )
+    ranges = _write_json(
+        tmp_path / "probe_multi" / "ranges.json",
+        {"count": 8, "min": 1, "max": 9, "range": 8, "sum": 31},
+    )
+    summary = _write_json(
+        tmp_path / "probe_multi" / "summary.json",
+        {"stats_a_mean": 30.0, "range_b": 8, "total_count": 13, "combined_ok": True},
+    )
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_multi_orchestration", "probe_multi_summary_crosscheck"),
+        [stats, ranges, summary], str(tmp_path),
+    )
+    assert ok, out
+    assert "cross-references verified" in out
+
+
+def test_probe_multi_summary_crosscheck_fails_on_inconsistent_summary(
+    tmp_path: Path,
+) -> None:
+    """The multi-goal collapse discriminator: stats.json is CORRECT (mean=30) but
+    summary.json lies (stats_a_mean=99). The cross-check recomputes the expected
+    30 FROM stats.json and catches the fabricated/inconsistent summary."""
+    stats = _write_json(
+        tmp_path / "probe_multi" / "stats.json",
+        {"count": 5, "sum": 150, "mean": 30.0, "median": 30, "min": 10, "max": 50},
+    )
+    ranges = _write_json(
+        tmp_path / "probe_multi" / "ranges.json",
+        {"count": 8, "min": 1, "max": 9, "range": 8, "sum": 31},
+    )
+    summary = _write_json(
+        tmp_path / "probe_multi" / "summary.json",
+        {"stats_a_mean": 99.0, "range_b": 8, "total_count": 13, "combined_ok": True},
+    )
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_multi_orchestration", "probe_multi_summary_crosscheck"),
+        [stats, ranges, summary], str(tmp_path),
+    )
+    assert not ok
+    assert "stats_a_mean" in out
+
+
+def test_probe_multi_summary_crosscheck_fails_on_missing_upstream(
+    tmp_path: Path,
+) -> None:
+    """A fabricated summary with NO upstream ranges.json → the cross-check cannot
+    resolve the range_b reference and fails."""
+    stats = _write_json(
+        tmp_path / "probe_multi" / "stats.json",
+        {"count": 5, "sum": 150, "mean": 30.0, "median": 30, "min": 10, "max": 50},
+    )
+    summary = _write_json(
+        tmp_path / "probe_multi" / "summary.json",
+        {"stats_a_mean": 30.0, "range_b": 8, "total_count": 13, "combined_ok": True},
+    )
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_multi_orchestration", "probe_multi_summary_crosscheck"),
+        [stats, summary], str(tmp_path),  # ranges.json deliberately absent
+    )
+    assert not ok
+    assert "probe_multi/ranges.json" in out

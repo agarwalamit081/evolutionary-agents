@@ -269,6 +269,9 @@ class BenchmarkHarness:
         # score + per-check breakdown to state when a GoalSpec ran. None when no
         # spec was registered or the goal didn't reach a completion verify.
         correctness_score = state.get("eval_correctness_score")
+        # Strict per-check pass flag (Track-1 multi-goal canary gate). None when
+        # no GoalSpec checks ran; True only when every non-skipped check passed.
+        correctness_passed = state.get("eval_correctness_passed")
         checks_raw = state.get("eval_checks") or []
         checks: list[CheckResult] = []
         for raw in checks_raw:
@@ -293,5 +296,6 @@ class BenchmarkHarness:
             errors=[str(e)[:500] for e in errors] if errors else [],
             final_output=str(final_output)[:1000],
             correctness_score=correctness_score,
+            passed=correctness_passed,
             checks=checks,
         )

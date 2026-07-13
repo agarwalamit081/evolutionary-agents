@@ -6,7 +6,7 @@ does not seed q02). The thesis — *does a prior run's crystallized capability
 improve a later run* — needs goals that repeat across generations so recall of an
 earlier run's tool/skill/prompt is both **possible** and **measurable**.
 
-This module supplies three such probes, registered into ``GOLDEN_SPECS`` (so the
+This module supplies four such probes, registered into ``GOLDEN_SPECS`` (so the
 verify node + ``--score-spec`` resolve them) but **deliberately excluded from
 ``BATTERY04_GOALS``** (mirroring the classify canaries) so the nightly
 capability-curve battery stays unperturbed:
@@ -33,6 +33,8 @@ The probes are **data-correctness only** (no ``state`` check); ``target_node`` i
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
 
 from src.eval.models import CheckConfig, GoalSpec
 
@@ -311,10 +313,207 @@ def _probe_analytics_recall() -> GoalSpec:
     )
 
 
+# ── Multi-goal orchestration canary (Track-1) ────────────────────────────────
+# Two INDEPENDENT deterministic series + a cross-referencing summary. This is
+# the probe the OLD single-goal canary (probe_analytics_recall) could not stand
+# in for: it demands ≥2 deliverables whose correctness is cross-checked, so a run
+# that nails one sub-goal but botches the other fails the WHOLE probe
+# (passed=False) — which GoldenCanary.score now turns into a 0.0 promotion score
+# (the q04 1.0→0.167 multi-goal collapse that the mean-only canary averaged
+# away, promoting 15× while multi-goal quality died).
+_MULTI_SERIES_A_EXPECTED = {  # recomputed from [10, 20, 30, 40, 50]
+    "count": 5, "sum": 150, "mean": 30.0, "median": 30, "min": 10, "max": 50,
+}
+_MULTI_SERIES_B_EXPECTED = {  # recomputed from [3, 1, 4, 1, 5, 9, 2, 6]
+    "count": 8, "min": 1, "max": 9, "range": 8, "sum": 31,
+}
+
+
+def _recompute_flat_json_code(suffix: str, expected: Mapping[str, float]) -> str:
+    """Sandbox recompute probe for a flat numeric-JSON deliverable.
+
+    Finds the deliverable by ``suffix`` (use a path-specific suffix like
+    ``probe_multi/stats.json`` so it cannot collide with another probe's
+    same-named file in a shared results dir), loads the JSON, and asserts every
+    expected key is present + numerically within 0.01. Anti-fabrication: a
+    deliverable missing fields or with wrong values ``sys.exit(1)``s.
+    """
+    return (
+        "import json, sys\n"
+        f"path = next((p for p in _DELIVERABLES if p.endswith('{suffix}')), '')\n"
+        "if not path:\n"
+        f"    print('no {suffix}'); sys.exit(1)\n"
+        "with open(path) as _f:\n"
+        "    d = json.load(_f)\n"
+        f"expected = {expected!r}\n"
+        "def _find(key):\n"
+        "    for k, v in d.items():\n"
+        "        if str(k).lower() == key:\n"
+        "            return v\n"
+        "    return None\n"
+        "for key, want in expected.items():\n"
+        "    got = _find(key)\n"
+        "    if got is None:\n"
+        "        print('missing field %s' % key); sys.exit(1)\n"
+        "    try:\n"
+        "        gotv = float(got)\n"
+        "    except (TypeError, ValueError):\n"
+        "        print('field %s not numeric: %r' % (key, got)); sys.exit(1)\n"
+        "    if abs(gotv - want) > 0.01:\n"
+        "        print('%s: got %.4f expected %.4f' % (key, gotv, want)); sys.exit(1)\n"
+        f"print('ok: {suffix} verified')\n"
+    )
+
+
+def _multi_summary_crosscheck_code() -> str:
+    """Cross-reference check: reads stats.json + ranges.json + summary.json and
+    RECOMPUTES the expected summary from the two upstream deliverables' ACTUAL
+    values (not from constants), then asserts summary.json is internally
+    consistent. A fabricated summary that doesn't match its upstreams — or a run
+    that gets one upstream right but the summary wrong — fails. This is the
+    multi-goal invariant the single-goal canary could not check.
+    """
+    return (
+        "import json, sys\n"
+        "def _load(suffix):\n"
+        "    path = next((p for p in _DELIVERABLES if p.endswith(suffix)), '')\n"
+        "    if not path:\n"
+        "        print('no %s' % suffix); sys.exit(1)\n"
+        "    with open(path) as _f:\n"
+        "        return json.load(_f)\n"
+        "def _get(d, key):\n"
+        "    for k, v in d.items():\n"
+        "        if str(k).lower() == key:\n"
+        "            return v\n"
+        "    return None\n"
+        "stats = _load('probe_multi/stats.json')\n"
+        "ranges = _load('probe_multi/ranges.json')\n"
+        "summary = _load('probe_multi/summary.json')\n"
+        "stats_count = float(_get(stats, 'count'))\n"
+        "stats_mean = float(_get(stats, 'mean'))\n"
+        "range_b = float(_get(ranges, 'range'))\n"
+        "ranges_count = float(_get(ranges, 'count'))\n"
+        "expected = {\n"
+        "    'stats_a_mean': stats_mean,\n"
+        "    'range_b': range_b,\n"
+        "    'total_count': stats_count + ranges_count,\n"
+        "}\n"
+        "for key, want in expected.items():\n"
+        "    got = _get(summary, key)\n"
+        "    if got is None:\n"
+        "        print('summary missing %s' % key); sys.exit(1)\n"
+        "    try:\n"
+        "        gotv = float(got)\n"
+        "    except (TypeError, ValueError):\n"
+        "        print('summary %s not numeric: %r' % (key, got)); sys.exit(1)\n"
+        "    if abs(gotv - want) > 0.01:\n"
+        "        print('%s: got %.4f expected %.4f (from upstreams)' % (key, gotv, want)); sys.exit(1)\n"
+        "if not _get(summary, 'combined_ok'):\n"
+        "    print('combined_ok is not truthy'); sys.exit(1)\n"
+        "print('ok: summary cross-references verified against upstreams')\n"
+    )
+
+
+def _probe_multi_orchestration() -> GoalSpec:
+    """Multi-deliverable orchestration canary (Track-1 multi-goal gate).
+
+    Demands THREE deliverables across TWO independent computations plus a
+    cross-referencing summary: ``stats.json`` (series A), ``ranges.json`` (series
+    B), ``summary.json`` (mean-of-A + range-of-B + total-count). The summary
+    check re-reads the two upstream deliverables and recomputes the
+    cross-references from THEIR actual values, so a run that gets one series
+    right but the other wrong — or fabricates the summary without consistent
+    upstreams — fails (``passed=False``). This is the multi-goal collapse the
+    single-goal ``probe_analytics_recall`` canary could not catch (q04
+    1.0→0.167). No upstream dependency (unlike q04 which needs q1-q3); fully
+    self-contained + deterministic.
+    """
+    return GoalSpec(
+        spec_id="probe_multi_orchestration",
+        name="probe_multi_orchestration",
+        description=(
+            "Multi-goal orchestration canary (Track-1): two independent "
+            "deterministic computations plus a cross-referencing summary. A "
+            "collapse on either sub-goal fails the whole probe (passed=False), "
+            "which the multi-goal canary gate turns into a 0.0 promotion score."
+        ),
+        goal_text=(
+            "This task has THREE parts; complete ALL three and write three files.\n\n"
+            "PART 1 — Series A statistics. For the series 10, 20, 30, 40, 50 "
+            "compute count, sum, mean, median, min, and max and write them as a "
+            "JSON object to results/probe_multi/stats.json (round mean to at "
+            "least 4 decimals).\n\n"
+            "PART 2 — Series B range. For the series 3, 1, 4, 1, 5, 9, 2, 6 "
+            "compute count, min, max, range (max minus min), and sum, and write "
+            "them as a JSON object to results/probe_multi/ranges.json.\n\n"
+            "PART 3 — Cross-reference summary. Write results/probe_multi/summary.json "
+            "as a JSON object with: \"stats_a_mean\" = the mean from PART 1, "
+            "\"range_b\" = the range from PART 2, \"total_count\" = (count from "
+            "PART 1) + (count from PART 2), and \"combined_ok\" = true.\n"
+        ),
+        category="complex",
+        max_iterations=30,
+        timeout_seconds=300,
+        expected_deliverables=[
+            "results/probe_multi/stats.json",
+            "results/probe_multi/ranges.json",
+            "results/probe_multi/summary.json",
+        ],
+        success_criteria=[
+            "stats.json: count=5, sum=150, mean=30, median=30, min=10, max=50",
+            "ranges.json: count=8, min=1, max=9, range=8, sum=31",
+            "summary.json: stats_a_mean=30, range_b=8, total_count=13, combined_ok=true",
+        ],
+        checks=[
+            CheckConfig(
+                check_type="golden",
+                name="probe_multi_stats_exists",
+                params={"assertions": [{"kind": "exists", "deliverable": "results/probe_multi/stats.json"}]},
+            ),
+            CheckConfig(
+                check_type="golden",
+                name="probe_multi_ranges_exists",
+                params={"assertions": [{"kind": "exists", "deliverable": "results/probe_multi/ranges.json"}]},
+            ),
+            CheckConfig(
+                check_type="golden",
+                name="probe_multi_summary_exists",
+                params={"assertions": [{"kind": "exists", "deliverable": "results/probe_multi/summary.json"}]},
+            ),
+            CheckConfig(
+                check_type="structural",
+                name="probe_multi_stats_schema",
+                params={"deliverable": "results/probe_multi/stats.json", "format": "json"},
+            ),
+            CheckConfig(
+                check_type="structural",
+                name="probe_multi_ranges_schema",
+                params={"deliverable": "results/probe_multi/ranges.json", "format": "json"},
+            ),
+            CheckConfig(
+                check_type="execution",
+                name="probe_multi_stats_recompute",
+                params={"code": _recompute_flat_json_code("probe_multi/stats.json", _MULTI_SERIES_A_EXPECTED), "timeout": 20},
+            ),
+            CheckConfig(
+                check_type="execution",
+                name="probe_multi_ranges_recompute",
+                params={"code": _recompute_flat_json_code("probe_multi/ranges.json", _MULTI_SERIES_B_EXPECTED), "timeout": 20},
+            ),
+            CheckConfig(
+                check_type="execution",
+                name="probe_multi_summary_crosscheck",
+                params={"code": _multi_summary_crosscheck_code(), "timeout": 20},
+            ),
+        ],
+    )
+
+
 # Ordered list — the experiment enqueuer iterates this; wiring into GOLDEN_SPECS
 # makes each resolvable via lookup_goal_spec(spec_id).
 LEARNING_PROBES: list[GoalSpec] = [
     _probe_create_tool(),
     _probe_reuse_tool(),
     _probe_analytics_recall(),
+    _probe_multi_orchestration(),
 ]

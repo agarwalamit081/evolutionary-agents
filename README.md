@@ -144,6 +144,18 @@ Tests mirror `src/`; LLM calls are mocked via `litellm.acompletion` for determin
 tests (`@pytest.mark.e2e`) make real provider calls. Use the `aiml01` virtualenv, not
 `uv run`.
 
+### Local quality gate
+
+```bash
+scripts/gate.sh                # ruff + pyright + pytest (full pre-merge gate)
+scripts/gate.sh --no-pytest    # ruff + pyright only
+```
+
+A `.git/hooks/pre-commit` hook (local, not committed) runs `ruff check . && pyright src/`
+on every commit — the deterministic, always-green subset (the full pytest suite is gated
+manually via `scripts/gate.sh` because ~12 host-env-driven failures would make a commit
+gate flaky). Bypass with `git commit --no-verify` for WIP.
+
 ---
 
 ## Configuration

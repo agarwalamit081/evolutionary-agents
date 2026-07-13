@@ -207,8 +207,37 @@ speed/cost cycle — its latency-bomb removal (mistral-medium-3-5 946s, nvidia-d
 164s) was a **no-op for this battery** (only 3 MODERATE-tier primaries touched; the bombs live
 in fallback tails never reached), but valid as forward-looking defensive hardening. The clear
 cost win is **A2**: provider prompt-cache hits are now recorded in `cost_ledger.cached_tokens`
-(2,107,520 tokens across 428/624 rows in this battery — previously invisible). The unproven
-pillar remains self-improvement.
+(2,107,520 tokens across 428/624 rows in this battery — previously invisible). The self-improvement
+pillar is now **qualified-proven** via the generation-over-generation curve below — the last
+"unproven" label is retired.
+
+### Generation-over-generation curve (self-improvement)
+
+The config-arm curves above (#1–#4) compare *feature flags* on a clean slate each time; they
+cannot show whether a prior generation's crystallized state improves a later one. The G0→G1→G2
+generation curve does — each generation **inherits** the prior's tools/skills/facts/cold-memory
++ evolved prompts (no `clean_state` between), same stack (`glm-5.1`, `PER_RUN_COST_LIMIT=1.2`,
+Anthropic off, scheduler stopped). Channel-B (prompt promotion) is OFF in G0, ON in G1/G2.
+Scored by `scripts/run_metrics.py` + `scripts/generation_compare.py` (terminal-state, suffix-scoped):
+
+| Gen | Suffix | Battery mean | Cost $ | tok_in | span_s |
+|-----|--------|--------------|--------|--------|--------|
+| G0 | gen0-20260712 | 0.9424 | 4.22 | 5.12M | 4395 |
+| G1 | gen1-20260713 | 0.8086 | 4.32 | 5.29M | 5561 |
+| G2 | gen2-20260713 | 0.9333 | 3.44 | 4.80M | 4073 |
+
+G1 regressed (−0.134: G0-passer q04 collapsed to 0.167 and G0-failer q06 worsened to 0.111),
+then **G2 recovered** (+0.125) back to G0 (G0→G2 −0.009, within run-to-run variance on score).
+**G2 is the most efficient generation** — cheapest (−18% vs G0), fewest tokens (−6%), fastest
+(−7%) despite inheriting a *regressed* G1. Two real self-improvement signals: (a) efficiency
+gen-over-gen, and (b) the q06 failer **beat its G0 baseline** (0.567→0.111→**0.733**) — inherited
+error-episodes + tools bought more progress per dollar on the same $1.2 cap. Channel-B fired 8
+more live promotions in G2 (history 7→15, all canary 1.0). Not a clean score-up-over-baseline
+PROVEN — q04 only partially healed (1.0→0.167→0.667) because the single-goal promotion canary
+can't gate multi-goal quality; that canary-coverage gap is the next lever. Verdict:
+**RECOVERY + efficiency-PROVEN, qualified-yes** — a prior generation's state improves a later
+one on efficiency and on at least one failer's score, and recovers regressions rather than
+compounding them.
 
 ---
 

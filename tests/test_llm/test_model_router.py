@@ -366,7 +366,7 @@ class TestModelRouterPerNodeRouting:
     def test_deflat_complex_ne_simple_for_plan(self) -> None:
         """De-flat (findings-03 #1): a COMPLEX plan no longer collapses to the
         same model as a SIMPLE plan. With all providers keyed, COMPLEX→plan
-        resolves to its NODE_TIER_MAP primary (MODERATE glm-5.1) while
+        resolves to its NODE_TIER_MAP primary (MODERATE glm-5.2) while
         SIMPLE→plan falls to the COMPLEXITY_TIER_MAP SIMPLE default (CHEAP)."""
         from src.llm.model_router import NODE_TIER_MAP
 
@@ -377,17 +377,16 @@ class TestModelRouterPerNodeRouting:
         # COMPLEX+plan hits the NODE_TIER_MAP override primary.
         assert complex_plan == NODE_TIER_MAP[(TaskComplexity.COMPLEX, "plan")][1]
 
-    def test_execute_upgrades_to_glm51_on_complex_goal(self) -> None:
-        """C3 retier: execute on a COMPLEX/CRITICAL goal moves to the
-        MODERATE glm-5.1 — a stronger live tool-caller than the CHEAP
-        deepseek-v4-flash that previously ran every execute step. The cost
-        uplift is bounded by per-step routing (Phase 3 routes trivial/simple
-        steps back to the CHEAP tier) + RAG-over-tools, NOT by keeping execute
-        CHEAP. Pinned to the model id (not just the tier) since the retier is
-        the point."""
+    def test_execute_upgrades_to_glm52_on_complex_goal(self) -> None:
+        """Track-1 re-baseline: execute on a COMPLEX/CRITICAL goal runs the
+        MODERATE glm-5.2 — the successor to the glm-5.1 C3 primary, a stronger
+        live tool-caller than the CHEAP tier. The cost uplift is bounded by
+        per-step routing (Phase 3 routes trivial/simple steps back to the CHEAP
+        tier) + RAG-over-tools, NOT by keeping execute CHEAP. Pinned to the model
+        id (not just the tier) since the primary swap is the point."""
         router = self._all_keyed_router()
-        assert router.route(TaskComplexity.COMPLEX, node="execute") == "glm-5.1"
-        assert router.route(TaskComplexity.CRITICAL, node="execute") == "glm-5.1"
+        assert router.route(TaskComplexity.COMPLEX, node="execute") == "glm-5.2"
+        assert router.route(TaskComplexity.CRITICAL, node="execute") == "glm-5.2"
 
     def test_verify_and_reflect_complex_route_to_reasoning(self) -> None:
         """Resurrected route_reasoning caller: verify/reflect on a COMPLEX goal
@@ -486,7 +485,7 @@ class TestRoutingEnvOverrides:
     def test_node_tier_override_flips_routing(self) -> None:
         """A node-tier override redirects a (complexity, node) decision. With all
         providers keyed, COMPLEX+execute normally returns the NODE_TIER_MAP
-        primary glm-5.1 (C3 retier); overriding ``COMPLEX:execute`` →
+        primary glm-5.2 (Track-1 re-baseline); overriding ``COMPLEX:execute`` →
         deepseek-v4-pro flips it."""
         from src.llm.model_router import NODE_TIER_MAP
 
@@ -494,7 +493,7 @@ class TestRoutingEnvOverrides:
             node_json='{"COMPLEX:execute": "deepseek-v4-pro"}'
         )
         # Sanity: the curated default for COMPLEX:execute is NOT the override.
-        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "glm-5.1"
+        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "glm-5.2"
         assert router.route(TaskComplexity.COMPLEX, node="execute") == "deepseek-v4-pro"
 
     def test_complexity_tier_override_flips_routing_no_node(self) -> None:
@@ -685,7 +684,7 @@ class TestDefaultComplexityTierOverride:
     def test_override_flips_unmapped_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Patching the tier map empty makes SIMPLE 'unmapped', so route() falls
         to the override model (deepseek-v4-pro) instead of the curated default
-        (deepseek-v4-flash)."""
+        (claude-haiku-4-5-20251001)."""
         from src.llm import model_router as mr
 
         router = self._all_keyed_router(default_tier="deepseek-v4-pro")
@@ -740,25 +739,22 @@ class TestDefaultComplexityTierOverride:
 
 class TestDisabledProvidersEnv:
     """DISABLED_PROVIDERS is the env-side lever for excluding providers from ALL
-    routing. AUTHORITATIVE-when-set (not merge): None → curated
-    _TEMPORARY_DISABLED_PROVIDERS baseline (anthropic under a quota cap); any set
-    value (incl. empty) → the authoritative comma-list. This is the revert lever
-    that clears the Anthropic block on 2026-07-01 via ``DISABLED_PROVIDERS=``."""
+    routing. AUTHORITATIVE-when-set (not merge): None/empty → nothing disabled
+    (the temporary Anthropic quota-cap baseline was reverted); any non-empty
+    comma-list → the authoritative disabled set."""
 
-    def test_none_uses_curated_temporary_baseline(self) -> None:
-        """UNSET → the curated _TEMPORARY_DISABLED_PROVIDERS (anthropic) is used,
-        preserving the quota-cap block exactly as before this knob existed."""
-        from src.llm.model_router import _resolved_disabled_providers, _TEMPORARY_DISABLED_PROVIDERS
+    def test_none_disables_nothing(self) -> None:
+        """UNSET → nothing is disabled (no hardcoded baseline after the
+        temporary Anthropic quota-cap block was reverted)."""
+        from src.llm.model_router import _resolved_disabled_providers
 
         settings = Settings()
         settings.routing.routing_disabled_providers = None
-        assert _resolved_disabled_providers(settings) == set(_TEMPORARY_DISABLED_PROVIDERS)
-        assert "anthropic" in _resolved_disabled_providers(settings)
+        assert _resolved_disabled_providers(settings) == set()
+        assert "anthropic" not in _resolved_disabled_providers(settings)
 
     def test_empty_string_clears_all(self) -> None:
-        """EMPTY string (=) means NONE disabled — the 2026-07-01 Anthropic revert
-        path. Without a code change, setting DISABLED_PROVIDERS= unfetters the
-        provider set that the temporary baseline was blocking."""
+        """EMPTY string (=) means NONE disabled."""
         from src.llm.model_router import _resolved_disabled_providers
 
         settings = Settings()
@@ -767,9 +763,7 @@ class TestDisabledProvidersEnv:
         assert "anthropic" not in _resolved_disabled_providers(settings)
 
     def test_explicit_list_is_authoritative(self) -> None:
-        """A set comma-list REPLACES the curated baseline — it is not merged. So a
-        deliberate ``"minimax"`` unblocks anthropic even though the baseline names
-        anthropic."""
+        """A set comma-list IS the disabled set — nothing else is merged in."""
         from src.llm.model_router import _resolved_disabled_providers
 
         settings = Settings()

@@ -11,42 +11,18 @@ from src.config.settings import Settings, get_settings
 from src.graph.enums import TaskComplexity
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEMPORARY — REVERT BY 2026-07-01 ────────────────────────────────────────────
-# The Anthropic API key is under an account usage cap (blocked until 2026-07-01):
-# every anthropic model call returns a 400/quota error and burns the fallback
-# chain — the circuit breaker does NOT trip on 400/quota (only on transient
-# 429/5xx/timeout), so the dead attempt repeats once per chain member. To
-# eliminate the wasted calls ENTIRELY, anthropic is excluded from ALL routing
-# until the cap resets, via two guards that both read this one set:
-#   • ``_has_provider_key("anthropic")`` → False: drops anthropic from the
-#     router's primary/chain/diverse selection AND from the gateway's chain
-#     pre-filter (gateway.py ``_execute_with_fallback`` filters via this method).
-#   • seeded into ``_exclude_providers``: covers the router's absolute-fallback
-#     loop (route() :136-139) — the one path that consults ``excluded``, not keys.
-# Anthropic ModelSpecs + FALLBACK_CHAINS entries are LEFT INTACT so reverting is
-# trivial (delete this constant + the two guards + restore DEFAULT_COMPLEXITY_TIER)
-# and the cross-provider fallback-invariant (FALLBACK_CHAINS still names anthropic)
-# is preserved for the deferred test (#311). 2026-07-01 is the documented Anthropic
-# cap-reset date, so this aligns 1:1 with when the funded key recovers.
-# ─────────────────────────────────────────────────────────────────────────────
-_TEMPORARY_DISABLED_PROVIDERS: frozenset[str] = frozenset({"anthropic"})
-
-
 def _resolved_disabled_providers(settings: Settings) -> set[str]:
     """The effective disabled-provider set used by ALL routing guards.
 
-    ``DISABLED_PROVIDERS`` env is AUTHORITATIVE when set to any value: a
+    ``DISABLED_PROVIDERS`` env (alias ``ROUTING_DISABLED_PROVIDERS``): a
     comma-list (e.g. ``"anthropic"`` / ``"anthropic,minimax"``); an EMPTY string
-    means none disabled. When the env is UNSET (``None``), the curated
-    ``_TEMPORARY_DISABLED_PROVIDERS`` baseline is used (anthropic under a quota
-    cap until 2026-07-01). Authoritative-when-set (not merge) so the temporary
-    Anthropic block can be cleared without a code change by setting
-    ``DISABLED_PROVIDERS=`` once the cap resets — see the revert note above.
+    or unset means none disabled. Read at call-time so an env flip takes effect
+    on the next router/gateway call without a rebuild. No hardcoded baseline —
+    the temporary Anthropic quota-cap block was reverted (re-enabled).
     """
     env_dp = settings.routing.routing_disabled_providers
     if env_dp is None:
-        return set(_TEMPORARY_DISABLED_PROVIDERS)
+        return set()
     return {p.strip() for p in env_dp.split(",") if p.strip()}
 
 
@@ -79,17 +55,14 @@ COMPLEXITY_TIER_MAP: dict[TaskComplexity, tuple[ModelTier, str]] = {
     # the gateway applies to whichever fires.
     TaskComplexity.TRIVIAL: (ModelTier.VERY_CHEAP, "qwen3.6-flash"),
     TaskComplexity.SIMPLE: (ModelTier.CHEAP, "deepseek-v4-flash"),
-    # COMPLEX/CRITICAL primary is glm-5.1 (the deferred C3, promoted ahead of
-    # battery-04 curve #5+). glm-5.1 is the stronger cost-effective model (200K
-    # ctx, a stronger planner/tool-caller) but is text-only — glm-4.7
-    # (vision-capable, same MODERATE tier) is glm-5.1's first LIVE
-    # FALLBACK_CHAINS entry (claude-sonnet-4-6 above it is inert while Anthropic
-    # is disabled), so an image-bearing step or a Z.AI hiccup degrades cleanly
-    # to glm-4.7 (the very model this replaces). Pre-C3, execute + the no-node
-    # default were glm-4.7; only plan was glm-5.1 — and a transient Z.AI failure
-    # silently dropped plan to glm-4.7 throughout curve #4 (0 glm-5.1 calls).
-    TaskComplexity.COMPLEX: (ModelTier.MODERATE, "glm-5.1"),
-    TaskComplexity.CRITICAL: (ModelTier.MODERATE, "glm-5.1"),
+    # COMPLEX/CRITICAL primary is glm-5.2 (Track-1 re-baseline; the successor to
+    # the glm-5.1 C3 primary). glm-5.2 is the stronger cost-effective model (1M
+    # ctx, 128K out) and is text-only — glm-5.1 (200K ctx, registered, same
+    # MODERATE tier) is glm-5.2's first FALLBACK_CHAINS entry, then
+    # claude-sonnet-4-6 (now live again — Anthropic re-enabled), so a Z.AI hiccup
+    # or an image-bearing step degrades cleanly to glm-5.1 → sonnet-4-6.
+    TaskComplexity.COMPLEX: (ModelTier.MODERATE, "glm-5.2"),
+    TaskComplexity.CRITICAL: (ModelTier.MODERATE, "glm-5.2"),
 }
 
 # Per-node routing overrides keyed by (TaskComplexity, node_name). A node-aware
@@ -104,19 +77,19 @@ COMPLEXITY_TIER_MAP: dict[TaskComplexity, tuple[ModelTier, str]] = {
 # flagship/Opus/GPT-5 (guardrails).
 NODE_TIER_MAP: dict[tuple[TaskComplexity, str], tuple[ModelTier, str]] = {
     # Planning a complex/critical goal benefits from the strongest cost-effective
-    # planner — glm-5.1 (200K ctx). Its FALLBACK_CHAINS front claude-sonnet-4-6
-    # (inert while anthropic is disabled) then glm-4.7, so the live path is
-    # glm-5.1 → glm-4.7 → deepseek-v4-pro.
-    (TaskComplexity.COMPLEX, "plan"): (ModelTier.MODERATE, "glm-5.1"),
-    (TaskComplexity.CRITICAL, "plan"): (ModelTier.MODERATE, "glm-5.1"),
-    # Execution on complex/critical goals uses glm-5.1 (MODERATE) — the C3 swap
-    # from glm-4.7 (battery-04 curve #5+ re-baseline). glm-5.1 is text-only; its
-    # first LIVE FALLBACK_CHAINS entry is glm-4.7 (vision-capable), so an
-    # image-bearing execute step falls back cleanly. Phase-3 per-step routing
+    # planner — glm-5.2 (1M ctx). Its FALLBACK_CHAINS front glm-5.1 then
+    # claude-sonnet-4-6 (both live now — Anthropic re-enabled), so the live path
+    # is glm-5.2 → glm-5.1 → sonnet-4-6.
+    (TaskComplexity.COMPLEX, "plan"): (ModelTier.MODERATE, "glm-5.2"),
+    (TaskComplexity.CRITICAL, "plan"): (ModelTier.MODERATE, "glm-5.2"),
+    # Execution on complex/critical goals uses glm-5.2 (MODERATE) — the Track-1
+    # re-baseline from glm-5.1. glm-5.2 is text-only; its first FALLBACK_CHAINS
+    # entry is glm-5.1 (200K ctx), then claude-sonnet-4-6, so a Z.AI hiccup or an
+    # image-bearing execute step degrades cleanly. Phase-3 per-step routing
     # keeps trivial/simple steps on the CHEAP tier, so only the genuinely complex
     # steps pay for the MODERATE primary.
-    (TaskComplexity.COMPLEX, "execute"): (ModelTier.MODERATE, "glm-5.1"),
-    (TaskComplexity.CRITICAL, "execute"): (ModelTier.MODERATE, "glm-5.1"),
+    (TaskComplexity.COMPLEX, "execute"): (ModelTier.MODERATE, "glm-5.2"),
+    (TaskComplexity.CRITICAL, "execute"): (ModelTier.MODERATE, "glm-5.2"),
 }
 
 
@@ -124,12 +97,11 @@ NODE_TIER_MAP: dict[tuple[TaskComplexity, str], tuple[ModelTier, str]] = {
 # added without a tier-map entry). Previously this tuple was duplicated as an
 # inline ``.get()`` default at both routing call sites (route / route_diverse),
 # so the two could silently drift. Centralized here as the single source.
-# TEMPORARY (REVERT BY 2026-07-01): primary swapped off claude-haiku-4-5-20251001
-# (Anthropic key quota-capped until 2026-07-01) to its registered CHEAP-tier peer
-# deepseek-v4-flash — same swap rationale as SIMPLE (see comment above). Restore
-# claude-haiku-4-5-20251001 when the cap resets.
-# DEFAULT_COMPLEXITY_TIER: tuple[ModelTier, str] = (ModelTier.CHEAP, "claude-haiku-4-5-20251001")
-DEFAULT_COMPLEXITY_TIER: tuple[ModelTier, str] = (ModelTier.CHEAP, "deepseek-v4-flash")
+# Anthropic re-enabled (Track-1): the CHEAP-tier default is claude-haiku-4-5.
+DEFAULT_COMPLEXITY_TIER: tuple[ModelTier, str] = (
+    ModelTier.CHEAP,
+    "claude-haiku-4-5-20251001",
+)
 
 
 class ModelRouter:
@@ -137,11 +109,10 @@ class ModelRouter:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        # Seed the runtime excluded set from DISABLED_PROVIDERS (env) when set,
-        # else the curated _TEMPORARY_DISABLED_PROVIDERS baseline. Runtime
-        # mark_provider_unhealthy() additions land here too. Consulted by the
-        # absolute-fallback loop in route() (the one path that uses `excluded`,
-        # not _has_provider_key). See _resolved_disabled_providers.
+        # Seed the runtime excluded set from DISABLED_PROVIDERS (env; empty when
+        # unset). Runtime mark_provider_unhealthy() additions land here too.
+        # Consulted by the absolute-fallback loop in route() (the one path that
+        # uses `excluded`, not _has_provider_key). See _resolved_disabled_providers.
         self._exclude_providers: set[str] = _resolved_disabled_providers(settings)
         # Env-overlaid fallback chains (curated + FALLBACK_CHAINS_JSON merge).
         # Resolved ONCE here (not per call) so the gateway hot path does not
@@ -485,22 +456,21 @@ class ModelRouter:
 
     @staticmethod
     def is_provider_disabled(provider: str) -> bool:
-        """Whether a provider is temporarily excluded from all routing.
+        """Whether a provider is excluded from all routing via ``DISABLED_PROVIDERS``.
 
         Mirrors the gate ``_has_provider_key`` applies to router selection, so
         the gateway's budget-fallback search (``_get_cheaper_fallback``) can skip
-        a disabled provider (e.g. anthropic under a quota cap) instead of
-        selecting it as the cheaper model and burning the fallback chain on a 400.
+        a disabled provider instead of selecting it as the cheaper model and
+        burning the fallback chain on a failed call.
         """
         return provider in _resolved_disabled_providers(get_settings())
 
     def _has_provider_key(self, provider: str) -> bool:
         """Check if an API key is available for a provider."""
-        # Report a disabled provider (DISABLED_PROVIDERS env when set, else the
-        # curated _TEMPORARY_DISABLED_PROVIDERS baseline) as key-less so it is
-        # dropped from router primary/chain/diverse selection AND from the
-        # gateway's fallback-chain pre-filter (gateway.py _execute_with_fallback
-        # filters via this method). See _resolved_disabled_providers.
+        # Report a DISABLED_PROVIDERS-listed provider as key-less so it is dropped
+        # from router primary/chain/diverse selection AND from the gateway's
+        # fallback-chain pre-filter (gateway.py _execute_with_fallback filters
+        # via this method). See _resolved_disabled_providers.
         if provider in _resolved_disabled_providers(self._settings):
             return False
         try:

@@ -99,23 +99,30 @@ def _strip_date_suffix(run_id: str) -> str | None:
     (no ``re`` import) — ``rpartition`` splits on the LAST hyphen so a spec id
     containing no hyphen (``battery04_q01``) returns ``None`` untouched.
 
-    Also strips an optional generation tag (``-gen0``/``-gen1``/``-gen2``) that
-    precedes the date suffix: the multi-generation self-improvement curve enqueues
-    each generation under ``{spec_id}-gen{N}-YYYYMMDD`` so a G0/G1/G2 run share a
-    date yet stay isolated. The tag is dropped too so the resolver still maps
-    ``q01-gen0-20260703`` back to ``battery04_q01`` (otherwise eval scoring is
-    silently skipped and the generation curve has no score signal).
+    Also strips the generation/seed tags that precede the date suffix: the
+    multi-generation, multi-seed self-improvement experiment enqueues each run
+    under ``{spec_id}-gen{N}-seed{M}-YYYYMMDD`` (e.g. gen0-seed1-20260713), with
+    earlier conventions using ``-gen{N}-YYYYMMDD`` (gen0-20260712) or just
+    ``-YYYYMMDD``. All such tags are dropped so the resolver still maps
+    ``q01-gen0-seed1-20260713`` back to ``battery04_q01`` (otherwise eval
+    scoring is silently skipped and the curve has no score signal).
     """
     if "-" not in run_id:
         return None
     base, _, tail = run_id.rpartition("-")
     if len(tail) != 8 or not tail.isdigit():
         return None
-    # Drop an optional ``-gen<N>`` generation tag preceding the date suffix.
-    if "-" in base:
+    # Strip any trailing ``-gen<N>`` / ``-seed<M>`` tags preceding the date
+    # suffix. Loop (not a single strip) so gen0-seed1-20260713, gen0-20260712,
+    # and a bare -20260706 all reduce to the spec id regardless of tag order.
+    while "-" in base:
         gbase, _, gtail = base.rpartition("-")
-        if gtail.startswith("gen") and gtail[3:].isdigit():
+        is_gen = gtail.startswith("gen") and gtail[3:].isdigit()
+        is_seed = gtail.startswith("seed") and gtail[4:].isdigit()
+        if is_gen or is_seed:
             base = gbase
+        else:
+            break
     return base if base else None
 
 

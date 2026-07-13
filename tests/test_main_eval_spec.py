@@ -67,6 +67,40 @@ class TestResolveEvalSpecId:
             == "probe_create_tool"
         )
 
+    def test_generation_and_seed_tag_plus_date_strips_to_spec(self) -> None:
+        """Track-1 n=3-seed curve: ``-gen{N}-seed{M}-YYYYMMDD`` must resolve.
+
+        Regression (2026-07-13): the G0-vs-G2 self-improvement experiment
+        enqueues each replicate under ``{spec_id}-gen{N}-seed{M}-YYYYMMDD``
+        (e.g. ``battery04_q01-gen0-seed1-20260713``). The old suffix stripper
+        dropped the date and ONE ``-gen<N>`` tag, leaving ``-seed1`` attached →
+        the spec id never matched → ``_resolve_eval_spec_id`` returned None →
+        the worker silently skipped the golden recomputation/anti-fabrication
+        checks, so G0/G2 were scored on shallow adhoc structural checks only
+        (which cannot catch fabrication). The while-loop fix strips every
+        trailing ``-gen<N>`` / ``-seed<M>`` tag so all three generations ×
+        three seeds map back to their spec and eval scoring fires.
+        """
+        assert (
+            runner._resolve_eval_spec_id("q01-gen0-seed1-20260713")
+            == "battery04_q01"
+        )
+        assert (
+            runner._resolve_eval_spec_id("battery04_q01-gen2-seed3-20260713")
+            == "battery04_q01"
+        )
+        # Seed before generation (defensive — tag order should not matter).
+        assert (
+            runner._resolve_eval_spec_id("battery04_q04-seed2-gen1-20260713")
+            == "battery04_q04"
+        )
+        # NOTE: the resolver receives the RAW run_id (its call site,
+        # ``execute_run`` → ``_resolve_eval_spec_id(run_id)``, passes run_id
+        # before the worker's ``{origin}-`` thread_id prefix is applied — see
+        # ``_thread_id_for_run``). The ``api-``/``cli-`` prefix is stripped only
+        # on the scorer side (``run_metrics._spec_key_from_run_id``) where rows
+        # carry the stored thread_id form; it is intentionally NOT handled here.
+
     def test_non_gen_hyphen_segment_is_preserved(self) -> None:
         """Only a ``-gen<N>`` tag is dropped — a stray hyphen segment is kept.
 

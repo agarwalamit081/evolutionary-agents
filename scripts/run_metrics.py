@@ -66,6 +66,12 @@ from src.db.models import (  # noqa: E402
 )
 from src.db.session import get_session  # noqa: E402
 from src.eval.curve import CapabilityCurve  # noqa: E402
+# Shared run_id → spec-id stripper so the scorer's goal bucketing can NEVER drift
+# from the worker's golden-check resolver (``src.runner._resolve_eval_spec_id``).
+# The Track-1 ``-gen{N}-seed{M}-YYYYMMDD`` suffix already broke the resolver by
+# leaving ``-seed1`` attached; a second copy here would re-break the scorer the
+# same way. Import the single source of truth instead of duplicating the rule.
+from src.runner import _strip_date_suffix as _strip_run_suffix  # noqa: E402
 
 # Selectors are run-id fragments; reject anything that could break a LIKE pattern
 # or inject a metacharacter so the ends-with match is safe.
@@ -276,11 +282,40 @@ def _estimate_verify_passes(rows: list[dict[str, Any]]) -> int:
     return -(-r // n)  # ceil
 
 
+def _spec_key_from_run_id(run_id: str | None) -> str:
+    """Derive a stable goal-bucket key from a run_id (spec id), robust to eval mode.
+
+    The eval_results ``goal_id`` column is only populated with the real spec id
+    when the **golden** recomputation checks fire (``verify.py`` writes
+    ``goal_id=spec.name``); adhoc-only rows all carry ``goal_id="adhoc-deliverables"``
+    regardless of which battery query produced them. Grouping a full battery by
+    that column therefore collapses all N queries into a single ``adhoc`` bucket
+    (``n_goals_ran=1``) whenever golden was skipped — exactly what happened to the
+    Track-1 G0 runs before the resolver was fixed.
+
+    The run_id, by contrast, ALWAYS encodes the spec (``api-battery04_q01-gen0-
+    seed1-20260713``), so bucketing by the spec id recovered from it yields the
+    correct N-goal matrix whether or not golden fired — and aligns a goal across
+    generations in ``generation_compare`` (gen0-seed1's q01 and gen2-seed1's q01
+    both bucket under ``battery04_q01``). Stripping reuses the runner's canonical
+    ``_strip_date_suffix`` so this can never disagree with the resolver.
+    """
+    if not run_id:
+        return ""
+    rid = str(run_id)
+    for prefix in ("api-", "cli-", "bench-"):
+        if rid.startswith(prefix):
+            rid = rid[len(prefix) :]
+            break
+    return _strip_run_suffix(rid) or rid
+
+
 def score_goals(eval_rows: list[dict[str, Any]]) -> ScoreSummary:
     """Terminal-state score per goal (latest attempt → latest row per check → mean).
 
-    Pure transform of eval rows grouped by ``goal_id``; mirrors
-    ``scripts/curve_score.py._goal_score`` exactly via the shared
+    Pure transform of eval rows grouped by the **spec id recovered from each
+    row's run_id** (not the ``goal_id`` column — see ``_spec_key_from_run_id``);
+    mirrors ``scripts/curve_score.py._goal_score`` exactly via the shared
     ``CapabilityCurve._latest_attempt`` / ``_latest_per_check`` methods so a
     self-correcting run that ends all-pass scores 1.0. The battery mean is the
     mean of the per-goal means of goals that have rows (a missing goal is
@@ -288,7 +323,7 @@ def score_goals(eval_rows: list[dict[str, Any]]) -> ScoreSummary:
     """
     by_goal: dict[str, list[dict[str, Any]]] = {}
     for r in eval_rows:
-        by_goal.setdefault(str(r.get("goal_id") or ""), []).append(r)
+        by_goal.setdefault(_spec_key_from_run_id(r.get("run_id")), []).append(r)
 
     per_goal: list[GoalScore] = []
     ran: list[float] = []

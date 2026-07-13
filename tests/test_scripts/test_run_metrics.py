@@ -119,6 +119,54 @@ def test_score_goals_battery_mean_excludes_missing_goals() -> None:
     assert s.battery_mean == pytest.approx(0.75)
 
 
+# ─── _spec_key_from_run_id (Track-1 adhoc-collapse fix) ──────────────────────
+
+
+def test_spec_key_from_run_id_strips_prefix_gen_seed_date() -> None:
+    """Every suffix convention reduces to the spec id (the goal-bucket key)."""
+    assert rm._spec_key_from_run_id("api-battery04_q01-gen0-seed1-20260713") == "battery04_q01"
+    assert rm._spec_key_from_run_id("cli-battery04_q02-gen2-seed3-20260713") == "battery04_q02"
+    assert rm._spec_key_from_run_id("battery04_q01-gen0-20260712") == "battery04_q01"
+    assert rm._spec_key_from_run_id("bench-battery04_q04-20260706") == "battery04_q04"
+    # Non-battery run_ids keep a stable per-run bucket (no false merge).
+    assert rm._spec_key_from_run_id("cli-g1") == "g1"
+    assert rm._spec_key_from_run_id(None) == ""
+    assert rm._spec_key_from_run_id("") == ""
+
+
+def test_score_goals_buckets_adhoc_only_by_run_id_not_goal_id() -> None:
+    """Regression (Track-1, 2026-07-13): adhoc-only rows must not collapse.
+
+    Before the fix, ``score_goals`` grouped by the ``goal_id`` column. Adhoc-only
+    rows all carry ``goal_id="adhoc-deliverables"`` regardless of which battery
+    query produced them, so a full battery of adhoc-only runs collapsed into ONE
+    bucket (``n_goals_ran=1``) and the per-goal matrix lost every query. The
+    Track-1 G0 seed-1 runs hit exactly this — golden checks were silently skipped
+    by the resolver bug, leaving only adhoc rows, so G0 "scored 1.0" on a single
+    collapsed bucket. Bucketing by the spec id recovered from ``run_id`` restores
+    the correct N-goal matrix whether or not golden fired.
+    """
+    rows = [
+        {"goal_id": "adhoc-deliverables",
+         "run_id": "api-battery04_q01-gen0-seed1-20260713", "attempt_id": "A1",
+         "check_name": "c1", "score": 1.0, "created_at": "2026-07-13T00:00:00+00:00"},
+        {"goal_id": "adhoc-deliverables",
+         "run_id": "api-battery04_q02-gen0-seed1-20260713", "attempt_id": "A1",
+         "check_name": "c1", "score": 0.5, "created_at": "2026-07-13T00:00:00+00:00"},
+        {"goal_id": "adhoc-deliverables",
+         "run_id": "api-battery04_q03-gen0-seed1-20260713", "attempt_id": "A1",
+         "check_name": "c1", "score": 0.0, "created_at": "2026-07-13T00:00:00+00:00"},
+    ]
+    s = rm.score_goals(rows)
+    assert s.n_goals_ran == 3  # was 1 before the fix — all collapsed into "adhoc"
+    assert s.battery_mean == pytest.approx(0.5)  # mean(1.0, 0.5, 0.0)
+    assert sorted(g.goal_id for g in s.per_goal) == [
+        "battery04_q01",
+        "battery04_q02",
+        "battery04_q03",
+    ]
+
+
 # ─── verify-pass estimate ────────────────────────────────────────────────────
 
 

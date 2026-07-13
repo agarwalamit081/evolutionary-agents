@@ -186,6 +186,33 @@ class TestSpecToModel:
         # Should get a valid auto-generated UUID, not crash
         assert isinstance(model.id, uuid.UUID)
 
+    def test_spec_to_model_propagates_owner_run_id(self) -> None:
+        """_spec_to_model threads owner_run_id onto the SubAgentModel (Track-1).
+
+        SubAgentPersister.persist passes ``owner_run_id=get_active_run_id()`` at
+        both the new-version and brand-new call sites, so each persisted
+        version row is attributed to the run that spawned it.
+        """
+        spec = SubAgentSpec(
+            name="owner_attr_agent",
+            description="Test owner attribution",
+            goal="test",
+            parent_thread_id="thread-test",
+        )
+        model = _spec_to_model(spec, owner_run_id="attr-run-abc")
+        assert model.owner_run_id == "attr-run-abc"
+
+    def test_spec_to_model_owner_run_id_defaults_none(self) -> None:
+        """_spec_to_model leaves owner_run_id None when not passed (no run)."""
+        spec = SubAgentSpec(
+            name="no_owner_agent",
+            description="Test default owner",
+            goal="test",
+            parent_thread_id="thread-test",
+        )
+        model = _spec_to_model(spec)
+        assert model.owner_run_id is None
+
 
 class TestRollingMetricsSQL:
     """Tests for the _update_rolling_metrics SQL expression.

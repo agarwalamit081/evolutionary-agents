@@ -114,6 +114,70 @@ class TestPersist:
         assert result is None
 
 
+class TestPersistOwnerRunIdAttribution:
+    """Track-1: a NEW tool registration is attributed to the active run via
+    ``owner_run_id`` (the contextvar the worker runner binds). The UPDATE path
+    deliberately keeps ``owner_run_id`` = the original creator, so only the
+    new-registration path is asserted here (the live probe_multi_orchestration
+    run reused code_executor and created no tool, so this is the regression
+    that guards the persist site until a tool-creating Phase-5 run exercises
+    it live)."""
+
+    @pytest.mark.asyncio
+    async def test_owner_run_id_populated_when_contextvar_bound(
+        self,
+        persister: ToolPersister,
+        mock_session: MagicMock,
+    ) -> None:
+        from src.db.models import ToolRegistration
+        from src.tools._paths import set_active_run_id
+
+        # existence-check SELECT returns "no existing tool" → NEW registration
+        existing_result = MagicMock()
+        existing_result.scalar_one_or_none.return_value = None
+        mock_session.execute = AsyncMock(return_value=existing_result)
+
+        set_active_run_id("attr-run-xyz")
+        try:
+            await persister.persist(
+                tool_name="attributed_tool",
+                description="d",
+                input_schema={},
+                handler_code=_VALID_HANDLER,
+            )
+        finally:
+            set_active_run_id(None)
+
+        added = [call.args[0] for call in mock_session.add.call_args_list]
+        assert isinstance(added[0], ToolRegistration)
+        assert added[0].owner_run_id == "attr-run-xyz"
+
+    @pytest.mark.asyncio
+    async def test_owner_run_id_none_when_contextvar_unset(
+        self,
+        persister: ToolPersister,
+        mock_session: MagicMock,
+    ) -> None:
+        from src.db.models import ToolRegistration
+        from src.tools._paths import set_active_run_id
+
+        existing_result = MagicMock()
+        existing_result.scalar_one_or_none.return_value = None
+        mock_session.execute = AsyncMock(return_value=existing_result)
+
+        set_active_run_id(None)  # explicit: no active run (operator/CLI origin)
+        await persister.persist(
+            tool_name="unattributed_tool",
+            description="d",
+            input_schema={},
+            handler_code=_VALID_HANDLER,
+        )
+
+        added = [call.args[0] for call in mock_session.add.call_args_list]
+        assert isinstance(added[0], ToolRegistration)
+        assert added[0].owner_run_id is None
+
+
 # ---------------------------------------------------------------------------
 # load_active_tools() — the cross-run recall path
 # ---------------------------------------------------------------------------

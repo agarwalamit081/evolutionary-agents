@@ -84,7 +84,7 @@ class ResetChannel:
 RESET_CHANNELS: list[ResetChannel] = [
     ResetChannel(
         "prompts",
-        ".turing/evolved/prompts/* (live prompt promotions + current.json)",
+        "evolved prompts (worker named volume + host .turing/evolved/prompts/*)",
         "file_glob",
     ),
     ResetChannel(
@@ -216,8 +216,14 @@ async def _count_generated_active(
 # ─── file + redis ops ────────────────────────────────────────────────────────
 
 
-def _clear_prompt_dir() -> int:
-    """Unlink every file under .turing/evolved/prompts/ (keep the dir). 0 if absent."""
+def _clear_host_prompt_dir() -> int:
+    """Unlink every file under the HOST ``.turing/evolved/prompts/`` (keep the dir).
+
+    Host-run mode (``python main.py``) writes promotions here. Docker mode does
+    NOT — the worker writes to the named volume (see :func:`_worker_prompts_via_exec`).
+    A host-only clear therefore silently misses every promotion the containerized
+    agent ever made. Returns 0 when the dir is absent.
+    """
     if not _PROMPT_DIR.exists():
         return 0
     n = 0
@@ -228,10 +234,72 @@ def _clear_prompt_dir() -> int:
     return n
 
 
-def _count_prompt_dir() -> int:
+def _count_host_prompt_dir() -> int:
     if not _PROMPT_DIR.exists():
         return 0
     return sum(1 for p in _PROMPT_DIR.iterdir() if p.is_file())
+
+
+def _worker_prompts_via_exec(action: str) -> int:
+    """Count or clear the worker container's evolved-prompts dir — the REAL store.
+
+    Promotions live in the named volume ``turing-workspace`` (mounted at
+    ``/home/turing/.turing`` — the worker's resolved ``EVOLVED_HANDLERS_DIR``),
+    NOT on the host filesystem. The path is resolved INSIDE the container from its
+    own env (never interpolated host-side) so it tracks the compose mount. Mirrors
+    :func:`_redis_flushdb`'s ``docker compose exec`` pattern. The shared volume
+    means clearing via one replica clears it for every worker.
+
+    Returns 0 when the worker service is unreachable (host-run mode / stack down),
+    so a containerized reset never crashes on a host-only checkout.
+    """
+    base = '${EVOLVED_HANDLERS_DIR:-/home/turing/.turing/evolved}/prompts'
+    if action == "clear":  # count files first, THEN delete (echo the pre-delete count)
+        script = (
+            f'd={base!s}; '
+            '[ -d "$d" ] && c=$(find "$d" -maxdepth 1 -type f 2>/dev/null | wc -l) || c=0; '
+            'find "$d" -maxdepth 1 -type f -delete 2>/dev/null; echo "$c"'
+        )
+    else:  # count
+        script = (
+            f'd={base!s}; '
+            '[ -d "$d" ] && find "$d" -maxdepth 1 -type f 2>/dev/null | wc -l || echo 0'
+        )
+    proc = subprocess.run(
+        ["docker", "compose", "exec", "-T", "worker", "sh", "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=str(_PROJECT_ROOT),
+        check=False,
+    )
+    if proc.returncode != 0:
+        logger.warning(
+            "worker prompts {} skipped (worker unreachable): {}",
+            action,
+            (proc.stderr or proc.stdout).strip()[:200],
+        )
+        return 0
+    try:
+        return int((proc.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _clear_worker_prompts() -> int:
+    return _worker_prompts_via_exec("clear")
+
+
+def _count_worker_prompts() -> int:
+    return _worker_prompts_via_exec("count")
+
+
+def _clear_prompt_dir() -> int:
+    """Clear BOTH the worker named-volume (real store) and the host dir (host-run)."""
+    return _clear_host_prompt_dir() + _clear_worker_prompts()
+
+
+def _count_prompt_dir() -> int:
+    return _count_host_prompt_dir() + _count_worker_prompts()
 
 
 def _clear_results_subdirs() -> int:

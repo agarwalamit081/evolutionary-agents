@@ -93,8 +93,8 @@ def test_kinds_are_valid() -> None:
 # ─── file-clear path (hermetic via monkeypatch of module paths) ──────────────
 
 
-def test_prompt_dir_clear_and_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Build a fake prompts dir with two files + a subdir (subdir left alone).
+def test_host_prompt_dir_clear_and_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Build a fake HOST prompts dir with two files + a subdir (subdir left alone).
     fake = tmp_path / "prompts"
     fake.mkdir()
     (fake / "execute.abc123.txt").write_text("evolved prompt", encoding="utf-8")
@@ -102,17 +102,74 @@ def test_prompt_dir_clear_and_count(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     (fake / "subdir").mkdir()
 
     monkeypatch.setattr(cs, "_PROMPT_DIR", fake)
-    assert cs._count_prompt_dir() == 2
-    n = cs._clear_prompt_dir()
+    assert cs._count_host_prompt_dir() == 2
+    n = cs._clear_host_prompt_dir()
     assert n == 2
-    assert cs._count_prompt_dir() == 0
+    assert cs._count_host_prompt_dir() == 0
     assert (fake / "subdir").exists()  # dirs untouched
 
 
-def test_prompt_dir_clear_when_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_host_prompt_dir_clear_when_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cs, "_PROMPT_DIR", tmp_path / "nope")
-    assert cs._count_prompt_dir() == 0
-    assert cs._clear_prompt_dir() == 0  # idempotent no-op
+    assert cs._count_host_prompt_dir() == 0
+    assert cs._clear_host_prompt_dir() == 0  # idempotent no-op
+
+
+# ─── worker named-volume clear (the REAL store in docker mode) ───────────────
+# The worker writes promotions to the turing-workspace volume at
+# EVOLVED_HANDLERS_DIR/prompts — NOT to the host filesystem. These tests mock
+# subprocess.run so they NEVER touch a live volume.
+
+
+class _FakeProc:
+    def __init__(self, returncode: int, stdout: str, stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_worker_prompts_count_and_clear_when_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kw: object) -> _FakeProc:
+        seen.append(cmd)
+        return _FakeProc(returncode=0, stdout="2\n")
+
+    monkeypatch.setattr(cs.subprocess, "run", fake_run)
+    assert cs._count_worker_prompts() == 2
+    assert cs._clear_worker_prompts() == 2
+    # Every call targets the worker service (not redis / not host).
+    assert all("exec" in c and "worker" in c for c in seen)
+    # The path is resolved INSIDE the container from its own env, not interpolated host-side.
+    assert all("EVOLVED_HANDLERS_DIR" in c[-1] for c in seen)
+
+
+def test_worker_prompts_unreachable_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Host-run mode / stack down → worker exec fails → return 0, do not raise."""
+    monkeypatch.setattr(
+        cs.subprocess,
+        "run",
+        lambda _cmd, **_kw: _FakeProc(returncode=1, stdout="", stderr="no such service: worker"),
+    )
+    assert cs._count_worker_prompts() == 0
+    assert cs._clear_worker_prompts() == 0
+
+
+def test_worker_prompts_garbage_output_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cs.subprocess, "run", lambda _cmd, **_kw: _FakeProc(returncode=0, stdout="not-a-number\n")
+    )
+    assert cs._count_worker_prompts() == 0
+
+
+def test_prompt_dir_combined_sums_host_and_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The public clear/count funcs clear BOTH stores (host-run + docker volume)."""
+    monkeypatch.setattr(cs, "_clear_host_prompt_dir", lambda: 2)
+    monkeypatch.setattr(cs, "_clear_worker_prompts", lambda: 3)
+    monkeypatch.setattr(cs, "_count_host_prompt_dir", lambda: 2)
+    monkeypatch.setattr(cs, "_count_worker_prompts", lambda: 3)
+    assert cs._clear_prompt_dir() == 5
+    assert cs._count_prompt_dir() == 5
 
 
 def test_results_subdirs_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

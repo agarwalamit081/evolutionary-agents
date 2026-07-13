@@ -206,6 +206,31 @@ def test_llm_span_none_when_under_two_points() -> None:
     assert rm.llm_span([]) is None
 
 
+# ─── aggregate_node_timing (Track-1 per-node attribution) ─────────────────────
+
+
+def test_aggregate_node_timing_per_phase() -> None:
+    rows = [
+        {"phase": "execute", "duration_ms": 1000, "status": "completed"},
+        {"phase": "execute", "duration_ms": 3000, "status": "completed"},
+        {"phase": "verify", "duration_ms": 500, "status": "completed"},
+        {"phase": "reflect", "duration_ms": 0, "status": "failed"},
+    ]
+    nt = rm.aggregate_node_timing(rows)
+    assert nt is not None
+    assert nt.total_ms == 4500
+    by = {n.phase: n for n in nt.by_node}
+    assert by["execute"].calls == 2
+    assert by["execute"].total_ms == 4000
+    assert by["execute"].mean_ms == 2000.0
+    assert by["verify"].calls == 1
+    assert by["reflect"].total_ms == 0
+
+
+def test_aggregate_node_timing_empty_returns_none() -> None:
+    assert rm.aggregate_node_timing([]) is None
+
+
 # ─── selector validation ─────────────────────────────────────────────────────
 
 
@@ -243,11 +268,12 @@ def test_report_to_dict_is_json_serializable() -> None:
         subagents=None,
         created=rm.CreatedSummary(0, 0, None, None),
         global_tool_health=[],
-        attribution_gaps=rm._attribution_gaps(),
+        node_timing=None,
     )
     blob = json.dumps(rm.report_to_dict(report))
     parsed: Any = json.loads(blob)
     assert parsed["selector"] == "20260707"
     assert parsed["cost"]["total_cost_usd"] == pytest.approx(0.001)
     assert parsed["llm_span_seconds"] == 12.0
-    assert len(parsed["attribution_gaps"]) == 3
+    assert parsed["node_timing"] is None  # no execution_steps rows for this run
+    assert "attribution_gaps" not in parsed  # gaps dropped — all attribution direct

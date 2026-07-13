@@ -1193,12 +1193,14 @@ async def _record_tool_metric(
     are observability-only and must never break a tool call.
     """
     try:
+        from src.tools._paths import get_active_run_id
         from src.tools.metrics import ToolMetricsRecorder
 
         await ToolMetricsRecorder().record(
             tool_name,
             success=success,
             empty_output=empty_output,
+            run_id=get_active_run_id(),
             latency_ms=latency_ms,
         )
     except Exception as exc:  # noqa: BLE001 — metrics must never break a tool call

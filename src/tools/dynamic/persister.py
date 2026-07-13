@@ -53,6 +53,7 @@ class ToolPersister:
         try:
             from src.db.models import ToolRegistration, ToolVersion
             from src.db.session import get_session
+            from src.tools._paths import get_active_run_id
 
             async with get_session() as session:
                 # Check if tool already exists (update instead of duplicate)
@@ -125,7 +126,11 @@ class ToolPersister:
                     )
                     return existing.id
 
-                # Create new tool registration
+                # Create new tool registration. owner_run_id attributes the
+                # tool to the run that generated it (Track-1): the active
+                # run_id contextvar, bound by the worker runner for worker-path
+                # runs (None for non-run persists → NULL, the correct value
+                # for operator/CLI-originated tools).
                 registration = ToolRegistration(
                     tool_name=tool_name,
                     tool_type="generated",
@@ -134,6 +139,7 @@ class ToolPersister:
                     is_active=True,
                     capability_embedding=capability_embedding,
                     capability_text=capability_text,
+                    owner_run_id=get_active_run_id(),
                 )
                 session.add(registration)
                 await session.flush()

@@ -13,10 +13,12 @@ back to heuristic behavior.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
+from loguru import logger
 
 from src.config.settings import get_settings
 from src.graph.nodes import (
@@ -73,14 +75,71 @@ def _wrap(
 
     The returned function matches LangGraph's expected signature:
         (state: AgentState) -> dict[str, Any]
+
+    Each wrapped node is timed for attribution (Track-1): the Prometheus
+    histogram is always observed, and when ``tool_metrics_enabled`` is on a
+    lightweight per-node timing row is persisted to ``execution_steps`` (keyed
+    by the active ``run_id``) so ``run_metrics`` can read per-node wall-clock
+    per run. Both are non-fatal — a timing/DB hiccup can never break a node.
     """
+    node_name = node_fn.__name__
 
     async def _wrapped(state: AgentState) -> dict[str, Any]:
-        return await node_fn(state, **deps)
+        start = time.perf_counter()
+        status = "completed"
+        try:
+            return await node_fn(state, **deps)
+        except BaseException:
+            status = "failed"
+            raise
+        finally:
+            elapsed_s = time.perf_counter() - start
+            try:
+                from src.observability.metrics import record_node_duration
+
+                record_node_duration(node_name, elapsed_s)
+            except Exception:  # noqa: BLE001 — metrics must never break a node
+                pass
+            try:
+                if get_settings().agent.tool_metrics_enabled:
+                    await _persist_node_step(node_name, status, int(elapsed_s * 1000))
+            except Exception:  # noqa: BLE001 — timing must never break a node
+                pass
 
     _wrapped.__name__ = node_fn.__name__
     _wrapped.__doc__ = node_fn.__doc__
     return _wrapped
+
+
+async def _persist_node_step(node_name: str, status: str, duration_ms: int) -> None:
+    """Persist one lightweight per-node timing row (Track-1 attribution).
+
+    Revives the dormant ``execution_steps`` table as a per-node wall-clock log
+    keyed by ``run_id`` so ``run_metrics`` can read persisted per-node timing
+    per run (replacing the ``llm_span_seconds`` proxy). ``task_id`` is NULL for
+    these timing-only rows (no ``task_executions`` parent); ``step_number=0``
+    satisfies the NOT-NULL column. Observability-only: any DB error is logged
+    at DEBUG and swallowed (CostTracker-resilience pattern) so timing can never
+    break a node.
+    """
+    try:
+        from src.db.models import ExecutionStep
+        from src.db.session import get_session
+        from src.tools._paths import get_active_run_id
+
+        async with get_session() as session:
+            session.add(
+                ExecutionStep(
+                    task_id=None,
+                    step_number=0,
+                    phase=node_name,
+                    duration_ms=duration_ms,
+                    status=status,
+                    run_id=get_active_run_id(),
+                )
+            )
+    except Exception as exc:  # noqa: BLE001 — timing must never break a node
+        logger.debug("Node-step timing persist skipped for '{}': {}", node_name, exc)
 
 
 def _folding_cfg_from_settings() -> dict[str, Any]:

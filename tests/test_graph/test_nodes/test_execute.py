@@ -20,6 +20,7 @@ from src.graph.nodes.execute import (
     _is_compute_deliverable,
     _is_producing_step,
     _recalled_tool_named_in_step,
+    _record_tool_metric,
     _tool_call_args,
     _write_nudge,
     execute_node,
@@ -1690,3 +1691,53 @@ class TestWriteStepNudge:
         assert result["phase"] == Phase.EXECUTE
         assert result["current_step_index"] == 0
         assert "completed_steps" not in result
+
+
+class TestRecordToolMetricRunIdAttribution:
+    """Track-1 Gap-1: _record_tool_metric threads the active run_id contextvar
+    into ToolMetricsRecorder.record so tool_call_metrics.run_id is populated
+    per-run (NULL when no run is bound — non-run / CLI-originated calls)."""
+
+    @pytest.mark.asyncio
+    async def test_run_id_propagated_when_contextvar_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorded = AsyncMock()
+        monkeypatch.setattr(
+            "src.tools.metrics.ToolMetricsRecorder.record", recorded
+        )
+        token = set_active_run_id("api-battery04_q01-20260713")
+        try:
+            await _record_tool_metric(
+                "code_executor", success=True, empty_output=False, latency_ms=42
+            )
+        finally:
+            set_active_run_id(None)
+            del token
+        recorded.assert_awaited_once_with(
+            "code_executor",
+            success=True,
+            empty_output=False,
+            run_id="api-battery04_q01-20260713",
+            latency_ms=42,
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_id_is_none_when_contextvar_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorded = AsyncMock()
+        monkeypatch.setattr(
+            "src.tools.metrics.ToolMetricsRecorder.record", recorded
+        )
+        set_active_run_id(None)  # no run in play → NULL (non-run / CLI path)
+        await _record_tool_metric(
+            "web_search", success=False, empty_output=True, latency_ms=10
+        )
+        recorded.assert_awaited_once_with(
+            "web_search",
+            success=False,
+            empty_output=True,
+            run_id=None,
+            latency_ms=10,
+        )

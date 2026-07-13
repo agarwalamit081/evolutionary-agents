@@ -94,9 +94,13 @@ class ExecutionStep(Base):
     __tablename__ = "execution_steps"
 
     id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
-    task_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("task_executions.id", ondelete="CASCADE"), nullable=False
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("task_executions.id", ondelete="CASCADE"), nullable=True
     )
+    # Track-1 per-node timing attribution. NULL on legacy task-execution rows;
+    # populated by the graph _wrap node-timer (timing-only rows carrying no
+    # task_executions parent). run_metrics keys off this for per-node wall-clock.
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     step_number: Mapped[int] = mapped_column(Integer, nullable=False)
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     tool_name: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -537,6 +541,10 @@ class ToolRegistration(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    # Run that registered/generated this tool (Track-1 attribution). NULL for
+    # built-ins + pre-migration rows; populated for generated tools at persist
+    # time via the active run_id contextvar (get_active_run_id).
+    owner_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Capability embedding for semantic dedup/consolidation (B3). Nullable:
     # rows created before this migration, or while no embedding API key is
@@ -696,6 +704,10 @@ class SubAgentModel(Base):
     source_mutation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("mutations.id"), nullable=True
     )
+    # Run that spawned this sub-agent (Track-1 attribution). NULL for
+    # pre-migration rows; populated at persist time via the active run_id
+    # contextvar (get_active_run_id).
+    owner_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Capability embedding for semantic dedup/consolidation (B3). See
     # ``ToolRegistration.capability_embedding`` for the nullable rationale.
     capability_embedding: Mapped[Vector] = mapped_column(Vector(768), nullable=True)

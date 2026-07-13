@@ -15,15 +15,19 @@ Run ids are stored in their thread-id form (``api-battery04_q01-20260707``,
 as ``scripts/curve_score.py`` (latest attempt → latest row per check → mean;
 self-correction is not penalized).
 
-**Attribution reality (grounded against the live DB):**
-- cost_ledger.run_id, eval_results.run_id, sub_agent_runs.parent_thread_id are
-  populated → tokens/cost/models/score/subagents/LLM-span/cache are per-run.
-- tool_call_metrics.run_id is **not populated** → tool *usage* is reported as a
-  GLOBAL health section, not per-run (flagged in ``attribution_gaps``).
-- task_executions / execution_steps are **empty** → no per-node timing is
-  persisted; per-node latency lives in Prometheus only (Track B backend).
-- tools/subagents **created** carry no run_id → attributed by the run's
-  ``created_at`` window joined to ``mutations.created_at`` (generation scope).
+**Attribution (Track-1: all per-run, direct — no fuzzy time-window joins):**
+- cost_ledger.run_id, eval_results.run_id, sub_agent_runs.parent_thread_id,
+  tool_call_metrics.run_id, execution_steps.run_id, tool_registrations.
+  owner_run_id, sub_agent_definitions.owner_run_id are ALL populated → every
+  metric here is attributed directly to the run.
+- tool *usage* is per-run (``tool_call_metrics.run_id``, populated by the
+  execute node's ``_record_tool_metric`` via the active run_id contextvar).
+- per-node wall-clock is per-run (``execution_steps.run_id``, written by the
+  graph ``_wrap`` node-timer) → reported as a ``node_timing`` breakdown.
+- tools/subagents **created** are attributed by ``owner_run_id`` (the run that
+  generated them at persist time), not by a created_at window.
+- ``llm_span_seconds`` stays the LLM-call wall-clock span (cost-ledger
+  created_at spread) — complementary to per-node timing, not a proxy for it.
 
 Read-only (no writes). Connects via the app's ``DATABASE_URL``.
 
@@ -41,7 +45,7 @@ import asyncio
 import json
 import re
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +58,7 @@ from sqlalchemy import select  # noqa: E402
 from src.db.models import (  # noqa: E402
     CostLedger,
     EvalResult,
+    ExecutionStep,
     SubAgentModel,
     SubAgentRunModel,
     ToolCallMetric,
@@ -126,6 +131,28 @@ class SubagentSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeTimingRow:
+    """One graph node's per-run wall-clock (from ``execution_steps``)."""
+
+    phase: str
+    calls: int
+    total_ms: int
+    mean_ms: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class NodeTimingSummary:
+    """Per-node wall-clock breakdown for a run (``execution_steps``, keyed by run_id).
+
+    Replaces the prior ``execution_steps is empty`` attribution gap: the graph
+    ``_wrap`` node-timer now persists one timing row per node invocation.
+    """
+
+    by_node: list[NodeTimingRow]
+    total_ms: int  # sum of every node duration (excludes inter-node gaps)
+
+
+@dataclass(frozen=True, slots=True)
 class CreatedSummary:
     """Tools/subagents attributed to the run by ``created_at`` window."""
 
@@ -137,8 +164,8 @@ class CreatedSummary:
 
 @dataclass(frozen=True, slots=True)
 class ToolHealthRow:
-    """GLOBAL tool success/empty/latency (NOT per-run — tool_call_metrics.run_id
-    is unpopulated). Included so the analyst still sees tool reliability."""
+    """Per-run tool success/empty/latency (``tool_call_metrics.run_id`` is now
+    populated by the execute node's metric recorder via the active run_id)."""
 
     tool_name: str
     calls: int
@@ -158,7 +185,7 @@ class RunMetricsReport:
     subagents: SubagentSummary | None
     created: CreatedSummary
     global_tool_health: list[ToolHealthRow]
-    attribution_gaps: list[str] = field(default_factory=list)
+    node_timing: NodeTimingSummary | None = None
 
 
 def aggregate_cost(rows: list[dict[str, Any]]) -> CostSummary:
@@ -315,7 +342,8 @@ def aggregate_subagents(rows: list[dict[str, Any]]) -> SubagentSummary:
 
 
 def aggregate_tool_health(rows: list[dict[str, Any]]) -> list[ToolHealthRow]:
-    """GLOBAL per-tool success/empty/latency (tool_call_metrics is not run-attributed)."""
+    """Per-run per-tool success/empty/latency (rows are already run-scoped via
+    ``tool_call_metrics.run_id``)."""
     buckets: dict[str, dict[str, Any]] = {}
     for r in rows:
         name = str(r.get("tool_name") or "")
@@ -375,6 +403,39 @@ def llm_span(rows: list[dict[str, Any]]) -> float | None:
         return None
     delta = max(times) - min(times)
     return round(delta.total_seconds(), 1)
+
+
+def aggregate_node_timing(rows: list[dict[str, Any]]) -> NodeTimingSummary | None:
+    """Per-node wall-clock roll-up from ``execution_steps`` timing rows.
+
+    Pure: takes already-fetched dict rows (``phase``, ``duration_ms``) so it is
+    unit-tested with a fixture list. Groups by node phase → calls, total_ms,
+    mean_ms. Returns None when there are no rows (the run produced no timing).
+    """
+    if not rows:
+        return None
+    buckets: dict[str, dict[str, Any]] = {}
+    total = 0
+    for r in rows:
+        phase = str(r.get("phase") or "")
+        ms = int(r.get("duration_ms") or 0)
+        b = buckets.setdefault(phase, {"calls": 0, "total": 0})
+        b["calls"] += 1
+        b["total"] += ms
+        total += ms
+    by_node: list[NodeTimingRow] = []
+    for phase, b in sorted(buckets.items()):
+        calls = int(b["calls"])
+        t = int(b["total"])
+        by_node.append(
+            NodeTimingRow(
+                phase=phase,
+                calls=calls,
+                total_ms=t,
+                mean_ms=round(t / calls, 1) if calls else None,
+            )
+        )
+    return NodeTimingSummary(by_node=by_node, total_ms=total)
 
 
 # ─── thin DB fetch layer (dict rows → pure core) ──────────────────────────────
@@ -464,8 +525,8 @@ async def fetch_subagent_rows(selector: str) -> list[dict[str, Any]]:
     ]
 
 
-async def fetch_global_tool_metrics(limit: int = 5000) -> list[dict[str, Any]]:
-    """All recent tool_call_metrics rows (GLOBAL — not run-attributed)."""
+async def fetch_tool_metrics(selector: str) -> list[dict[str, Any]]:
+    """Per-run tool_call_metrics rows (run-attributed via ``run_id`` ends-with)."""
     async with get_session() as session:
         rows = (
             await session.execute(
@@ -474,8 +535,7 @@ async def fetch_global_tool_metrics(limit: int = 5000) -> list[dict[str, Any]]:
                     ToolCallMetric.success,
                     ToolCallMetric.empty_output,
                     ToolCallMetric.latency_ms,
-                ).order_by(ToolCallMetric.created_at.desc())
-                .limit(limit)
+                ).where(_endswith_clause(ToolCallMetric.run_id, selector))
             )
         ).all()
     return [
@@ -489,34 +549,77 @@ async def fetch_global_tool_metrics(limit: int = 5000) -> list[dict[str, Any]]:
     ]
 
 
-async def fetch_created_in_window(
-    window_start: Any | None, window_end: Any | None
+async def fetch_node_timing(selector: str) -> list[dict[str, Any]]:
+    """Per-run execution_steps timing rows (phase, duration_ms, status).
+
+    ``execution_steps.run_id`` is written by the graph ``_wrap`` node-timer;
+    timing-only rows carry ``task_id IS NULL``. ``status`` is kept so callers can
+    see failed-node counts if needed.
+    """
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                select(
+                    ExecutionStep.phase,
+                    ExecutionStep.duration_ms,
+                    ExecutionStep.status,
+                ).where(_endswith_clause(ExecutionStep.run_id, selector))
+            )
+        ).all()
+    return [
+        {"phase": r.phase, "duration_ms": r.duration_ms, "status": r.status}
+        for r in rows
+    ]
+
+
+async def fetch_created_by_owner(
+    selector: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Generated tools/subagents whose created_at falls in the run's window."""
-    if window_start is None or window_end is None:
-        return [], []
-    tool_q = select(ToolRegistration.tool_name, ToolRegistration.source_mutation_id).where(
-        ToolRegistration.created_at.between(window_start, window_end)
-    )
-    sub_q = select(SubAgentModel.name, SubAgentModel.source_mutation_id).where(
-        SubAgentModel.created_at.between(window_start, window_end)
-    )
+    """Generated tools/subagents attributed directly to the run via ``owner_run_id``.
+
+    Replaces the prior fuzzy created_at-window join (which smeared attribution
+    across concurrent/adjacent runs). ``owner_run_id`` is populated at persist
+    time from the active run_id contextvar, so this is exact per-run attribution.
+    """
+    tool_q = select(
+        ToolRegistration.tool_name,
+        ToolRegistration.source_mutation_id,
+        ToolRegistration.created_at,
+    ).where(_endswith_clause(ToolRegistration.owner_run_id, selector))
+    sub_q = select(
+        SubAgentModel.name,
+        SubAgentModel.source_mutation_id,
+        SubAgentModel.created_at,
+    ).where(_endswith_clause(SubAgentModel.owner_run_id, selector))
     async with get_session() as session:
         tools = (await session.execute(tool_q)).all()
         subs = (await session.execute(sub_q)).all()
     return (
-        [{"source_mutation_id": t.source_mutation_id} for t in tools],
-        [{"source_mutation_id": s.source_mutation_id} for s in subs],
+        [
+            {
+                "source_mutation_id": t.source_mutation_id,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+            }
+            for t in tools
+        ],
+        [
+            {
+                "source_mutation_id": s.source_mutation_id,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+            for s in subs
+        ],
     )
 
 
 async def build_report(selector: str) -> RunMetricsReport:
     """Compose the full report for one endswith selector."""
-    cost_rows, eval_rows, sub_rows, tool_rows = await asyncio.gather(
+    cost_rows, eval_rows, sub_rows, tool_rows, node_rows = await asyncio.gather(
         fetch_cost_rows(selector),
         fetch_eval_rows(selector),
         fetch_subagent_rows(selector),
-        fetch_global_tool_metrics(),
+        fetch_tool_metrics(selector),
+        fetch_node_timing(selector),
     )
 
     matched = sorted({str(r["run_id"]) for r in cost_rows if r.get("run_id")})
@@ -526,11 +629,8 @@ async def build_report(selector: str) -> RunMetricsReport:
     sub_summary = aggregate_subagents(sub_rows) if sub_rows else None
     span = llm_span(cost_rows)
 
-    # Attribute created tools/subagents to the run's time window.
-    starts = [r["_created_dt"] for r in cost_rows if r.get("_created_dt")]
-    window_start = min(starts) if starts else None
-    window_end = max(starts) if starts else None
-    created_tools, created_subs = await fetch_created_in_window(window_start, window_end)
+    # Attribute created tools/subagents directly via owner_run_id (exact per-run).
+    created_tools, created_subs = await fetch_created_by_owner(selector)
     created = count_created(created_tools, created_subs)
 
     report = RunMetricsReport(
@@ -542,21 +642,9 @@ async def build_report(selector: str) -> RunMetricsReport:
         subagents=sub_summary,
         created=created,
         global_tool_health=aggregate_tool_health(tool_rows),
-        attribution_gaps=_attribution_gaps(),
+        node_timing=aggregate_node_timing(node_rows),
     )
     return report
-
-
-def _attribution_gaps() -> list[str]:
-    """The known per-run attribution limits (documented, not silently dropped)."""
-    return [
-        "tool_call_metrics.run_id is unpopulated → tool usage reported globally, "
-        "not per-run",
-        "task_executions / execution_steps are empty → no per-node timing "
-        "persisted (Prometheus-only; Track B backend)",
-        "tools/subagents carry no run_id → 'created' attributed by run time-window "
-        "(generation scope, fuzzy at boundaries)",
-    ]
 
 
 # ─── rendering ────────────────────────────────────────────────────────────────
@@ -573,7 +661,7 @@ def report_to_dict(report: RunMetricsReport) -> dict[str, Any]:
         "subagents": asdict(report.subagents) if report.subagents else None,
         "created": asdict(report.created),
         "global_tool_health": [asdict(r) for r in report.global_tool_health],
-        "attribution_gaps": report.attribution_gaps,
+        "node_timing": asdict(report.node_timing) if report.node_timing else None,
     }
     return d
 
@@ -618,15 +706,19 @@ def render_table(report: RunMetricsReport) -> None:
 
     if report.global_tool_health:
         top = sorted(report.global_tool_health, key=lambda t: -t.calls)[:8]
-        print("\n  GLOBAL TOOL HEALTH (not per-run):")
+        print("\n  TOOL HEALTH (per-run):")
         for t in top:
             print(f"          {t.tool_name:<28} calls={t.calls:<5} "
                   f"success={t.success_rate:.2%} empty={t.empty_output_count} "
                   f"lat={t.mean_latency_ms}")
 
-    print("\n  ATTRIBUTION GAPS:")
-    for gap in report.attribution_gaps:
-        print(f"          • {gap}")
+    if report.node_timing:
+        nt = report.node_timing
+        top = sorted(nt.by_node, key=lambda n: -n.total_ms)[:10]
+        print(f"\n  NODE TIMING  total={nt.total_ms}ms across {len(nt.by_node)} node(s)")
+        for n in top:
+            print(f"          {n.phase:<24} calls={n.calls:<4} "
+                  f"total={n.total_ms}ms mean={n.mean_ms}ms")
     print()
 
 

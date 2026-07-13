@@ -52,6 +52,7 @@ class SubAgentPersister:
 
             from src.db.models import SubAgentModel
             from src.db.session import get_session
+            from src.tools._paths import get_active_run_id
 
             async with get_session() as session:
                 # Check for existing agent with same name
@@ -80,6 +81,7 @@ class SubAgentPersister:
                         version=new_version,
                         capability_embedding=capability_embedding,
                         capability_text=capability_text,
+                        owner_run_id=get_active_run_id(),
                     )
                     session.add(model)
                     await session.flush()
@@ -96,6 +98,7 @@ class SubAgentPersister:
                     version=1,
                     capability_embedding=capability_embedding,
                     capability_text=capability_text,
+                    owner_run_id=get_active_run_id(),
                 )
                 session.add(model)
                 await session.flush()
@@ -568,6 +571,7 @@ def _spec_to_model(
     version: int = 1,
     capability_embedding: list[float] | None = None,
     capability_text: str | None = None,
+    owner_run_id: str | None = None,
 ) -> Any:
     """Convert a SubAgentSpec to a SubAgentModel ORM instance."""
     import uuid as _uuid
@@ -602,6 +606,7 @@ def _spec_to_model(
         version=version,
         capability_embedding=capability_embedding,
         capability_text=capability_text,
+        owner_run_id=owner_run_id,
         total_runs=spec.total_runs,
         success_count=int(spec.success_rate * spec.total_runs),
         success_rate=spec.success_rate,

@@ -62,7 +62,6 @@ class CostTracker:
         provider: str,
         input_tokens: int,
         output_tokens: int,
-        task_id: str | None = None,
         latency_ms: int | None = None,
         run_id: str | None = None,
         cached_tokens: int = 0,
@@ -74,7 +73,6 @@ class CostTracker:
             provider: The provider name.
             input_tokens: Number of input tokens consumed.
             output_tokens: Number of output tokens generated.
-            task_id: Optional task execution ID for correlation.
             latency_ms: Optional request latency in milliseconds.
             run_id: Optional per-run correlation key — the graph ``thread_id`` of
                 the run that issued the call. Enables per-run cost attribution
@@ -100,7 +98,6 @@ class CostTracker:
             output_tokens=output_tokens,
             total_tokens=input_tokens + output_tokens,
             cost_usd=cost_usd,
-            task_id=task_id,
             latency_ms=latency_ms,
             run_id=run_id,
             cached_tokens=cached_tokens,

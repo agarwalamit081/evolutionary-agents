@@ -2,14 +2,7 @@
 
 from __future__ import annotations
 
-from src.db.models import ColdMemory, CostLedger, ExecutionStep, TaskExecution, WarmMemory
-
-
-class TestTaskExecution:
-    """Tests for TaskExecution model defaults."""
-
-    def test_table_name(self) -> None:
-        assert TaskExecution.__tablename__ == "task_executions"
+from src.db.models import ColdMemory, CostLedger, ExecutionStep, WarmMemory
 
 
 class TestExecutionStep:

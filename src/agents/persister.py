@@ -448,7 +448,6 @@ class SubAgentPersister:
         self,
         sub_agent_id: uuid.UUID,
         run_result: dict[str, Any],
-        parent_task_id: uuid.UUID | None = None,
         parent_thread_id: str = "",
     ) -> uuid.UUID | None:
         """Record a sub-agent execution run and recalculate rolling metrics.
@@ -457,7 +456,6 @@ class SubAgentPersister:
             sub_agent_id: UUID of the SubAgentModel.
             run_result: Dict with 'success', 'result', 'tokens_used',
                 'cost_usd', 'latency_ms', 'iterations', 'errors'.
-            parent_task_id: Optional parent TaskExecution ID.
             parent_thread_id: Parent's thread ID for tracking.
 
         Returns:
@@ -476,7 +474,6 @@ class SubAgentPersister:
                 now = _utcnow()
                 run = SubAgentRunModel(
                     sub_agent_id=sub_agent_id,
-                    parent_task_id=parent_task_id,
                     parent_thread_id=parent_thread_id,
                     goal_text=run_result.get("goal", ""),
                     result_summary=run_result.get("result", "")[:2000],

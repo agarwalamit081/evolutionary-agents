@@ -130,7 +130,6 @@ async def _persist_node_step(node_name: str, status: str, duration_ms: int) -> N
         async with get_session() as session:
             session.add(
                 ExecutionStep(
-                    task_id=None,
                     step_number=0,
                     phase=node_name,
                     duration_ms=duration_ms,

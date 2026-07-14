@@ -192,7 +192,6 @@ class TestRecordUsage:
                 provider="deepseek",
                 input_tokens=200,
                 output_tokens=100,
-                task_id="task-uuid-123",
                 latency_ms=1500,
             )
 
@@ -203,7 +202,6 @@ class TestRecordUsage:
         assert call_kwargs["input_tokens"] == 200
         assert call_kwargs["output_tokens"] == 100
         assert call_kwargs["cost_usd"] > 0
-        assert call_kwargs["task_id"] == "task-uuid-123"
         assert call_kwargs["latency_ms"] == 1500
 
     @pytest.mark.asyncio
@@ -250,7 +248,7 @@ class TestRecordUsage:
     async def test_optional_fields_default_to_none(
         self, mock_session: MagicMock, mock_settings: MagicMock
     ) -> None:
-        """task_id and latency_ms should be None when not provided."""
+        """latency_ms should be None when not provided."""
         with patch("src.llm.cost_tracker.CostLedger") as mock_ledger_cls:
             tracker = CostTracker(session=mock_session, settings=mock_settings)
             await tracker.record_usage(
@@ -261,7 +259,6 @@ class TestRecordUsage:
             )
 
         call_kwargs = mock_ledger_cls.call_args[1]
-        assert call_kwargs["task_id"] is None
         assert call_kwargs["latency_ms"] is None
 
     @pytest.mark.asyncio

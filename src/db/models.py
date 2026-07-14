@@ -13,7 +13,6 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
-    SmallInteger,
     Text,
     UniqueConstraint,
     text,
@@ -38,68 +37,14 @@ def _utcnow() -> dt.datetime:
 # =============================================================================
 
 
-class TaskExecution(Base):
-    """Main task records with goal, strategy, complexity, costs, and status."""
-
-    __tablename__ = "task_executions"
-
-    id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
-    goal_text: Mapped[str] = mapped_column(Text, nullable=False)
-    goal_priority: Mapped[int] = mapped_column(
-        SmallInteger, nullable=False, default=5
-    )
-    strategy: Mapped[str] = mapped_column(Text, nullable=False, default="react")
-    complexity: Mapped[str] = mapped_column(Text, nullable=False, default="simple")
-    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
-    model_used: Mapped[str | None] = mapped_column(Text, nullable=True)
-    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_cost_usd: Mapped[float] = mapped_column(
-        Numeric(10, 6), nullable=False, default=0
-    )
-    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
-    completed_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    extra_data: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-
-    # Relationships
-    execution_steps: Mapped[list[ExecutionStep]] = relationship(
-        back_populates="task_execution", cascade="all, delete-orphan"
-    )
-    feedback_events: Mapped[list[FeedbackEvent]] = relationship(
-        back_populates="task_execution", cascade="all, delete-orphan"
-    )
-    warm_memories: Mapped[list[WarmMemory]] = relationship(back_populates="source_task")
-    cost_ledger_entries: Mapped[list[CostLedger]] = relationship(
-        back_populates="task_execution"
-    )
-
-    # Indexes
-    __table_args__ = (
-        CheckConstraint("goal_priority BETWEEN 1 AND 10", name="check_goal_priority_range"),
-        Index("idx_task_executions_thread", "thread_id"),
-        Index("idx_task_executions_created", "created_at"),
-        Index("idx_task_executions_status", "status"),
-    )
-
-
 class ExecutionStep(Base):
     """Individual execution phases with tool calls, results, and status."""
 
     __tablename__ = "execution_steps"
 
     id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
-    task_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("task_executions.id", ondelete="CASCADE"), nullable=True
-    )
-    # Track-1 per-node timing attribution. NULL on legacy task-execution rows;
-    # populated by the graph _wrap node-timer (timing-only rows carrying no
-    # task_executions parent). run_metrics keys off this for per-node wall-clock.
+    # Track-1 per-node timing attribution. Populated by the graph _wrap
+    # node-timer; run_metrics keys off this for per-node wall-clock.
     run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     step_number: Mapped[int] = mapped_column(Integer, nullable=False)
     phase: Mapped[str] = mapped_column(Text, nullable=False)
@@ -114,50 +59,9 @@ class ExecutionStep(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
-    # Relationships
-    task_execution: Mapped[TaskExecution] = relationship(back_populates="execution_steps")
-    feedback_events: Mapped[list[FeedbackEvent]] = relationship(
-        back_populates="execution_step"
-    )
-
     # Indexes
     __table_args__ = (
-        Index("idx_execution_steps_task_number", "task_id", "step_number"),
         Index("idx_execution_steps_phase", "phase"),
-        Index("idx_execution_steps_failed", "task_id", postgresql_where="status = 'failed'"),
-    )
-
-
-class FeedbackEvent(Base):
-    """Human feedback and quality ratings for tasks and steps."""
-
-    __tablename__ = "feedback_events"
-
-    id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
-    task_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("task_executions.id", ondelete="CASCADE"), nullable=False
-    )
-    step_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("execution_steps.id"), nullable=True
-    )
-    event_type: Mapped[str] = mapped_column(Text, nullable=False)
-    rating: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
-    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=_utcnow
-    )
-
-    # Relationships
-    task_execution: Mapped[TaskExecution] = relationship(back_populates="feedback_events")
-    execution_step: Mapped[ExecutionStep | None] = relationship(
-        back_populates="feedback_events"
-    )
-
-    # Indexes
-    __table_args__ = (
-        CheckConstraint("rating BETWEEN 1 AND 5", name="check_rating_range"),
-        Index("idx_feedback_events_task", "task_id", "created_at"),
-        Index("idx_feedback_events_type", "event_type"),
     )
 
 
@@ -175,9 +79,6 @@ class WarmMemory(Base):
     memory_type: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    source_task_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("task_executions.id"), nullable=True
-    )
     fitness_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
     access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_accessed: Mapped[dt.datetime | None] = mapped_column(
@@ -201,7 +102,6 @@ class WarmMemory(Base):
     )
 
     # Relationships
-    source_task: Mapped[TaskExecution | None] = relationship(back_populates="warm_memories")
     memory_embeddings: Mapped[list[MemoryEmbedding]] = relationship(
         back_populates="warm_memory", cascade="all, delete-orphan"
     )
@@ -764,9 +664,6 @@ class SubAgentRunModel(Base):
         ForeignKey("sub_agent_definitions.id", ondelete="CASCADE"),
         nullable=False,
     )
-    parent_task_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("task_executions.id"), nullable=True
-    )
     parent_thread_id: Mapped[str] = mapped_column(Text, nullable=False)
 
     # ── Input/Output ─────────────────────────────────────────────────────
@@ -904,20 +801,16 @@ class EntityRelation(Base):
 
 
 class CostLedger(Base):
-    """Per-request token counts and costs with provider, model, task_id."""
+    """Per-request token counts and costs with provider, model, run_id."""
 
     __tablename__ = "cost_ledger"
 
     id: Mapped[uuid.UUID] = mapped_column(default=uuid.uuid4, primary_key=True)
-    task_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("task_executions.id"), nullable=True
-    )
     # Per-run correlation key — the graph ``thread_id`` of the run that issued
     # the call (``cli-{run_id}`` for a ``--run-id`` run, else ``cli-{pid}-{obj}``
-    # so even a run with no explicit id is attributable to one process). Unlike
-    # ``task_id`` (a UUID FK into task_executions, which the agent never
-    # populates), ``run_id`` is a free Text column that always carries the run
-    # identifier, enabling per-run cost attribution via get_run_spend/runs_summary.
+    # so even a run with no explicit id is attributable to one process).
+    # ``run_id`` always carries the run identifier, enabling per-run cost
+    # attribution via get_run_spend/runs_summary.
     run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
@@ -931,14 +824,8 @@ class CostLedger(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
-    # Relationships
-    task_execution: Mapped[TaskExecution | None] = relationship(
-        back_populates="cost_ledger_entries"
-    )
-
     # Indexes
     __table_args__ = (
-        Index("idx_cost_ledger_task", "task_id", "created_at"),
         Index("idx_cost_ledger_run", "run_id", "created_at"),
         Index("idx_cost_ledger_provider", "provider", "model", "created_at"),
         Index("idx_cost_ledger_date", "created_at"),

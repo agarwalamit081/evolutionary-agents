@@ -254,6 +254,36 @@ can't gate multi-goal quality; that canary-coverage gap is the next lever. Verdi
 one on efficiency and on at least one failer's score, and recovers regressions rather than
 compounding them.
 
+#### n=3 multi-seed confirmation (2026-07-14, Track-1 stack)
+
+A separate, stronger test of the same thesis on a different stack: `glm-5.2` primary +
+Anthropic **on**, the Track-1 attribution/multi-goal-canary apparatus (`probe_analytics_recall`
++ `probe_multi_orchestration`, `passed=False→0.0` strict gate). Three independent seeds, each
+G0 (channel-B off) → G2 (channel-B on, inherits G0's channel-A tools/skills), 8-goal matched
+primary (q09's `iqr_outlier_detector` retired):
+
+| Seed | G0 | G2 | Δ |
+|------|-------|-------|--------|
+| seed-2 | 0.7304 | 1.0000 | +0.270 |
+| seed-3 | 0.7471 | 0.9019 | +0.155 |
+| seed-1 | 0.9038 | 0.8259 | −0.078 |
+| **mean Δ** | | | **+0.116** |
+
+2/3 seeds improved under evolution; seed-1 (the strongest baseline) regressed −0.078.
+Root-caused: seed-1's regression is **not** a quality counter-example. q06 `budget_exhausted`
+in *both* gens — G0 hit the cumulative token cap @1.52M and produced a partial deliverable
+(→0.356); G2 hit the per-attempt cost cap @$1.20 @iter 58 and produced nothing (→0.000),
+because its evolution/reflection/re-planning overhead (+24 LLM calls, +74% output tokens,
+−42% prompt-cache reuse, heavier model mix) hit the $ ceiling at only 1.21M tokens.
+Decomposition of seed-1's −0.078: q06 −0.044 (57%, a budget-infeasible never-converges goal)
++ q01/q05 −0.033 (43%, within run-to-run variance). q06 is the highest-variance goal in the
+battery (0.0–0.87 across 22 historical runs; it *improved* 0.078→0.733 under evolution in
+seed-3) — non-informative in both directions. The verdict rule requires seed-1 G2>G0 → **fails
+→ NOT clean/unanimous PROVEN**. The multi-seed test therefore **confirms** the single-seed
+Phase-2 verdict (RECOVERY + qualified-yes) rather than upgrading it: self-improvement is
+weakly-positive-qualified across seeds, not cleanly proven. (Per-run `$1.2` / `1.5M`-token
+caps held fixed; see `logs/n3_baseline_seed2_seed3.md`.)
+
 ---
 
 ## License

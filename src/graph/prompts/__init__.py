@@ -36,6 +36,10 @@ CLASSIFY_USER = PromptTemplate("classify_user")
 DISAMBIGUATE_SYSTEM = PromptTemplate("disambiguate_system")
 DISAMBIGUATE_USER = PromptTemplate("disambiguate_user")
 
+# ── Multi-hop Research Loop (Phase 5a) ─────────────────────────────────
+RESEARCH_SYSTEM = PromptTemplate("research_system")
+RESEARCH_USER = PromptTemplate("research_user")
+
 # ── Planning ───────────────────────────────────────────────────────────
 PLAN_SYSTEM = PromptTemplate("plan_system")
 PLAN_USER = PromptTemplate("plan_user")
@@ -88,6 +92,8 @@ __all__ = [
     "CLASSIFY_USER",
     "DISAMBIGUATE_SYSTEM",
     "DISAMBIGUATE_USER",
+    "RESEARCH_SYSTEM",
+    "RESEARCH_USER",
     "PLAN_SYSTEM",
     "PLAN_USER",
     "EXECUTE_SYSTEM",

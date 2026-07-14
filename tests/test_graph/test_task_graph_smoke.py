@@ -31,13 +31,14 @@ from src.graph.nodes import classify_node, verify_node
 from src.graph.state import AgentState
 from src.graph.task_graph import build_task_graph, compile_task_graph
 
-# The full set of nodes ``build_task_graph`` registers (17). Updating this set
+# The full set of nodes ``build_task_graph`` registers (18). Updating this set
 # is the point — it fails loudly on accidental add/remove of a graph node.
 _EXPECTED_NODES: set[str] = {
     "classify",
     "disambiguate",
     "plan",
     "retrieve_memory",
+    "research",
     "structure_analysis",
     "execute",
     "reflect",
@@ -58,7 +59,7 @@ _EXPECTED_NODES: set[str] = {
 _ROUTING_TARGETS: set[str] = {
     "plan", "disambiguate", "agent_spawn", "tool_create", "execute",
     "error_handler", "reflect", "verify", "lats_search", "delegate",
-    "store_memory", "evolve", "hitl_gate", "classify",
+    "store_memory", "evolve", "hitl_gate", "classify", "research",
 }
 
 
@@ -112,7 +113,7 @@ class TestTaskGraphTopology:
     """Static topology invariants — no execution, fast."""
 
     def test_full_node_set_exact(self) -> None:
-        """All 17 declared nodes are present, none missing, none extra."""
+        """All 18 declared nodes are present, none missing, none extra."""
         graph = build_task_graph()
         assert set(graph.nodes.keys()) == _EXPECTED_NODES, (
             f"Node set drift: {set(graph.nodes.keys()) ^ _EXPECTED_NODES}"

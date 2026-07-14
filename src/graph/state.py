@@ -228,6 +228,17 @@ class AgentState(TypedDict, total=False):
     # one success signal per run, no skill↔tool mapping needed (findings-05 D).
     recalled_skill_ids: list[str]
 
+    # ─── Multi-hop Research Loop (Phase 5a; default-off) ─────────────────
+    # ``research_done`` is the single-shot guard (mirror structure_analysis_done):
+    # the research node runs at most once per run, so a retrieve_memory→research
+    # cycle is impossible regardless of reducer semantics. ``research_context``
+    # is the accumulated multi-hop evidence (markdown) the loop gathered from
+    # web_search / corpus_search / arxiv_search, surfaced as advisory context to
+    # planning (on re-plan) + execution — the literal goal is never rewritten.
+    # Overwrite (no reducer): the node computes the full assembled string once.
+    research_done: bool
+    research_context: str
+
     # ─── Reflection ─────────────────────────────────────────────────────
     reflection: ReflectionResult | None
     confidence: Confidence

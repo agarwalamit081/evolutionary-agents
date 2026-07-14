@@ -1,0 +1,21 @@
+GOAL (the immutable objective — your research must inform, never rewrite it):
+{{ goal_text }}
+
+REFINED INTENT (the real desired outcome surfaced at classify; advisory only):
+{{ refined_intent }}
+
+RESEARCH PROGRESS — hop {{ hop_index }} of {{ max_hops }}
+Queries already run (do NOT repeat):
+{{ prior_queries }}
+
+FINDINGS GATHERED SO FAR:
+{{ accumulated_findings }}
+
+QUERY JUST RUN THIS HOP:
+{{ current_query }}
+
+FRESH EVIDENCE RETURNED THIS HOP:
+{{ current_evidence }}
+
+Distill the new evidence into findings and decide: sufficient to stop, or emit one
+next_query for the biggest remaining gap. Respond with the JSON object only.

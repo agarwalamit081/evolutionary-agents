@@ -302,6 +302,38 @@ def route_after_classify(state: AgentState) -> str:
     return "plan"
 
 
+def route_after_retrieve_memory(state: AgentState) -> str:
+    """Route after the retrieve_memory node (Phase 5a research gate).
+
+    Default-off master switch (``research_loop_enabled``): when off, the topology
+    is byte-identical to today (retrieve_memory -> structure_analysis). When on
+    AND research has not already run this run, route retrieve_memory -> research
+    -> structure_analysis so the bounded multi-hop retrieve→refine loop can
+    gather advisory grounding before structure_analysis/execute.
+
+    Reads settings via ``get_settings()`` (LangGraph passes ``config=None`` to
+    conditional-edge routers here — same constraint route_after_classify honours).
+    The gateway-availability fallback lives inside the node (a missing gateway
+    degrades to an empty research_context); the router gates purely on the flag +
+    the single-shot guard.
+
+    Returns:
+        "research" — flag on + not yet run
+        "structure_analysis" — otherwise (the default, unchanged behavior)
+    """
+    try:
+        if not get_settings().agent.research_loop_enabled:
+            return "structure_analysis"
+    except Exception:  # noqa: BLE001 — settings access must never break routing
+        return "structure_analysis"
+
+    if state.get("research_done"):
+        return "structure_analysis"
+
+    logger.info("Research loop enabled; routing retrieve_memory -> research")
+    return "research"
+
+
 def route_after_structure_analysis(state: AgentState) -> str:
     """Route after the structure_analysis node.
 

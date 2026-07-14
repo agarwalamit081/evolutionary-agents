@@ -33,6 +33,7 @@ from src.graph.nodes import (
     lats_search_node,
     plan_node,
     reflect_node,
+    research_node,
     retrieve_memory_node,
     structure_analysis_node,
     store_memory_node,
@@ -48,6 +49,7 @@ from src.graph.routers import (
     route_after_execute,
     route_after_hitl,
     route_after_reflect,
+    route_after_retrieve_memory,
     route_after_store,
     route_after_structure_analysis,
     route_after_tool_create,
@@ -202,6 +204,14 @@ def build_task_graph(
     graph.add_node("disambiguate", _wrap(disambiguate_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("plan", _wrap(plan_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("retrieve_memory", _wrap(retrieve_memory_node, memory=memory))  # type: ignore[arg-type]
+    # Phase 5a multi-hop research loop (default-off). Gathers external grounding
+    # (web_search / corpus_search / arxiv_search) through a bounded retrieve→refine
+    # loop before structure_analysis. Unreachable unless route_after_retrieve_memory
+    # returns "research" (RESEARCH_LOOP_ENABLED + not yet run), so the topology is
+    # byte-identical to today until toggled on. research always → structure_analysis
+    # (single pass; the research_done guard makes retrieve_memory→research a no-op
+    # if somehow re-entered).
+    graph.add_node("research", _wrap(research_node, gateway=gateway, tools=tools))  # type: ignore[arg-type]
     graph.add_node("structure_analysis", _wrap(structure_analysis_node, tools=tools, sub_agent_registry=sub_agent_registry, gateway=gateway))  # type: ignore[arg-type]
     graph.add_node("execute", _wrap(execute_node, gateway=gateway, tools=tools, result_cache=result_cache))  # type: ignore[arg-type]
     graph.add_node("reflect", _wrap(reflect_node, gateway=gateway, tools=tools, memory=memory, folding_cfg=_folding_cfg_from_settings()))  # type: ignore[arg-type]
@@ -234,7 +244,14 @@ def build_task_graph(
     })
     graph.add_edge("disambiguate", "plan")
     graph.add_edge("plan", "retrieve_memory")
-    graph.add_edge("retrieve_memory", "structure_analysis")
+    # Phase 5a research gate (default-off). route_after_retrieve_memory returns
+    # "structure_analysis" unless RESEARCH_LOOP_ENABLED + not yet run — so the
+    # topology is byte-identical to today until toggled on.
+    graph.add_conditional_edges("retrieve_memory", route_after_retrieve_memory, {
+        "research": "research",
+        "structure_analysis": "structure_analysis",
+    })
+    graph.add_edge("research", "structure_analysis")
 
     # Proactive capability detection before the execute loop: routes to
     # tool_create / agent_spawn when the goal states that intent up front,

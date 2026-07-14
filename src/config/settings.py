@@ -1556,6 +1556,26 @@ class AgentSettings(BaseSettings):
     # hiccup never aborts the terminal sink). Default off.
     persist_intent_facts: bool = False  # Env: PERSIST_INTENT_FACTS
 
+    # ── Multi-hop research loop (Phase 5a; all default-off) ──────────────
+    # Master switch: when off, route_after_retrieve_memory always returns
+    # "structure_analysis" and the topology is byte-identical to today. When on,
+    # retrieve_memory -> research -> structure_analysis, running a bounded
+    # retrieve→refine loop (web_search / corpus_search / arxiv_search) that
+    # accumulates external evidence into ``research_context`` as ADVISORY
+    # context (literal goal unchanged). Opt-in: battery runs skip it entirely.
+    research_loop_enabled: bool = False  # Env: RESEARCH_LOOP_ENABLED
+    # Max retrieve→refine rounds. Bounds LLM + tool spend; the loop also exits
+    # early when the refine step marks the evidence ``sufficient`` or emits no
+    # next query, so a simple goal rarely spends all hops.
+    research_max_hops: int = 3  # Env: RESEARCH_MAX_HOPS
+    # Top-K results requested per retrieval hop (passed to the tool's
+    # max_results / top_k). Small on purpose — the refine step distills, so a
+    # handful of fresh snippets per hop is the right trade vs. token cost.
+    research_top_k: int = 3  # Env: RESEARCH_TOP_K
+    # Output-token cap for each refine LLM call. Refinement is a short
+    # JSON decision (sufficient? next_query? distilled findings), not prose.
+    research_max_tokens: int = 768  # Env: RESEARCH_MAX_TOKENS
+
     # Concurrency + loop bounds (previously module constants in
     # src/graph/nodes/execute.py and src/graph/nodes/tool_create.py, and the
     # verify data-tool cap in src/graph/nodes/verify.py).
@@ -1610,6 +1630,9 @@ class AgentSettings(BaseSettings):
         "max_iterations_critical",
         "convergence_stable_threshold",
         "cap_loop_break_threshold",
+        "research_max_hops",
+        "research_top_k",
+        "research_max_tokens",
     )
     @classmethod
     def validate_positive_int(cls, v: int) -> int:

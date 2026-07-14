@@ -12,6 +12,7 @@ class Phase(str, Enum):
     DISAMBIGUATE = "disambiguate"
     PLAN = "plan"
     RETRIEVE_MEMORY = "retrieve_memory"
+    RESEARCH = "research"
     STRUCTURE_ANALYSIS = "structure_analysis"
     EXECUTE = "execute"
     REFLECT = "reflect"

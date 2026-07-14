@@ -114,6 +114,33 @@ class DisambiguationResolution(BaseModel):
     )
 
 
+class ResearchRefine(BaseModel):
+    """Structured output from the research loop's refine-or-stop step (Phase 5a).
+
+    After each retrieval hop the loop asks the model to (a) distill the
+    fresh evidence into concise findings and (b) decide whether to stop or
+    emit the next hop's query. ``sufficient`` / an empty ``next_query`` both
+    terminate the loop; otherwise ``next_query`` drives the next retrieval.
+    Every field is defaulted so a partial/legacy response still parses.
+    """
+
+    sufficient: bool = Field(
+        default=False,
+        description="True if the gathered evidence is enough to address the goal "
+        "(stops the loop)",
+    )
+    next_query: str = Field(
+        default="",
+        description="The next retrieval query to pursue (empty string = stop; the "
+        "loop never re-runs the same query twice)",
+    )
+    findings: list[str] = Field(
+        default_factory=list,
+        description="Concise distilled facts extracted from THIS hop's evidence "
+        "(added to the accumulated research context)",
+    )
+
+
 class StepAtomicity(BaseModel):
     """Per-step atomicity verdict (Feature C plan-quality validator)."""
 

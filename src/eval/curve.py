@@ -86,6 +86,43 @@ def _row_created_key(row: dict[str, Any]) -> str:
     return str(row.get("created_at") or "")
 
 
+def expected_check_names(spec_id: str | None) -> set[str]:
+    """The declared ``CheckConfig.name`` set for a goal spec (empty if unregistered).
+
+    A goal's verify battery is *complete* (the run converged on evaluation) iff
+    the terminal attempt observed every check name the spec declares. Skipped
+    checks are still written with their ``check_name`` (``EvalStore._store_check``
+    persists every ``CheckResult``), so a full verify pass reaches coverage 1.0.
+    Used by the convergence filter in ``scripts/run_metrics.py`` so a
+    budget-exhausted run that never reached verify (q06 G2: no deliverable → no
+    checks) is distinguished from a converged-but-low run (q06 G0: all checks
+    ran, 3/9 passed). Returns ``set()`` for adhoc/custom goals with no spec so
+    the caller can fall back to "unknown → do not filter".
+    """
+    if not spec_id:
+        return set()
+    from src.eval.golden import GOLDEN_SPECS  # noqa: PLC0415 — lazy; golden is a data module
+
+    spec = GOLDEN_SPECS.get(spec_id)
+    if spec is None:
+        return set()
+    return {c.name for c in spec.checks}
+
+
+def coverage_ratio(observed: set[str], expected: set[str]) -> float:
+    """Fraction of ``expected`` check names present in ``observed`` (1.0 = full).
+
+    ``0.0`` when ``expected`` is empty is intentional — the ratio is undefined
+    for a goal with no declared checks (adhoc), and callers treat the empty
+    case as "unknown" (``expected_check_names`` returned ``set()``) rather than
+    "fully covered", so they never silently pass an unmeasurable goal through a
+    convergence gate. Pure; unit-tested directly.
+    """
+    if not expected:
+        return 0.0
+    return len(observed & expected) / len(expected)
+
+
 class CapabilityCurve:
     """Battery correctness-over-time analytics + regression verdict."""
 

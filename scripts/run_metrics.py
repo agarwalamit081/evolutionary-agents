@@ -45,7 +45,7 @@ import asyncio
 import json
 import re
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,11 @@ from src.db.models import (  # noqa: E402
     ToolRegistration,
 )
 from src.db.session import get_session  # noqa: E402
-from src.eval.curve import CapabilityCurve  # noqa: E402
+from src.eval.curve import (  # noqa: E402
+    CapabilityCurve,
+    coverage_ratio,
+    expected_check_names,
+)
 # Shared run_id → spec-id stripper so the scorer's goal bucketing can NEVER drift
 # from the worker's golden-check resolver (``src.runner._resolve_eval_spec_id``).
 # The Track-1 ``-gen{N}-seed{M}-YYYYMMDD`` suffix already broke the resolver by
@@ -117,6 +121,15 @@ class GoalScore:
     n_rows: int
     verify_passes_estimate: int
     attempt_id: str | None
+    # Convergence (experiment-design, Phase 1). A goal is ``converged`` when the
+    # verify battery ran to completion on this run — its terminal attempt covered
+    # the spec's declared checks AND the run did not end in a non-terminal control
+    # status (BUDGET_EXHAUSTED/TIMEOUT/FAILED). ``coverage`` is the fraction of
+    # expected checks observed (None when the goal has no spec → unmeasurable).
+    # ``non_convergence_reason`` is empty when converged, else names the signal.
+    converged: bool = True
+    coverage: float | None = None
+    non_convergence_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +137,16 @@ class ScoreSummary:
     battery_mean: float
     n_goals_ran: int
     per_goal: list[GoalScore]
+    # Filtered mean over CONVERGED goals only (the clean experiment-design signal:
+    # budget-infeasible / never-finished goals like q06 are excluded, not averaged
+    # in as artificial 0.0). ``None`` when no goal has a measurable convergence
+    # status (all adhoc/un-spec'd) so a caller can tell "no filtering applied"
+    # apart from "filtered == unfiltered". ``excluded_goals`` lists the
+    # non-converged goal ids dropped from the filtered mean (transparency, never
+    # a silent exclusion).
+    battery_mean_converged: float | None = None
+    n_goals_converged: int = 0
+    excluded_goals: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,7 +333,76 @@ def _spec_key_from_run_id(run_id: str | None) -> str:
     return _strip_run_suffix(rid) or rid
 
 
-def score_goals(eval_rows: list[dict[str, Any]]) -> ScoreSummary:
+# Run-control statuses that mean the run did NOT reach a natural terminal state
+# — it was killed by a cap/timeout/cancel before finishing. A goal whose only
+# rows came from such a run is non-converged (excluded from the filtered mean)
+# even if a partial verify pass happened to write some check rows. Matches the
+# resumable-terminal set in ``src/worker/schema.py`` (TIMEOUT/BUDGET_EXHAUSTED)
+# plus FAILED/CANCELLED. Redis-only and TTL-bounded, so this is a best-effort
+# signal; the durable backbone is the coverage check below.
+_NON_CONVERGENT_STATUSES: frozenset[str] = frozenset(
+    {"budget_exhausted", "timeout", "failed", "cancelled"}
+)
+
+# A goal is "coverage-converged" when its terminal attempt observed at least
+# this fraction of the spec's declared checks. 1.0 = the verify battery ran in
+# full (skipped checks are still written with their name, so a complete pass
+# reaches 1.0). A budget-cut run that never reached verify (no deliverable → no
+# checks) lands at 0.0 and is filtered out.
+_CONVERGENCE_COVERAGE_THRESHOLD: float = 1.0
+
+
+def _goal_converged(
+    goal_id: str,
+    observed_check_names: set[str],
+    expected_checks: dict[str, set[str]] | None,
+    run_id: str,
+    status_by_run: dict[str, str] | None,
+) -> tuple[bool, float | None, str]:
+    """Decide whether one goal's terminal attempt represents a converged run.
+
+    Returns ``(converged, coverage, reason)``. Two independent signals, EITHER
+    can flag non-convergence:
+      1. **Coverage** (durable, from eval_results): the terminal attempt's
+         observed check-name set vs. the spec's declared set. Below threshold →
+         the verify battery did not complete (budget/timeout cut it off, or no
+         deliverable was produced for the checks to read).
+      2. **Run status** (best-effort, Redis): the run ended in a non-terminal
+         control status (BUDGET_EXHAUSTED/TIMEOUT/FAILED/CANCELLED).
+
+    A goal with no registered spec (adhoc/custom) has no measurable coverage →
+    ``coverage is None`` and the coverage signal is skipped (do not filter what
+    cannot be measured); only a known-bad run status can then flag it. Pure;
+    unit-tested with fixtures.
+    """
+    reason = ""
+    coverage: float | None = None
+
+    expected = (expected_checks or {}).get(goal_id)
+    if expected:
+        coverage = coverage_ratio(observed_check_names, expected)
+        if coverage < _CONVERGENCE_COVERAGE_THRESHOLD:
+            reason = (
+                f"incomplete_check_coverage({coverage:.2f}; "
+                f"{len(observed_check_names & expected)}/{len(expected)})"
+            )
+
+    status = (status_by_run or {}).get(run_id, "")
+    if status and status in _NON_CONVERGENT_STATUSES:
+        if reason:
+            reason = f"{reason}+run_status={status}"
+        else:
+            reason = f"run_status={status}"
+
+    return (not reason), coverage, reason
+
+
+def score_goals(
+    eval_rows: list[dict[str, Any]],
+    *,
+    expected_checks: dict[str, set[str]] | None = None,
+    status_by_run: dict[str, str] | None = None,
+) -> ScoreSummary:
     """Terminal-state score per goal (latest attempt → latest row per check → mean).
 
     Pure transform of eval rows grouped by the **spec id recovered from each
@@ -320,6 +412,16 @@ def score_goals(eval_rows: list[dict[str, Any]]) -> ScoreSummary:
     self-correcting run that ends all-pass scores 1.0. The battery mean is the
     mean of the per-goal means of goals that have rows (a missing goal is
     excluded, not counted as 0).
+
+    Convergence (experiment-design): when ``expected_checks`` and/or
+    ``status_by_run`` are supplied, each goal is tagged ``converged`` via
+    ``_goal_converged`` and a SECOND battery mean — ``battery_mean_converged``
+    — is computed over converged goals only (non-converged goals are listed in
+    ``excluded_goals``, never silently dropped). Both means are always reported
+    so a reader sees the unfiltered headline AND the clean filtered signal.
+    ``battery_mean_converged`` is ``None`` when no goal has a measurable
+    convergence status (all goals adhoc/un-spec'd AND no run statuses) → the
+    caller can tell "no filtering applied" from "filtered == unfiltered".
     """
     by_goal: dict[str, list[dict[str, Any]]] = {}
     for r in eval_rows:
@@ -327,6 +429,8 @@ def score_goals(eval_rows: list[dict[str, Any]]) -> ScoreSummary:
 
     per_goal: list[GoalScore] = []
     ran: list[float] = []
+    converged_scores: list[float] = []
+    excluded: list[str] = []
     for goal_id, rows in by_goal.items():
         attempt = CapabilityCurve._latest_attempt(rows)
         attempt_rows = [r for r in rows if r.get("attempt_id") == attempt] or rows
@@ -338,23 +442,53 @@ def score_goals(eval_rows: list[dict[str, Any]]) -> ScoreSummary:
         )
         if latest:
             ran.append(score)
-        run_id = rows[0].get("run_id") if rows else None
+        run_id = str(rows[0].get("run_id")) if rows and rows[0].get("run_id") else ""
+        observed_names = {str(r.get("check_name") or "") for r in latest}
+        converged, coverage, reason = _goal_converged(
+            goal_id, observed_names, expected_checks, run_id, status_by_run
+        )
+        if latest and converged:
+            converged_scores.append(score)
+        elif latest and not converged:
+            excluded.append(goal_id)
         per_goal.append(
             GoalScore(
                 goal_id=goal_id,
-                run_id=str(run_id) if run_id is not None else "",
+                run_id=run_id,
                 score=round(score, 4),
                 n_checks=len(latest),
                 n_rows=len(rows),
                 verify_passes_estimate=_estimate_verify_passes(rows),
                 attempt_id=attempt,
+                converged=converged,
+                coverage=round(coverage, 4) if coverage is not None else None,
+                non_convergence_reason=reason,
             )
         )
 
     per_goal.sort(key=lambda g: g.goal_id)
     battery = sum(ran) / len(ran) if ran else 0.0
+    # The filtered mean is only meaningful when at least one goal had a
+    # measurable convergence signal; otherwise leave it None (distinct from
+    # "all goals converged" where it equals the unfiltered mean). When every
+    # measured goal was non-converged the filtered set is empty → also None
+    # (the ``excluded_goals`` list carries the transparency).
+    any_measurable = any(
+        g.coverage is not None or bool(status_by_run and status_by_run.get(g.run_id))
+        for g in per_goal
+    )
+    if not any_measurable or not converged_scores:
+        battery_converged: float | None = None
+    else:
+        battery_converged = round(sum(converged_scores) / len(converged_scores), 4)
+    n_converged = len(converged_scores)
     return ScoreSummary(
-        battery_mean=round(battery, 4), n_goals_ran=len(ran), per_goal=per_goal
+        battery_mean=round(battery, 4),
+        n_goals_ran=len(ran),
+        per_goal=per_goal,
+        battery_mean_converged=battery_converged,
+        n_goals_converged=n_converged,
+        excluded_goals=sorted(excluded),
     )
 
 
@@ -607,6 +741,60 @@ async def fetch_node_timing(selector: str) -> list[dict[str, Any]]:
     ]
 
 
+def _expected_checks_for_eval(eval_rows: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """Map each spec-key present in ``eval_rows`` → its declared check-name set.
+
+    Keys are the spec ids recovered from each row's run_id (``_spec_key_from_run_id``),
+    the SAME bucketing ``score_goals`` uses, so a goal and its expected-check set
+    always align. Goals with no registered spec (adhoc) are absent from the map →
+    ``_goal_converged`` treats them as unmeasurable. Static per process (the golden
+    registry does not mutate at runtime); cheap to recompute, so no caching.
+    """
+    out: dict[str, set[str]] = {}
+    for r in eval_rows:
+        key = _spec_key_from_run_id(r.get("run_id"))
+        if key and key not in out:
+            out[key] = expected_check_names(key)
+    return out
+
+
+async def _try_status_by_run(run_ids: list[str]) -> dict[str, str]:
+    """Best-effort lookup of each run's terminal control status from Redis.
+
+    Returns ``{run_id: status_value}`` for runs whose status hash is still live
+    (TTL-bounded — historical runs scored days later will be absent, which is
+    fine: the durable coverage signal carries convergence detection on its own).
+    Fully best-effort: if Redis is unreachable, unconfigured, or the lookup
+    raises for any reason, returns ``{}`` so the scorer never breaks on a
+    missing status store. Never raises.
+    """
+    if not run_ids:
+        return {}
+    try:
+        import redis.asyncio as aioredis  # noqa: PLC0415 — optional, guarded
+
+        from src.config.settings import get_settings  # noqa: PLC0415
+        from src.worker.status import RunStatusStore  # noqa: PLC0415
+
+        settings = get_settings()
+        client = aioredis.from_url(
+            settings.redis.redis_url, decode_responses=False
+        )
+        store = RunStatusStore(client, settings.worker)
+        out: dict[str, str] = {}
+        try:
+            for rid in run_ids:
+                rec = await store.get(rid)
+                if rec is not None:
+                    out[rid] = rec.status.value
+        finally:
+            await client.aclose()
+        return out
+    except Exception as exc:  # noqa: BLE001 — best-effort; never break scoring
+        logger.debug("status-by-run lookup unavailable: {}", exc)
+        return {}
+
+
 async def fetch_created_by_owner(
     selector: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -660,7 +848,19 @@ async def build_report(selector: str) -> RunMetricsReport:
     matched = sorted({str(r["run_id"]) for r in cost_rows if r.get("run_id")})
 
     cost_summary = aggregate_cost(cost_rows) if cost_rows else None
-    score_summary = score_goals(eval_rows) if eval_rows else None
+    # Convergence inputs: declared check sets per spec (durable, from eval rows)
+    # + best-effort terminal run statuses (Redis, may be empty for old runs).
+    expected_checks = _expected_checks_for_eval(eval_rows)
+    status_by_run = await _try_status_by_run(matched)
+    score_summary = (
+        score_goals(
+            eval_rows,
+            expected_checks=expected_checks or None,
+            status_by_run=status_by_run or None,
+        )
+        if eval_rows
+        else None
+    )
     sub_summary = aggregate_subagents(sub_rows) if sub_rows else None
     span = llm_span(cost_rows)
 
@@ -685,8 +885,16 @@ async def build_report(selector: str) -> RunMetricsReport:
 # ─── rendering ────────────────────────────────────────────────────────────────
 
 
-def report_to_dict(report: RunMetricsReport) -> dict[str, Any]:
-    """JSON-serializable form (dataclasses → dict; _created_dt stripped)."""
+def report_to_dict(
+    report: RunMetricsReport, *, require_converged: bool = False
+) -> dict[str, Any]:
+    """JSON-serializable form (dataclasses → dict; _created_dt stripped).
+
+    ``require_converged`` adds a top-level ``headline_mean`` / ``headline_basis``
+    so a downstream pipeline can read ONE canonical mean: the converged-filtered
+    mean when the flag is set (and a filtered mean exists), else the unfiltered
+    battery mean. Both means always remain in ``score`` for transparency.
+    """
     d: dict[str, Any] = {
         "selector": report.selector,
         "matched_run_ids": report.matched_run_ids,
@@ -698,13 +906,23 @@ def report_to_dict(report: RunMetricsReport) -> dict[str, Any]:
         "global_tool_health": [asdict(r) for r in report.global_tool_health],
         "node_timing": asdict(report.node_timing) if report.node_timing else None,
     }
+    if report.score:
+        if require_converged and report.score.battery_mean_converged is not None:
+            d["headline_mean"] = report.score.battery_mean_converged
+            d["headline_basis"] = "converged"
+        else:
+            d["headline_mean"] = report.score.battery_mean
+            d["headline_basis"] = "all"
     return d
 
 
-def render_table(report: RunMetricsReport) -> None:
+def render_table(
+    report: RunMetricsReport, *, require_converged: bool = False
+) -> None:
     """Compact human-readable summary to stdout (secrets never appear here)."""
     print(f"\n═ run_metrics · selector={report.selector!r} "
-          f"· {len(report.matched_run_ids)} run(s) matched")
+          f"· {len(report.matched_run_ids)} run(s) matched"
+          + ("  [HEADLINE=require-converged]" if require_converged else ""))
     if report.matched_run_ids:
         preview = ", ".join(report.matched_run_ids[:6])
         more = f" (+{len(report.matched_run_ids) - 6} more)" if len(report.matched_run_ids) > 6 else ""
@@ -713,9 +931,23 @@ def render_table(report: RunMetricsReport) -> None:
     if report.score:
         print(f"\n  SCORE   battery_mean={report.score.battery_mean:.4f}  "
               f"goals_ran={report.score.n_goals_ran}")
+        # Converged-filtered mean (experiment-design): excludes budget-exhausted
+        # / never-finished goals so they aren't averaged in as artificial 0.0.
+        # Reported ALONGSIDE the unfiltered headline — never a silent exclusion.
+        if report.score.battery_mean_converged is not None:
+            print(f"          battery_mean_converged={report.score.battery_mean_converged:.4f}  "
+                  f"converged={report.score.n_goals_converged}/{report.score.n_goals_ran}")
+            if report.score.excluded_goals:
+                print(f"          excluded(non-converged): "
+                      f"{', '.join(report.score.excluded_goals)}")
         for g in report.score.per_goal:
+            flag = ""
+            if not g.converged:
+                flag = f"  [NON-CONVERGED: {g.non_convergence_reason}]"
+            elif g.coverage is not None:
+                flag = f"  [coverage={g.coverage:.2f}]"
             print(f"          {g.goal_id:<28} {g.score:.4f}  "
-                  f"checks={g.n_checks}  ~verify_passes={g.verify_passes_estimate}")
+                  f"checks={g.n_checks}  ~verify_passes={g.verify_passes_estimate}{flag}")
 
     if report.cost:
         c = report.cost
@@ -774,10 +1006,14 @@ async def _async_main(args: argparse.Namespace) -> int:
         print("error: provide --run-id or --suffix", file=sys.stderr)
         return 2
     report = await build_report(selector)
-    render_table(report)
+    render_table(report, require_converged=args.require_converged)
     if args.json:
         Path(args.json).write_text(
-            json.dumps(report_to_dict(report), indent=2, ensure_ascii=False),
+            json.dumps(
+                report_to_dict(report, require_converged=args.require_converged),
+                indent=2,
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
         logger.info("run_metrics JSON written → {}", args.json)
@@ -790,6 +1026,15 @@ def main() -> None:
     grp.add_argument("--run-id", type=_validate_selector, help="one run (ends-with match)")
     grp.add_argument(
         "--suffix", type=_validate_selector, help="one curve/generation (ends-with match)"
+    )
+    parser.add_argument(
+        "--require-converged",
+        action="store_true",
+        help=(
+            "Make the converged-filtered mean the HEADLINE (excludes "
+            "budget-exhausted / never-finished goals). Both means are always "
+            "reported; this only selects which one a pipeline reads as canonical."
+        ),
     )
     parser.add_argument("--json", help="write the full report as JSON to this path")
     args = parser.parse_args()

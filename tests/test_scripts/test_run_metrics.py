@@ -73,6 +73,105 @@ def test_aggregate_cost_empty() -> None:
     assert c.by_model == []
 
 
+# ─── convergence filter (experiment-design, Phase 1) ──────────────────────────
+
+
+def test_goal_converged_full_coverage_passes() -> None:
+    """Full check coverage (all declared checks observed) → converged."""
+    ok, cov, reason = rm._goal_converged(
+        "battery04_q06",
+        {"c1", "c2", "c3"},
+        {"battery04_q06": {"c1", "c2", "c3"}},
+        "cli-q06",
+        None,
+    )
+    assert ok is True
+    assert cov == pytest.approx(1.0)
+    assert reason == ""
+
+
+def test_goal_converged_incomplete_coverage_flags() -> None:
+    """q06-G2 shape: no deliverable → only some checks ran → non-converged."""
+    ok, cov, reason = rm._goal_converged(
+        "battery04_q06",
+        {"c1"},  # the verify battery never completed
+        {"battery04_q06": {"c1", "c2", "c3"}},
+        "cli-q06",
+        None,
+    )
+    assert ok is False
+    assert cov is not None and cov < 1.0
+    assert "incomplete_check_coverage" in reason
+
+
+def test_goal_converged_budget_status_overrides_full_coverage() -> None:
+    """A budget-exhausted run is non-converged even if a partial pass wrote all
+    checks (the run was cap-killed, not naturally terminal)."""
+    ok, cov, reason = rm._goal_converged(
+        "battery04_q06",
+        {"c1", "c2", "c3"},
+        {"battery04_q06": {"c1", "c2", "c3"}},
+        "cli-q06",
+        {"cli-q06": "budget_exhausted"},
+    )
+    assert ok is False
+    assert cov == pytest.approx(1.0)  # coverage is full; the status is what flags it
+    assert "run_status=budget_exhausted" in reason
+
+
+def test_goal_converged_unknown_spec_is_unmeasurable() -> None:
+    """An adhoc goal with no registered spec → coverage None, converged True
+    (do not filter what cannot be measured)."""
+    ok, cov, reason = rm._goal_converged(
+        "adhoc-deliverables", {"c1"}, {}, "cli-x", None
+    )
+    assert ok is True
+    assert cov is None
+    assert reason == ""
+
+
+def test_score_goals_convergence_filters_battery_mean() -> None:
+    """The converged-filtered mean excludes a non-converged goal (q06-budget
+    shape), while the unfiltered headline still includes it. Both reported."""
+    # Goal A: converged, full coverage, score 1.0.
+    # Goal B: non-converged (1 of 3 checks observed), score 0.0 — but it dragged
+    # the unfiltered mean down. The filtered mean must drop it.
+    # NOTE: score_goals buckets by the spec key derived from run_id (the goal_id
+    # column is ignored — see _spec_key_from_run_id), so expected_checks keys and
+    # the per-goal ids both come from run_id ("cli-gA" → "gA").
+    rows = [
+        {"goal_id": "gA", "run_id": "cli-gA", "attempt_id": "A1",
+         "check_name": "c1", "score": 1.0, "created_at": "2026-07-14T00:00:00+00:00"},
+        {"goal_id": "gB", "run_id": "cli-gB", "attempt_id": "A1",
+         "check_name": "c1", "score": 0.0, "created_at": "2026-07-14T00:00:00+00:00"},
+    ]
+    expected = {"gA": {"c1"}, "gB": {"c1", "c2", "c3"}}
+    s = rm.score_goals(rows, expected_checks=expected)
+    assert s.battery_mean == pytest.approx(0.5)  # unfiltered: mean(1.0, 0.0)
+    assert s.battery_mean_converged == pytest.approx(1.0)  # only gA converged
+    assert s.n_goals_converged == 1
+    assert s.excluded_goals == ["gB"]
+    by_id = {g.goal_id: g for g in s.per_goal}
+    assert by_id["gA"].converged is True
+    assert by_id["gB"].converged is False
+    assert by_id["gB"].non_convergence_reason.startswith("incomplete_check_coverage")
+
+
+def test_score_goals_no_signal_leaves_filtered_none() -> None:
+    """With no expected_checks and no statuses, the filtered mean is None
+    (distinct from "filtered == unfiltered") so a caller knows nothing was
+    measurable. Backward-compatible: the unfiltered mean is unchanged."""
+    rows = [
+        {"goal_id": "gA", "run_id": "cli-a", "attempt_id": "A1",
+         "check_name": "c1", "score": 1.0, "created_at": "2026-07-14T00:00:00+00:00"},
+    ]
+    s = rm.score_goals(rows)  # no convergence inputs
+    assert s.battery_mean == pytest.approx(1.0)
+    assert s.battery_mean_converged is None
+    assert s.excluded_goals == []
+    assert s.per_goal[0].converged is True  # default — not flagged non-converged
+
+
 # ─── score_goals (terminal-state, self-correction not penalized) ─────────────
 
 

@@ -26,7 +26,7 @@ _spec.loader.exec_module(gc)
 rm = gc.rm
 
 
-def _goal(goal_id: str, score: float, n_checks: int = 1) -> rm.GoalScore:
+def _goal(goal_id: str, score: float, n_checks: int = 1, *, converged: bool = True) -> rm.GoalScore:
     return rm.GoalScore(
         goal_id=goal_id,
         run_id=f"cli-{goal_id}",
@@ -35,6 +35,9 @@ def _goal(goal_id: str, score: float, n_checks: int = 1) -> rm.GoalScore:
         n_rows=n_checks,
         verify_passes_estimate=1,
         attempt_id="A1",
+        converged=converged,
+        coverage=1.0 if converged else None,
+        non_convergence_reason="" if converged else "run_status=budget_exhausted",
     )
 
 
@@ -141,12 +144,16 @@ def test_build_per_goal_union_and_missing_is_none() -> None:
     r1 = _report(battery_mean=0.8, goals=[("b", 0.8), ("c", 1.0)], cost_usd=0.1,
                  input_tokens=10, cached_tokens=0, hit_rate=0.0, calls=1, span=1.0,
                  subs_delegated=None, tools_created=0)
-    matrix, ran = gc.build_per_goal([r0, r1])
+    matrix, ran, converged = gc.build_per_goal([r0, r1])
     assert set(matrix) == {"a", "b", "c"}
     assert matrix["a"] == [0.5, None]  # a only ran in gen0
     assert matrix["b"] == [1.0, 0.8]
     assert matrix["c"] == [None, 1.0]  # c only ran in gen1
     assert ran["a"] == [True, False]
+    # converged_flags use None (distinct from False) for a goal that didn't run
+    # that gen — "ran?" is ran_flags; "converged?" is None=didn't-run / True|False.
+    assert converged["a"] == [True, None]
+    assert converged["b"] == [True, True]
 
 
 # ─── build_comparison ────────────────────────────────────────────────────────
@@ -169,6 +176,78 @@ def test_build_comparison_end_to_end() -> None:
     blob = comp.to_dict()
     assert blob["suffixes"] == ["gen0", "gen1"]
     assert len(blob["summaries"]) == 2
+
+
+# ─── paired_significance (experiment-design, Phase 1) ────────────────────────
+
+
+def test_paired_significance_known_improvement() -> None:
+    """Every goal improves under the candidate → positive Δ, positive effect."""
+    base = [0.4, 0.5, 0.6, 0.7, 0.3]
+    cand = [0.7, 0.8, 0.9, 1.0, 0.6]
+    p = gc.paired_significance(base, cand, label_baseline="g0", label_candidate="g2")
+    assert p["n"] == 5
+    assert p["mean_delta"] == pytest.approx(0.3)
+    assert p["mean_delta"] is not None and p["mean_delta"] > 0
+    assert p["effect_size"] == pytest.approx(1.0)  # all diffs positive
+    assert p["ci95"] is not None
+    assert p["ci95"][0] > 0  # CI excludes 0 — robust improvement
+    # small-n caveat is surfaced honestly
+    assert "underpowered" in p["caveat"]
+
+
+def test_paired_significance_no_movement() -> None:
+    """All-zero diffs → undefined Wilcoxon (p None), zero effect."""
+    p = gc.paired_significance([0.5, 0.7, 0.9], [0.5, 0.7, 0.9])
+    assert p["n"] == 3
+    assert p["mean_delta"] == pytest.approx(0.0)
+    assert p["effect_size"] == pytest.approx(0.0)
+    assert p["p_value"] is None  # all-zero diffs → test undefined
+    assert p["ci95"] is not None and p["ci95"][0] == pytest.approx(0.0)
+
+
+def test_paired_significance_empty() -> None:
+    p = gc.paired_significance([], [])
+    assert p["n"] == 0
+    assert p["mean_delta"] is None
+    assert p["caveat"] == "no matched goals"
+
+
+def test_endpoint_paired_converged_filters_nonconverged() -> None:
+    """The converged variant drops a goal non-converged in either endpoint gen,
+    while the all-matched variant keeps it (transparency, not silent drop)."""
+    # g1 converged in both, improves (0.5 → 0.8). g2 non-converged in gen2
+    # (budget-exhausted shape), regresses (0.9 → 0.0).
+    r0 = _report(battery_mean=0.6, goals=[("g1", 0.5), ("g2", 0.9)], cost_usd=1.0,
+                 input_tokens=10, cached_tokens=0, hit_rate=0.0, calls=1, span=1.0,
+                 subs_delegated=None, tools_created=0)
+    r1 = _report(battery_mean=0.7, goals=[("g1", 0.8), ("g2", 0.0)], cost_usd=1.0,
+                 input_tokens=10, cached_tokens=0, hit_rate=0.0, calls=1, span=1.0,
+                 subs_delegated=None, tools_created=0)
+    # Flip r1's g2 to non-converged (GoalScore is frozen → rebuild per_goal).
+    new_per_goal = [
+        g if g.goal_id != "g2" else rm.GoalScore(
+            goal_id="g2", run_id="cli-g2", score=0.0, n_checks=1, n_rows=1,
+            verify_passes_estimate=1, attempt_id="A1", converged=False,
+            coverage=0.33, non_convergence_reason="run_status=budget_exhausted")
+        for g in r1.score.per_goal
+    ]
+    object.__setattr__(r1.score, "per_goal", new_per_goal)
+
+    comp = gc.build_comparison(["g0", "g2"], [r0, r1])
+    assert comp.paired is not None
+    assert comp.paired["all"]["n"] == 2          # both goals matched
+    assert comp.paired["converged"]["n"] == 1    # only g1 converged in both
+    # converged Δ (g1 only, +0.3) must be > all Δ (averages in g2's −0.9)
+    assert comp.paired["converged"]["mean_delta"] > comp.paired["all"]["mean_delta"]
+
+
+def test_build_comparison_paired_none_when_one_gen() -> None:
+    r0 = _report(battery_mean=0.7, goals=[("g1", 0.7)], cost_usd=1.0,
+                 input_tokens=10, cached_tokens=0, hit_rate=0.0, calls=1, span=1.0,
+                 subs_delegated=None, tools_created=0)
+    comp = gc.build_comparison(["only"], [r0])
+    assert comp.paired is None  # need ≥2 generations for an endpoint contrast
 
 
 # ─── formatting helpers ──────────────────────────────────────────────────────

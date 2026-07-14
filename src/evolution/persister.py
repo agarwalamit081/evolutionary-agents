@@ -249,6 +249,45 @@ class EvolutionPersister:
             logger.debug(f"Could not read active config version: {e}")
             return None
 
+    async def record_ab_test_result(
+        self,
+        mutation_id: uuid.UUID | None,
+        ab_result: dict[str, Any],
+    ) -> None:
+        """Persist one ``ab_test_results`` row (Phase 4 — A/B rigor).
+
+        Carries the p-value / significance / confidence the engine computed,
+        keyed to the mutation. Non-fatal: a DB hiccup is logged and swallowed
+        (an evolution cycle must never abort on a telemetry write). No-op when
+        ``mutation_id`` is None or the result lacks paired-test stats (the
+        sandbox-skip paths set no ``tested`` flag and so are not persisted).
+        """
+        if mutation_id is None or not ab_result.get("tested"):
+            return
+        try:
+            from src.db.models import ABTestResult
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                session.add(
+                    ABTestResult(
+                        mutation_id=mutation_id,
+                        metric_name=ab_result.get(
+                            "metric_name", "sandbox_duration_seconds"
+                        ),
+                        control_value=ab_result.get("control_value"),
+                        treatment_value=ab_result.get("treatment_value"),
+                        sample_size=ab_result.get("sample_size"),
+                        p_value=ab_result.get("p_value"),
+                        is_significant=ab_result.get("is_significant"),
+                        confidence=ab_result.get("confidence"),
+                    )
+                )
+                await session.flush()
+            logger.debug(f"Recorded A/B result for mutation {mutation_id}")
+        except Exception as e:  # noqa: BLE001 — telemetry write is best-effort
+            logger.warning(f"Failed to record A/B result: {e}")
+
     async def record_event(
         self,
         chain_id: uuid.UUID | None,

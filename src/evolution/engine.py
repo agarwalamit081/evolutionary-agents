@@ -30,6 +30,32 @@ _NON_EXECUTABLE_MUTATIONS: frozenset[MutationType] = frozenset({
     MutationType.SUB_AGENT_MODEL_TIER,
 })
 
+
+def _paired_wilcoxon_pvalue(
+    control: list[float], treatment: list[float]
+) -> float | None:
+    """Two-sided Wilcoxon signed-rank p-value on paired duration diffs.
+
+    ``control`` and ``treatment`` are equal-length per-sample durations; the diff
+    ``control - treatment`` is positive when treatment is faster. Returns ``None``
+    when the test cannot be computed (fewer than two non-zero diffs, or scipy
+    unavailable). Honest at small N — callers surface the p-value without gating
+    promotion on it (N=3 cannot reach p<0.05 for a consistent effect).
+    """
+    diffs = [c - t for c, t in zip(control, treatment, strict=True)]
+    if sum(1 for d in diffs if abs(d) > 1e-12) < 2:
+        return None
+    try:
+        from scipy import stats  # noqa: PLC0415 — optional dep, lazy import
+    except Exception:  # noqa: BLE001 — scipy absence is non-fatal
+        return None
+    try:
+        res = stats.wilcoxon(diffs, zero_method="wilcox", alternative="two-sided")
+        p = getattr(res, "pvalue", None)
+        return float(p) if p is not None else None
+    except Exception:  # noqa: BLE001 — degenerate input / version quirks
+        return None
+
 # Mutation types whose mutated_content is executable Python source
 # (CODE mutates a module, TOOL creates/edits a tools/<name>.py module). Both
 # must route through the code-strong codegen model with the no-truncation
@@ -597,14 +623,24 @@ class SelfEvolutionEngine:
         proposal: dict[str, Any],
         sandbox: Any | None = None,
     ) -> dict[str, Any]:
-        """Phase 4: A/B test — compare original vs mutated code in sandbox.
+        """Phase 4: A/B test — compare original vs mutated code in the sandbox.
+
+        Runs ``EvolutionSettings.ab_sample_size`` PAIRED samples (control then
+        treatment per sample) and computes a Wilcoxon signed-rank test on the
+        paired duration diffs, so noise from a single sandbox run no longer
+        decides promotion. Promotion gates on the median-duration + success-rate
+        comparison (robust at small N); the p-value is reported alongside effect
+        size + confidence but is NOT required to clear 0.05 (N=3 cannot). The
+        result is persisted to ``ab_test_results`` by ``run_cycle`` once a
+        ``mutation_id`` exists.
 
         Args:
             proposal: The mutation proposal with original and mutated content.
             sandbox: Optional SandboxExecutor instance.
 
         Returns:
-            Dict with 'is_significant' bool and comparison details.
+            Dict with ``is_significant`` plus comparison stats. ``tested=True``
+            marks a real paired comparison (persistable); skip paths omit it.
         """
         if sandbox is None:
             logger.debug("No sandbox executor — skipping A/B test, accepting mutation")
@@ -634,40 +670,76 @@ class SelfEvolutionEngine:
 
         logger.info("Running A/B test: original vs mutated")
         try:
-            # Run both versions
-            control_result = await sandbox.execute_code(original)
-            treatment_result = await sandbox.execute_code(mutated)
+            # Sample size from config (default 3); clamp to >=1 so the legacy
+            # single-sample path is recoverable and <=0 never breaks the loop.
+            from src.config import get_settings  # noqa: PLC0415 — avoid import cycle at module load
 
-            # Mutation must succeed and not be worse than original
-            is_significant = (
-                treatment_result.success
-                and (
-                    not control_result.success
-                    or treatment_result.duration_seconds <= control_result.duration_seconds * 1.1
-                )
+            try:
+                n_samples = max(1, int(get_settings().evolution.ab_sample_size))
+            except Exception:  # noqa: BLE001 — config read is best-effort
+                n_samples = 1
+
+            # N PAIRED samples: control then treatment per sample, so variance
+            # across sandbox runs is captured as paired diffs (not one coin flip).
+            control_durations: list[float] = []
+            treatment_durations: list[float] = []
+            control_success = 0
+            treatment_success = 0
+            for _ in range(n_samples):
+                c = await sandbox.execute_code(original)
+                t = await sandbox.execute_code(mutated)
+                control_durations.append(c.duration_seconds)
+                treatment_durations.append(t.duration_seconds)
+                control_success += int(bool(c.success))
+                treatment_success += int(bool(t.success))
+
+            control_sr = control_success / n_samples
+            treatment_sr = treatment_success / n_samples
+            # Central tendency for the promotion gate (robust at small N).
+            median_c = sorted(control_durations)[len(control_durations) // 2]
+            median_t = sorted(treatment_durations)[len(treatment_durations) // 2]
+            effect = median_c - median_t  # positive ⇒ treatment is faster
+
+            # Wilcoxon signed-rank on the paired duration diffs. Honest at small
+            # N — the p-value is surfaced (below) but promotion does NOT require
+            # p<0.05, which N=3 cannot reach; it gates on the median/success-rate
+            # comparison instead.
+            p_value = _paired_wilcoxon_pvalue(control_durations, treatment_durations)
+
+            # Promotion gate: treatment must not fail more often, AND must not be
+            # slower (median). When control never succeeds, duration is moot — a
+            # successful treatment beats a failing baseline regardless of speed.
+            is_significant = treatment_sr >= control_sr and (
+                control_sr == 0.0 or median_t <= median_c
             )
 
+            confidence = (1.0 - p_value) if p_value is not None else None
             logger.info(
-                f"A/B test: control={'pass' if control_result.success else 'fail'} "
-                f"({control_result.duration_seconds:.2f}s), "
-                f"treatment={'pass' if treatment_result.success else 'fail'} "
-                f"({treatment_result.duration_seconds:.2f}s), "
-                f"significant={is_significant}"
+                f"A/B test: control_success={control_sr:.0%} (median {median_c:.2f}s) vs "
+                f"treatment_success={treatment_sr:.0%} (median {median_t:.2f}s), "
+                f"effect={effect:+.3f}s, p={p_value}, significant={is_significant}"
             )
 
             return {
                 "is_significant": is_significant,
+                "tested": True,
+                "metric_name": "sandbox_duration_seconds",
+                "sample_size": n_samples,
                 "control_result": {
-                    "success": control_result.success,
-                    "duration_seconds": control_result.duration_seconds,
-                    "exit_code": control_result.exit_code,
+                    "success": control_success * 2 >= n_samples,  # majority
+                    "duration_seconds": median_c,
+                    "success_rate": control_sr,
                 },
                 "treatment_result": {
-                    "success": treatment_result.success,
-                    "duration_seconds": treatment_result.duration_seconds,
-                    "exit_code": treatment_result.exit_code,
+                    "success": treatment_success * 2 >= n_samples,  # majority
+                    "duration_seconds": median_t,
+                    "success_rate": treatment_sr,
                 },
-                "sample_size": 1,
+                "control_value": median_c,
+                "treatment_value": median_t,
+                "effect": effect,
+                "p_value": p_value,
+                "confidence": confidence,
             }
         except Exception as e:
             logger.warning(f"A/B test error: {e}")
@@ -1286,6 +1358,11 @@ class SelfEvolutionEngine:
                 status="generated",
                 diff_content=deployment.get("diff_content") if deployed else None,
             )
+            # Persist the A/B stats now that a mutation_id exists (Phase 4). Skip
+            # paths set no ``tested`` flag; record_ab_test_result is non-fatal and
+            # no-ops when mutation_id is None (a failed record_mutation).
+            if ab_result.get("tested"):
+                await self._persister.record_ab_test_result(mutation_id, ab_result)
             if terminal_status == "rolled_back":
                 await self._persister.update_mutation_status(mutation_id, "rolled_back")
                 await self._persister.record_event(

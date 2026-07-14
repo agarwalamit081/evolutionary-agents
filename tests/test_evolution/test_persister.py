@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.db.models import EvolutionTelemetry, Mutation, MutationChain
+from src.db.models import ABTestResult, EvolutionTelemetry, Mutation, MutationChain
 from src.evolution.persister import (
     EvolutionPersister,
     _coerce_mutation_type,
@@ -375,3 +375,78 @@ class TestGetActiveConfigVersion:
     ) -> None:
         mock_session.execute = AsyncMock(side_effect=RuntimeError("db down"))
         assert await persister.get_active_config_version() is None
+
+
+# ---------------------------------------------------------------------------
+# record_ab_test_result (Phase 4 — A/B rigor)
+# ---------------------------------------------------------------------------
+
+
+class TestRecordAbTestResult:
+    """Persist the p-value/significance/confidence of a paired A/B test."""
+
+    @pytest.mark.asyncio
+    async def test_persists_tested_result(
+        self,
+        persister: EvolutionPersister,
+        mock_session: MagicMock,
+    ) -> None:
+        """A ``tested`` result writes one ABTestResult row with the engine's stats."""
+        mutation_id = uuid.uuid4()
+        ab_result = {
+            "tested": True,
+            "metric_name": "sandbox_duration_seconds",
+            "control_value": 0.5,
+            "treatment_value": 0.2,
+            "sample_size": 3,
+            "p_value": 0.25,
+            "is_significant": True,
+            "confidence": 0.75,
+        }
+        await persister.record_ab_test_result(mutation_id, ab_result)
+
+        added = mock_session.add.call_args[0][0]
+        assert isinstance(added, ABTestResult)
+        assert added.mutation_id == mutation_id
+        assert added.metric_name == "sandbox_duration_seconds"
+        assert added.p_value == 0.25
+        assert added.is_significant is True
+        assert added.confidence == 0.75
+        assert added.sample_size == 3
+        mock_session.flush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_not_tested(
+        self,
+        persister: EvolutionPersister,
+        mock_session: MagicMock,
+    ) -> None:
+        """Skip paths (no sandbox / non-code) set no ``tested`` flag → no row."""
+        await persister.record_ab_test_result(
+            uuid.uuid4(), {"is_significant": True, "note": "skipped (no sandbox)"}
+        )
+        mock_session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_mutation_id_none(
+        self,
+        persister: EvolutionPersister,
+        mock_session: MagicMock,
+    ) -> None:
+        """A failed record_mutation (None id) → no A/B row."""
+        await persister.record_ab_test_result(
+            None, {"tested": True, "p_value": 0.25}
+        )
+        mock_session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exception_swallowed(
+        self,
+        persister: EvolutionPersister,
+        mock_session: MagicMock,
+    ) -> None:
+        """A DB failure must never propagate (telemetry is non-fatal)."""
+        mock_session.flush = AsyncMock(side_effect=RuntimeError("db down"))
+        await persister.record_ab_test_result(
+            uuid.uuid4(), {"tested": True, "p_value": 0.25}
+        )  # should not raise

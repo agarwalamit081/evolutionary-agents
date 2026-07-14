@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from typing import Any, Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -79,6 +80,23 @@ def _make_mock_git_tracker() -> MagicMock:
     mock_tracker.snapshot = AsyncMock(return_value="abcdef1234567890")
     mock_tracker.get_current_hash = AsyncMock(return_value="predeploy000000")
     return mock_tracker
+
+
+def _ab_alternating_side_effect(
+    control_result: Any, treatment_result: Any
+) -> Callable[..., Any]:
+    """A side_effect returning control on odd calls, treatment on even.
+
+    ab_test runs N PAIRED samples (control then treatment per sample); this
+    generator serves the right result regardless of the configured sample size.
+    """
+    state = {"n": 0}
+
+    def _se(*_args: Any, **_kwargs: Any) -> Any:
+        state["n"] += 1
+        return control_result if state["n"] % 2 == 1 else treatment_result
+
+    return _se
 
 
 def _make_mock_persister() -> MagicMock:
@@ -647,12 +665,12 @@ class TestEvolutionEngine:
 
     @pytest.mark.asyncio
     async def test_ab_test_with_mock_sandbox_faster_treatment(self) -> None:
-        """A/B test: treatment is faster than control -> is_significant=True."""
+        """A/B test: treatment consistently faster -> is_significant=True (N samples)."""
         mock_sandbox = MagicMock()
         control_result = _make_sandbox_result(success=True, duration_seconds=0.5)
         treatment_result = _make_sandbox_result(success=True, duration_seconds=0.2)
         mock_sandbox.execute_code = AsyncMock(
-            side_effect=[control_result, treatment_result]
+            side_effect=_ab_alternating_side_effect(control_result, treatment_result)
         )
         engine = SelfEvolutionEngine()
         proposal = {"original_content": "old code", "mutated_content": "new code"}
@@ -660,38 +678,40 @@ class TestEvolutionEngine:
 
         assert result["is_significant"] is True
         assert result["treatment_result"]["success"] is True
-        assert result["sample_size"] == 1
-        assert mock_sandbox.execute_code.await_count == 2
+        assert result["tested"] is True
+        # N paired samples → 2 calls per sample (control + treatment), any N.
+        assert mock_sandbox.execute_code.await_count == 2 * result["sample_size"]
 
     @pytest.mark.asyncio
     async def test_ab_test_with_slower_treatment(self) -> None:
-        """A/B test: treatment is 2x slower -> is_significant=False."""
+        """A/B test: treatment median slower than control -> is_significant=False."""
         mock_sandbox = MagicMock()
         control_result = _make_sandbox_result(success=True, duration_seconds=0.1)
         treatment_result = _make_sandbox_result(success=True, duration_seconds=0.5)
         mock_sandbox.execute_code = AsyncMock(
-            side_effect=[control_result, treatment_result]
+            side_effect=_ab_alternating_side_effect(control_result, treatment_result)
         )
         engine = SelfEvolutionEngine()
         proposal = {"original_content": "old code", "mutated_content": "new code"}
         result = await engine.ab_test(proposal, sandbox=mock_sandbox)
 
-        # 0.5 > 0.1 * 1.1 = 0.11, so treatment is too slow
+        # median treatment (0.5) > median control (0.1) → not significant
         assert result["is_significant"] is False
 
     @pytest.mark.asyncio
     async def test_ab_test_with_failing_treatment(self) -> None:
-        """A/B test: treatment fails -> is_significant=False."""
+        """A/B test: treatment fails more -> is_significant=False."""
         mock_sandbox = MagicMock()
         control_result = _make_sandbox_result(success=True, duration_seconds=0.1)
         treatment_result = _make_sandbox_result(success=False, exit_code=1, duration_seconds=0.05)
         mock_sandbox.execute_code = AsyncMock(
-            side_effect=[control_result, treatment_result]
+            side_effect=_ab_alternating_side_effect(control_result, treatment_result)
         )
         engine = SelfEvolutionEngine()
         proposal = {"original_content": "old code", "mutated_content": "new code"}
         result = await engine.ab_test(proposal, sandbox=mock_sandbox)
 
+        # treatment success-rate (0) < control (1) → not significant
         assert result["is_significant"] is False
 
     @pytest.mark.asyncio
@@ -701,13 +721,13 @@ class TestEvolutionEngine:
         control_result = _make_sandbox_result(success=False, exit_code=1, duration_seconds=0.1)
         treatment_result = _make_sandbox_result(success=True, duration_seconds=0.5)
         mock_sandbox.execute_code = AsyncMock(
-            side_effect=[control_result, treatment_result]
+            side_effect=_ab_alternating_side_effect(control_result, treatment_result)
         )
         engine = SelfEvolutionEngine()
         proposal = {"original_content": "old code", "mutated_content": "new code"}
         result = await engine.ab_test(proposal, sandbox=mock_sandbox)
 
-        # When control fails, treatment succeeds => significant
+        # control success-rate 0 → duration moot; successful treatment wins
         assert result["is_significant"] is True
 
     @pytest.mark.asyncio
@@ -733,6 +753,49 @@ class TestEvolutionEngine:
 
         assert result["is_significant"] is False
         assert "reason" in result
+
+    @pytest.mark.asyncio
+    async def test_ab_test_reports_wilcoxon_pvalue_for_consistent_effect(self) -> None:
+        """Phase 4: a consistent speedup yields a Wilcoxon p-value + confidence.
+
+        At N=3 the two-sided p-value cannot reach 0.05 (the smallest possible is
+        0.25), so the test asserts the p-value is an honest float in (0, 1] and
+        that promotion gates on the median (not on p<0.05).
+        """
+        mock_sandbox = MagicMock()
+        control_result = _make_sandbox_result(success=True, duration_seconds=0.5)
+        treatment_result = _make_sandbox_result(success=True, duration_seconds=0.2)
+        mock_sandbox.execute_code = AsyncMock(
+            side_effect=_ab_alternating_side_effect(control_result, treatment_result)
+        )
+        engine = SelfEvolutionEngine()
+        proposal = {"original_content": "old", "mutated_content": "new"}
+        result = await engine.ab_test(proposal, sandbox=mock_sandbox)
+
+        assert result["tested"] is True
+        assert result["is_significant"] is True
+        assert result["effect"] == pytest.approx(0.3)  # 0.5 - 0.2
+        p = result["p_value"]
+        assert p is not None and 0.0 < p <= 1.0
+        assert result["confidence"] == pytest.approx(1.0 - p)
+
+    @pytest.mark.asyncio
+    async def test_ab_test_no_pvalue_when_durations_identical(self) -> None:
+        """Phase 4: zero paired diffs → Wilcoxon not computable (p=None), but a
+        non-regressing treatment is still promoted on the median comparison."""
+        mock_sandbox = MagicMock()
+        same = _make_sandbox_result(success=True, duration_seconds=0.3)
+        mock_sandbox.execute_code = AsyncMock(
+            side_effect=_ab_alternating_side_effect(same, same)
+        )
+        engine = SelfEvolutionEngine()
+        proposal = {"original_content": "old", "mutated_content": "new"}
+        result = await engine.ab_test(proposal, sandbox=mock_sandbox)
+
+        assert result["p_value"] is None
+        assert result["confidence"] is None
+        # equal durations → treatment not slower → promoted
+        assert result["is_significant"] is True
 
     # ── Deploy tests ─────────────────────────────────────────────────
 

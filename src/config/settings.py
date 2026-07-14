@@ -1001,6 +1001,14 @@ class EvolutionSettings(BaseSettings):
     # model's max output tokens the regeneration loop may consume.
     evolution_temperature: float = 0.4  # Env: EVOLUTION_TEMPERATURE
     evolution_max_tokens_factor: float = 0.9  # Env: EVOLUTION_MAX_TOKENS_FACTOR
+    # A/B rigor (Phase 4): number of PAIRED sandbox samples per arm. Each sample
+    # runs original (control) then mutated (treatment) so the Wilcoxon signed-rank
+    # test has N paired duration diffs to work with. ``1`` reproduces the legacy
+    # single-sample heuristic (no statistical test); ``<=0`` is clamped to 1. At
+    # small N the test is honestly underpowered — the engine reports p-value +
+    # effect size + confidence and gates promotion on the median/success-rate
+    # comparison, not on p<0.05 (which N=3 cannot reach). Env: AB_SAMPLE_SIZE.
+    ab_sample_size: int = 3
     # Sandbox subprocess timeouts (previously hardcoded in
     # src/sandbox/executor.py asyncio.wait_for): venv creation + package install.
     sandbox_venv_create_timeout: int = 60  # Env: SANDBOX_VENV_CREATE_TIMEOUT

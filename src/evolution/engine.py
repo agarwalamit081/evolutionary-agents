@@ -722,6 +722,7 @@ class SelfEvolutionEngine:
 
         commit_hash: str | None = None
         pre_deploy_hash: str | None = None
+        diff_content: str | None = None
         target_path = proposal.get("target_path")
         mutated_content = proposal.get("mutated_content", "")
 
@@ -738,6 +739,16 @@ class SelfEvolutionEngine:
                     f"evolution: {proposal.get('description', 'mutation')}"
                 )
                 logger.info(f"Mutation committed to shadow repo: {commit_hash[:8] if commit_hash else '(no hash)'}")
+                # Capture the unified diff this mutation introduced (pre_deploy →
+                # now) so the mutation record carries a reviewable, rollback-
+                # ready diff — populating the previously-unused diff_content
+                # column. Best-effort: a tracker without get_diff skips it.
+                try:
+                    diff_content = await git_tracker.get_diff(
+                        since_hash=pre_deploy_hash
+                    )
+                except Exception as diff_exc:  # noqa: BLE001 — best-effort diff capture
+                    logger.debug(f"Could not capture mutation diff: {diff_exc}")
             except Exception as e:
                 logger.warning(f"Git tracker failed during deploy: {e}")
                 commit_hash = None
@@ -750,6 +761,7 @@ class SelfEvolutionEngine:
             "description": proposal.get("description"),
             "commit_hash": commit_hash,
             "pre_deploy_hash": pre_deploy_hash,
+            "diff_content": diff_content,
             "target_path": target_path,
             "rationale": proposal.get("rationale", ""),
             "ab_result": ab_result,
@@ -1269,7 +1281,10 @@ class SelfEvolutionEngine:
         # Persist the final mutation + terminal outcome.
         if self._persister is not None:
             mutation_id = await self._persister.record_mutation(
-                chain_id, proposal, status="generated"
+                chain_id,
+                proposal,
+                status="generated",
+                diff_content=deployment.get("diff_content") if deployed else None,
             )
             if terminal_status == "rolled_back":
                 await self._persister.update_mutation_status(mutation_id, "rolled_back")

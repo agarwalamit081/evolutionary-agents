@@ -188,6 +188,67 @@ class EvolutionPersister:
             logger.warning(f"Failed to update mutation {mutation_id} status: {e}")
             return False
 
+    async def set_active_config_version(
+        self, version_id: uuid.UUID
+    ) -> bool:
+        """Atomically mark ``version_id`` as the single active config version.
+
+        One transaction: clear ``is_active`` on every other
+        ``agent_config_versions`` row, then set it on the target — so the
+        one-active invariant holds even mid-swap (Phase 3b). A CONFIG mutation's
+        rollback re-points here to the prior version id instead of mutating data.
+
+        Returns True on success, False on any failure (non-fatal — caller logs).
+        """
+        try:
+            from sqlalchemy import update
+
+            from src.db.models import AgentConfigVersion
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                # Clear all, then activate the target — within one tx so the
+                # partial unique index (one is_active=true) is never violated.
+                await session.execute(
+                    update(AgentConfigVersion).values(is_active=False)
+                )
+                await session.execute(
+                    update(AgentConfigVersion)
+                    .where(AgentConfigVersion.id == version_id)
+                    .values(is_active=True)
+                )
+                await session.flush()
+            logger.debug(f"Activated config version {version_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to activate config version {version_id}: {e}")
+            return False
+
+    async def get_active_config_version(self) -> uuid.UUID | None:
+        """Return the currently-active config version id, or None if none/unknown.
+
+        Reads the single ``is_active=True`` row (the partial unique index
+        guarantees at most one). Best-effort: any DB error returns None.
+        """
+        try:
+            from sqlalchemy import select
+
+            from src.db.models import AgentConfigVersion
+            from src.db.session import get_session
+
+            async with get_session() as session:
+                row = (
+                    await session.execute(
+                        select(AgentConfigVersion.id).where(
+                            AgentConfigVersion.is_active.is_(True)
+                        )
+                    )
+                ).scalar_one_or_none()
+                return row
+        except Exception as e:
+            logger.debug(f"Could not read active config version: {e}")
+            return None
+
     async def record_event(
         self,
         chain_id: uuid.UUID | None,

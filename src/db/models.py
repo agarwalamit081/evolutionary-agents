@@ -870,6 +870,15 @@ class AgentConfigVersion(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+    # Atomic active-pointer (Phase 3b). At most ONE version is active at a time
+    # (enforced by ``EvolutionPersister.set_active_config_version`` in a single
+    # transaction: clear every other row's is_active, set the target's). A
+    # CONFIG mutation's rollback = re-point is_active to the prior version. The
+    # partial index makes the "one active" lookup cheap and gives the DB a
+    # second invariant check (only one True row can exist).
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     # Relationships
     config_snapshots: Mapped[list[ConfigSnapshot]] = relationship(
@@ -877,7 +886,17 @@ class AgentConfigVersion(Base):
     )
 
     # Indexes
-    __table_args__ = (Index("idx_agent_config_versions_created", "created_at"),)
+    __table_args__ = (
+        Index("idx_agent_config_versions_created", "created_at"),
+        # Partial unique index — at most one active version. PostgreSQL-specific;
+        # the downgrade drops it.
+        Index(
+            "idx_agent_config_versions_one_active",
+            "is_active",
+            unique=True,
+            postgresql_where=text("is_active = true"),
+        ),
+    )
 
 
 class ConfigSnapshot(Base):

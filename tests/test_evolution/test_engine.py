@@ -828,6 +828,73 @@ class TestEvolutionEngine:
 
         assert result["pre_deploy_hash"] is None
 
+    @pytest.mark.asyncio
+    async def test_deploy_captures_diff_content(self) -> None:
+        """Phase 3a: a tracker with get_diff records the mutation's diff.
+
+        The diff is computed from the pre-deploy hash (captured BEFORE apply) so
+        the mutation record carries a reviewable, rollback-ready diff — populating
+        the previously-unused diff_content column.
+        """
+        mock_tracker = _make_mock_git_tracker()
+        mock_tracker.get_diff = AsyncMock(return_value="@@ -1 +1 @@\n-x\n+y")
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "mutation_type": MutationType.CODE,
+            "description": "test",
+            "target_path": "t.py",
+            "mutated_content": "y",
+        }
+        result = await engine.deploy(
+            proposal, {"passed": True}, git_tracker=mock_tracker
+        )
+
+        assert result["deployed"] is True
+        assert result["diff_content"] == "@@ -1 +1 @@\n-x\n+y"
+        # The diff is scoped to the pre-deploy hash, so it isolates THIS mutation.
+        mock_tracker.get_diff.assert_awaited_once_with(since_hash="predeploy000000")
+
+    @pytest.mark.asyncio
+    async def test_deploy_diff_computed_after_apply(self) -> None:
+        """Phase 3a: the diff is captured AFTER apply (so it reflects the change)."""
+        mock_tracker = _make_mock_git_tracker()
+        mock_tracker.get_diff = AsyncMock(return_value="diff")
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "mutation_type": MutationType.CODE,
+            "description": "test",
+            "target_path": "t.py",
+            "mutated_content": "y",
+        }
+        await engine.deploy(proposal, {"passed": True}, git_tracker=mock_tracker)
+
+        # Order must be: current_hash → apply_mutation → snapshot → get_diff.
+        # method_calls entries are `call` objects whose first element is the name.
+        names = [c[0] for c in mock_tracker.method_calls]
+        idx_apply = names.index("apply_mutation")
+        idx_diff = names.index("get_diff")
+        assert idx_diff > idx_apply
+
+    @pytest.mark.asyncio
+    async def test_deploy_best_effort_diff_failure(self) -> None:
+        """Phase 3a: a get_diff failure is non-fatal — deploy still succeeds, diff None."""
+        mock_tracker = _make_mock_git_tracker()
+        mock_tracker.get_diff = AsyncMock(side_effect=RuntimeError("git broken"))
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "mutation_type": MutationType.CODE,
+            "description": "test",
+            "target_path": "t.py",
+            "mutated_content": "y",
+        }
+        result = await engine.deploy(
+            proposal, {"passed": True}, git_tracker=mock_tracker
+        )
+
+        assert result["deployed"] is True
+        assert result["diff_content"] is None
+        assert result["commit_hash"] == "abcdef1234567890"
+
     # ── Reject tests ─────────────────────────────────────────────────
 
     def test_reject_creates_rejection_record(self) -> None:
@@ -1564,7 +1631,10 @@ class TestEvolutionEngine:
         assert result["mutations_deployed"] == 0
         # Shadow repo reverted to the pre-deploy hash captured by deploy().
         mock_tracker.rollback.assert_awaited_once_with("predeploy000000")
-        mock_tracker.get_diff.assert_awaited_once()
+        # get_diff is now awaited twice: once in deploy() (Phase 3a captures the
+        # deployed diff) and once in rollback() (the reverted diff). The most
+        # recent call is the rollback, scoped to the pre-deploy hash.
+        assert mock_tracker.get_diff.await_count == 2
         assert mock_tracker.get_diff.await_args.kwargs["since_hash"] == "predeploy000000"
         assert result["rollback"]["rolled_back"] is True
         # Persistence recorded the rollback outcome.

@@ -306,3 +306,72 @@ class TestCompleteChain:
     ) -> None:
         mock_session.execute = AsyncMock(side_effect=RuntimeError("db down"))
         assert await persister.complete_chain(uuid.uuid4(), "deployed") is False
+
+
+# ---------------------------------------------------------------------------
+# set_active_config_version / get_active_config_version (Phase 3b)
+# ---------------------------------------------------------------------------
+
+
+class TestSetActiveConfigVersion:
+    """Atomic one-active-pointer swap (Phase 3b — atomic config versioning)."""
+
+    @pytest.mark.asyncio
+    async def test_clears_all_then_activates_target(
+        self,
+        persister: EvolutionPersister,
+        mock_session: MagicMock,
+    ) -> None:
+        """Two UPDATEs in one session: clear every is_active, then set the target.
+
+        The order matters — clearing all first, then activating the target within
+        the same transaction, so the partial-unique-index (one is_active=true)
+        invariant is never violated mid-swap.
+        """
+        target = uuid.uuid4()
+        assert await persister.set_active_config_version(target) is True
+
+        # Exactly two executes: the bulk-clear then the targeted activation.
+        assert mock_session.execute.await_count == 2
+        mock_session.flush.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_false(
+        self, persister: EvolutionPersister, mock_session: MagicMock
+    ) -> None:
+        """A DB failure is non-fatal — best-effort returns False (caller logs)."""
+        mock_session.execute = AsyncMock(side_effect=RuntimeError("db down"))
+        assert await persister.set_active_config_version(uuid.uuid4()) is False
+
+
+class TestGetActiveConfigVersion:
+    """Reads the single is_active=true version id (Phase 3b)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_active_version_id(
+        self, persister: EvolutionPersister, mock_session: MagicMock
+    ) -> None:
+        active_id = uuid.uuid4()
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none = MagicMock(return_value=active_id)
+        mock_session.execute = AsyncMock(return_value=result_mock)
+
+        assert await persister.get_active_config_version() == active_id
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_active_row(
+        self, persister: EvolutionPersister, mock_session: MagicMock
+    ) -> None:
+        """No is_active=true row (fresh table / never activated) → None."""
+        result_mock = MagicMock()
+        result_mock.scalar_one_or_none = MagicMock(return_value=None)
+        mock_session.execute = AsyncMock(return_value=result_mock)
+
+        assert await persister.get_active_config_version() is None
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_none(
+        self, persister: EvolutionPersister, mock_session: MagicMock
+    ) -> None:
+        mock_session.execute = AsyncMock(side_effect=RuntimeError("db down"))
+        assert await persister.get_active_config_version() is None

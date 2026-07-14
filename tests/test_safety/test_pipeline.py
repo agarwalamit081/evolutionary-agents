@@ -310,13 +310,13 @@ class TestLayer7Semantic:
 
 
 class TestFullPipelineIntegration:
-    """Tests that all 7 layers work together correctly."""
+    """Tests that all 8 layers (7 behavioral + safety-preservation) work together."""
 
     @pytest.mark.asyncio
     async def test_all_seven_layers_pass_with_mock_sandbox(
         self, pipeline: SafetyPipeline
     ) -> None:
-        """All 7 layers pass with clean code and a mock sandbox executor."""
+        """All 8 layers pass with clean code and a mock sandbox executor."""
         mock_sandbox = MagicMock()
         mock_sandbox.execute_code = AsyncMock(return_value=SandboxResult(
             success=True, exit_code=0, stdout="ok", stderr="",
@@ -332,8 +332,8 @@ class TestFullPipelineIntegration:
 
         assert result["passed"] is True
         assert result["issues"] == []
-        # Verify all 7 layers are present and passed
-        assert len(result["layers"]) == 7
+        # Verify all 8 layers are present and passed (7 behavioral + preservation)
+        assert len(result["layers"]) == 8
         for layer_name, layer_result in result["layers"].items():
             assert layer_result["passed"] is True, f"Layer {layer_name} did not pass"
 

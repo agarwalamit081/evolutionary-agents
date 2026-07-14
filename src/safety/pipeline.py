@@ -1,9 +1,10 @@
-"""7-layer safety pipeline for evolution mutations."""
+"""Safety pipeline for evolution mutations (7 behavioral layers + 1 preservation gate)."""
 
 from __future__ import annotations
 
 import ast
 import re
+from enum import Enum
 from typing import Any
 
 from src.graph.enums import MutationType
@@ -41,6 +42,61 @@ _CODE_MUTATIONS: frozenset[MutationType] = frozenset({
 })
 
 
+# ── Safety-preservation taxonomy (Q93) ───────────────────────────────────
+# A self-modifying agent's gravest threat is a mutation that defangs the safety
+# apparatus itself — neutralizing the pipeline, flipping an eval/gate flag off,
+# or short-circuiting the validate() call. These are categorized so a caller
+# (the evolution engine, the dashboard) can report WHY a mutation was rejected
+# and so 2c's CODE/TOOL gating can branch on the category. Distinct from the
+# 7 layers above (which vet what the mutation DOES); this vets what the
+# mutation would do TO THE SAFETY SYSTEM.
+
+
+class SafetyViolationType(str, Enum):
+    """Category of a safety-preservation violation (Q93 taxonomy)."""
+
+    PIPELINE_NEUTRALIZATION = "pipeline_neutralization"  # reassign/monkey-patch SafetyPipeline / blocklist
+    GATE_FLAG_FLIP = "gate_flag_flip"  # rewrite an eval/evolution gate-control flag
+    SAFETY_INVOCATION_DISABLE = "safety_invocation_disable"  # short-circuit/ignore a validate() result
+
+
+class SafetyViolationError(Exception):
+    """Raised when a mutation attempts to disable the safety apparatus.
+
+    Carries the typed ``violation`` (Q93 taxonomy) + the human-readable detail
+    so callers can surface a precise rejection. The pipeline's ``validate()``
+    returns this information in its result dict rather than raising (consistent
+    with the other layers); callers that want a hard stop (2c CODE/TOOL gating,
+    the dashboard) construct/raise this from the layer's ``violations`` list.
+    """
+
+    def __init__(self, violation: SafetyViolationType, detail: str) -> None:
+        self.violation = violation
+        self.detail = detail
+        super().__init__(f"{violation.value}: {detail}")
+
+
+# Gate-control identifiers a mutation has NO legitimate business rewriting.
+# Protecting these (in BOTH directions) is the point: a CONFIG/CODE mutation
+# must not silently flip eval_enabled off (kills the recomputation/anti-
+# fabrication backbone) nor toggle no_evolution/evolution_enabled mid-system.
+_GATE_FLAG_IDENTIFIERS: tuple[str, ...] = (
+    "no_evolution",
+    "eval_enabled",
+    "evolution_enabled",
+)
+
+# Safety-apparatus names that, if reassigned/overwritten by generated code,
+# indicate the mutation is neutralizing the gate (not merely using it).
+_SAFETY_APPARATUS_NAMES: frozenset[str] = frozenset({
+    "SafetyPipeline",
+    "_FORBIDDEN_PATTERNS",
+    "should_gate_destructive",
+    "SafetyViolationError",
+    "SafetyViolationType",
+})
+
+
 def should_gate_destructive(tool_name: str, registry: Any) -> bool:
     """Decide whether ``tool_name``'s invocation routes through the HITL gate (F3).
 
@@ -62,7 +118,7 @@ def should_gate_destructive(tool_name: str, registry: Any) -> bool:
 
 
 class SafetyPipeline:
-    """7-layer sequential safety gate for evolution mutations.
+    """Safety gate for evolution mutations: 7 behavioral layers + 1 preservation.
 
     Layers:
     1. Syntax validation (AST parse)
@@ -72,6 +128,9 @@ class SafetyPipeline:
     5. Behavioral constraints (resource limits)
     6. Sandbox execution (isolated test)
     7. Semantic check (behavioral invariants)
+    8. Safety-preservation (Q93): reject mutations that disable the safety
+       apparatus itself (pipeline neutralization, eval/evolution gate-flag
+       flips, validate() short-circuit). Runs for ALL mutation types.
 
     All layers must pass for a mutation to be deployed.
     """
@@ -159,6 +218,16 @@ class SafetyPipeline:
             results["semantic"] = {"passed": True, "issues": [], "note": "skipped: non-code mutation"}
         if not results["semantic"]["passed"]:
             all_issues.extend(results["semantic"]["issues"])
+
+        # Layer 8: Safety-preservation (Q93 taxonomy) — applies to ALL mutation
+        # types. Unlike Layers 1/4/7 (which vet what the code DOES), this vets
+        # what the mutation would do TO THE SAFETY SYSTEM: neutralize the
+        # pipeline, rewrite an eval/evolution gate flag, or short-circuit a
+        # validate() result. A CONFIG flag-flip or a PROMPT-injected assignment
+        # is just as dangerous as a CODE monkey-patch, so it runs unconditionally.
+        results["preservation"] = self._check_safety_preservation(code)
+        if not results["preservation"]["passed"]:
+            all_issues.extend(results["preservation"]["issues"])
 
         passed = all(layer["passed"] for layer in results.values())
 
@@ -390,6 +459,131 @@ class SafetyPipeline:
         if issues:
             return {"passed": False, "issues": issues}
         return {"passed": True, "issues": []}
+
+    def _check_safety_preservation(
+        self, code: str
+    ) -> dict[str, Any]:
+        """Layer 8: Reject mutations that disable the safety apparatus (Q93).
+
+        Three categories (``SafetyViolationType``), applied to ALL mutation
+        types — a CONFIG flag-flip or PROMPT-injected assignment is as dangerous
+        as a CODE monkey-patch:
+
+          * **GATE_FLAG_FLIP** — the mutation rewrites a gate-control identifier
+            (``no_evolution``/``eval_enabled``/``evolution_enabled``). Detected
+            by line-anchored assignment regex so it spans code/config/env/TOML
+            but does NOT match a prose mention ("set eval_enabled to false").
+          * **PIPELINE_NEUTRALIZATION** — Python-source reassignment of a safety
+            name (``SafetyPipeline``/``_FORBIDDEN_PATTERNS``/…) or a
+            ``SafetyPipeline.<attr>`` monkey-patch. AST-only (CODE/TOOL).
+          * **SAFETY_INVOCATION_DISABLE** — hardcoding the ``safety_result``
+            dict to a literal or nulling the ``safety``/``safety_pipeline``
+            handle. AST-only (CODE/TOOL).
+
+        Returns ``{passed, issues, violations}`` where ``violations`` is a list
+        of ``{category, detail}`` dicts for precise reporting / 2c branching.
+        Conservative by design: false negatives are possible (a novel
+        defanging), false positives are minimized (only assignment syntax +
+        apparatus-name reassignment trip it).
+        """
+        violations: list[dict[str, str]] = []
+        text = code or ""
+
+        # GATE_FLAG_FLIP — regex, line-anchored assignment. Applies to all types.
+        for ident in _GATE_FLAG_IDENTIFIERS:
+            for _ in re.finditer(rf"(?m)^[ \t]*{re.escape(ident)}\s*[:=]", text):
+                violations.append(
+                    {
+                        "category": SafetyViolationType.GATE_FLAG_FLIP.value,
+                        "detail": (
+                            f"mutation rewrites gate-control flag '{ident}' "
+                            "(a mutation must not alter eval/evolution gates)"
+                        ),
+                    }
+                )
+
+        # PIPELINE_NEUTRALIZATION + SAFETY_INVOCATION_DISABLE — AST, code only.
+        # A prose mention of 'SafetyPipeline' (in a PROMPT) is not a threat.
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            tree = None
+
+        if tree is not None:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for tgt in node.targets:
+                        self._collect_target_violation(tgt, node.value, violations)
+                elif isinstance(node, ast.AnnAssign) and node.target is not None:
+                    self._collect_target_violation(node.target, node.value, violations)
+
+        if not violations:
+            return {"passed": True, "issues": [], "violations": []}
+        # De-dup identical (category, detail) pairs (an apparatus name reassigned
+        # via a multi-target assign should report once).
+        seen: set[tuple[str, str]] = set()
+        unique: list[dict[str, str]] = []
+        for v in violations:
+            key = (v["category"], v["detail"])
+            if key not in seen:
+                seen.add(key)
+                unique.append(v)
+        issues = [f"[{v['category']}] {v['detail']}" for v in unique]
+        return {"passed": False, "issues": issues, "violations": unique}
+
+    @staticmethod
+    def _collect_target_violation(
+        tgt: ast.expr, value: Any, violations: list[dict[str, str]]
+    ) -> None:
+        """Map one assignment target → any preservation violation it represents."""
+        # PIPELINE_NEUTRALIZATION: reassign a safety-apparatus name.
+        if isinstance(tgt, ast.Name) and tgt.id in _SAFETY_APPARATUS_NAMES:
+            violations.append(
+                {
+                    "category": SafetyViolationType.PIPELINE_NEUTRALIZATION.value,
+                    "detail": f"mutation reassigns safety-apparatus name '{tgt.id}'",
+                }
+            )
+            return
+        # PIPELINE_NEUTRALIZATION: monkey-patch a SafetyPipeline attribute.
+        if (
+            isinstance(tgt, ast.Attribute)
+            and isinstance(tgt.value, ast.Name)
+            and tgt.value.id == "SafetyPipeline"
+        ):
+            violations.append(
+                {
+                    "category": SafetyViolationType.PIPELINE_NEUTRALIZATION.value,
+                    "detail": f"mutation monkey-patches SafetyPipeline.{tgt.attr}",
+                }
+            )
+            return
+        # SAFETY_INVOCATION_DISABLE: hardcode the safety_result dict.
+        if (
+            isinstance(tgt, ast.Name)
+            and tgt.id == "safety_result"
+            and isinstance(value, ast.Dict)
+        ):
+            violations.append(
+                {
+                    "category": SafetyViolationType.SAFETY_INVOCATION_DISABLE.value,
+                    "detail": "mutation hardcodes safety_result (short-circuits validate())",
+                }
+            )
+            return
+        # SAFETY_INVOCATION_DISABLE: null the safety handle.
+        if (
+            isinstance(tgt, ast.Name)
+            and tgt.id in ("safety", "safety_pipeline")
+            and isinstance(value, ast.Constant)
+            and value.value is None
+        ):
+            violations.append(
+                {
+                    "category": SafetyViolationType.SAFETY_INVOCATION_DISABLE.value,
+                    "detail": f"mutation sets safety handle '{tgt.id}' = None (disables validate())",
+                }
+            )
 
 
 # ── Layer 5 helpers ────────────────────────────────────────────────────

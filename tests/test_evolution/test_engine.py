@@ -490,6 +490,24 @@ class TestEvolutionEngine:
         assert result["passed"] is False
 
     @pytest.mark.asyncio
+    async def test_validate_preservation_violation_surfaces_category(self) -> None:
+        """A mutation that flips eval_enabled is rejected with the typed Q93
+        category in the reason (not the generic 'failed safety layers')."""
+        engine = SelfEvolutionEngine()
+        proposal = {
+            "mutation_type": MutationType.CONFIG,
+            "description": "disable eval",
+            "mutated_content": "eval_enabled = False\n",
+        }
+        result = await engine.validate(proposal)
+        assert result["passed"] is False
+        assert "safety-preservation" in result["reason"]
+        assert "gate_flag_flip" in result["reason"]
+        # The full typed violations list is in details for the dashboard.
+        violations = result["details"]["layers"]["preservation"]["violations"]
+        assert any(v["category"] == "gate_flag_flip" for v in violations)
+
+    @pytest.mark.asyncio
     async def test_validate_code_threads_sandbox_root(self) -> None:
         """validate() adds sandbox_root to the safety context for CODE mutations."""
         mock_safety = MagicMock()

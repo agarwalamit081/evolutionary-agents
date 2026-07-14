@@ -510,10 +510,25 @@ class SelfEvolutionEngine:
                 name for name, result in safety_result["layers"].items()
                 if not result["passed"]
             ]
-            logger.warning(f"Safety validation failed: {failed_layers}")
+            # Surface the typed Q93 preservation violations (if the preservation
+            # layer tripped) in the rejection reason, so a CODE/TOOL/CONFIG/
+            # PROMPT mutation that tried to disable the safety apparatus is
+            # rejected with its category — not the generic "failed safety
+            # layers". The full structured list stays in ``details``.
+            preservation = safety_result["layers"].get("preservation", {})
+            violations = preservation.get("violations", []) if preservation else []
+            if violations:
+                cats = sorted({v["category"] for v in violations})
+                reason = (
+                    f"Rejected (safety-preservation): {', '.join(cats)} — a "
+                    f"mutation may not disable the safety apparatus"
+                )
+            else:
+                reason = f"Failed safety layers: {', '.join(failed_layers)}"
+            logger.warning(f"Safety validation failed: {failed_layers} ({reason})")
             return {
                 "passed": False,
-                "reason": f"Failed safety layers: {', '.join(failed_layers)}",
+                "reason": reason,
                 "details": safety_result,
             }
 

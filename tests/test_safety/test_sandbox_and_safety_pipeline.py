@@ -333,7 +333,7 @@ class TestSandboxExecuteRuntimeCodeRefusesSubprocess:
 
 
 # ════════════════════════════════════════════════════════════════════════
-# PART 2 — SafetyPipeline: each of the 7 layers REJECTS its category
+# PART 2 — SafetyPipeline: each of the 8 layers REJECTS its category
 # ════════════════════════════════════════════════════════════════════════
 
 
@@ -350,8 +350,8 @@ class TestPipelinePassesCleanInput:
         result = await pipeline.validate(_clean_code())
         assert result["passed"] is True
         assert result["issues"] == []
-        # All 7 layers present and each passed.
-        assert len(result["layers"]) == 7
+        # All 8 layers present and each passed (7 behavioral + preservation).
+        assert len(result["layers"]) == 8
         assert all(layer["passed"] for layer in result["layers"].values())
 
     @pytest.mark.asyncio

@@ -650,10 +650,7 @@ class RedisSettings(BaseSettings):
     """Redis cache and session storage configuration."""
 
     redis_url: str = "redis://localhost:6380/0"
-    redis_ttl_hot_memory: int = 86400  # 24 hours
-    redis_ttl_session: int = 3600  # 1 hour
-    redis_ttl_rate_limit: int = 60  # 1 minute
-    cache_ttl_seconds: int = 3600  # LLM prompt cache TTL
+    cache_ttl_seconds: int = 3600  # LLM prompt cache TTL (also the hot-memory TTL; see manager.py)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -885,7 +882,6 @@ class RunnerSettings(BaseSettings):
 class BudgetSettings(BaseSettings):
     """Token budget and cost control configuration."""
 
-    daily_token_budget: int = 500000
     # Per-run token cap (cumulative across the run_id — ``CostTracker`` sums
     # ``cost_ledger.total_tokens``). Raised 200K→500K: a complex multi-deliverable
     # run with recompute/verification probes (battery q07/q08/q09 / complex-arxiv
@@ -991,11 +987,7 @@ class BudgetSettings(BaseSettings):
 class EvolutionSettings(BaseSettings):
     """Self-evolution system configuration."""
 
-    evolution_enabled: bool = True  # aligns with .env.example (Env: EVOLUTION_ENABLED)
-    evolution_interval: int = 10  # Every N tasks
-    evolution_max_mutations: int = 5
     evolution_sandbox_timeout: int = 30  # Seconds
-    evolution_require_human_approval: bool = True
     evolution_sandbox_memory_mb: int = 256
     evolution_sandbox_image: str = "python:3.12-slim"
     evolution_sandbox_mode: Literal["docker", "subprocess", "runner"] = "docker"
@@ -1124,8 +1116,6 @@ class EvolutionSettings(BaseSettings):
     )
 
     @field_validator(
-        "evolution_interval",
-        "evolution_max_mutations",
         "evolution_sandbox_timeout",
         "evolution_sandbox_memory_mb",
         "sandbox_venv_create_timeout",

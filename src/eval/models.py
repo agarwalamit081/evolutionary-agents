@@ -107,6 +107,14 @@ class GoalSpec(BaseModel):
     # node-sensitive specs ahead of universal ones. ``None`` = universal /
     # data-correctness (q01…q09). See ``StateCheck`` for node-state assertions.
     target_node: str | None = Field(default=None)
+    # Vision (Phase 5c): image references attached to the goal so a vision-capable
+    # model can see them during the execute reasoning loop. Each entry is an
+    # ``http(s)://`` URL, a ``data:image/...;base64,...`` data-URI, or a path to a
+    # local image file (resolved to a data-URI at run start in the runner). Empty
+    # ⇒ no images (the default; every battery/text goal). The gateway only attaches
+    # them when ``AgentSettings.vision_enabled`` is on, so this field is inert until
+    # that flag is toggled. See runner._resolve_image_refs + the vision_extract spec.
+    images: list[str] = Field(default_factory=list)
 
     def to_benchmark_goal(self) -> BenchmarkGoal:
         """Project this spec onto the legacy process-only benchmark goal."""

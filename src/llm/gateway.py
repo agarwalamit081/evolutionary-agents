@@ -163,6 +163,42 @@ def build_content_blocks(
     return blocks
 
 
+def resolve_image_refs(refs: list[str] | None) -> list[str]:
+    """Convert goal-level image references into gateway-ready payloads.
+
+    Each ref is one of:
+      * an ``http://``/``https://`` URL → passed through verbatim,
+      * a ``data:...`` data-URI → passed through verbatim,
+      * a path to a local image file → read once + base64-encoded into a
+        ``data:<mime>;base64,...`` data-URI.
+
+    Best-effort and never raises: unreadable / non-string / missing refs are
+    dropped (a bad image never aborts the run). Returns ``[]`` for empty/None
+    input, so the caller's no-images path is byte-identical to today.
+    """
+    import base64
+    import mimetypes
+    from pathlib import Path
+
+    out: list[str] = []
+    for ref in refs or []:
+        if not isinstance(ref, str) or not ref:
+            continue
+        low = ref.lower()
+        if low.startswith(("http://", "https://", "data:")):
+            out.append(ref)
+            continue
+        # Otherwise treat as a local file path → embed as a data-URI.
+        try:
+            path = Path(ref)
+            data = path.read_bytes()
+            mime = mimetypes.guess_type(ref)[0] or "image/png"
+            out.append(f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}")
+        except OSError as exc:
+            logger.debug(f"Vision: could not read image ref {ref!r}: {exc}")
+    return out
+
+
 def _content_char_len(content: Any) -> int:
     """Approximate character length of a message ``content`` field.
 
@@ -739,6 +775,7 @@ class LLMGateway:
         temperature: float | None = None,
         metadata: dict[str, Any] | None = None,
         timeout: float | None = None,
+        images: list[str] | None = None,
     ) -> ToolCallResponse:
         """Send a completion request with tool definitions.
 
@@ -751,6 +788,11 @@ class LLMGateway:
                 ``ModelRouter.route`` for per-node tier overrides.
             temperature: Sampling temperature.
             metadata: Optional metadata for logging.
+            images: Optional image references (Phase 5c vision). Passed straight
+                to ``acompletion``, which folds them into the last user message
+                + flags ``require_vision`` (restricting the chain to image-capable
+                models) — but ONLY when ``vision_enabled`` is on. ``None``/empty
+                ⇒ byte-identical to the text-only tool path.
 
         Returns:
             ToolCallResponse with tool calls and optional text content.
@@ -765,6 +807,7 @@ class LLMGateway:
             temperature=temperature,
             metadata=metadata,
             timeout=timeout,
+            images=images,
         )
 
         return ToolCallResponse(

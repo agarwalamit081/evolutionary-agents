@@ -20,6 +20,7 @@ def initial_state(
     thread_id: str,
     max_iterations: int | None = None,
     no_evolution: bool = False,
+    images: list[str] | None = None,
 ) -> AgentState:
     """Create a fresh AgentState with sensible defaults.
 
@@ -50,6 +51,10 @@ def initial_state(
         # classify re-emits (and future nodes could touch); submitted_goal freezes
         # the literal text so recall + the OBJECTIVE can never drift (#254 backstop).
         submitted_goal=goal_text,
+        # Vision (Phase 5c): gateway-ready image payloads for this goal (empty
+        # for every text/battery goal). Resolved from a GoalSpec.images spec at
+        # run start in the runner; passed through to the execute reasoning loop.
+        images=images or [],
         strategy=Strategy.DIRECT,
         plan_steps=[],
         current_step_index=0,

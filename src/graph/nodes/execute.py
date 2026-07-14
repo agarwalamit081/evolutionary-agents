@@ -843,6 +843,13 @@ async def _llm_execute(
                 # (replacing the prior no-complexity → always-SIMPLE-tier path).
                 complexity=step_routing_complexity,
                 node=NODE_EXECUTE,
+                # Phase 5c: thread the run's goal-level images (if any) into the
+                # reasoning loop so a vision-capable model can see them while it
+                # plans tool calls. ``state["images"]`` is empty for every
+                # text/battery goal (set only when a GoalSpec carries images AND
+                # vision_enabled resolves them at run start), so this is a no-op
+                # (None) on the default path — byte-identical to today.
+                images=state.get("images") or None,
             )
 
             # Process tool calls if present. gather preserves order, so each

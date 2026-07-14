@@ -331,6 +331,27 @@ async def execute_run(
     spec_id = _resolve_eval_spec_id(run_id)
     if spec_id is not None:
         state["eval_goal_spec_id"] = spec_id
+        # Phase 5c vision: thread the spec's goal-level images (if any) into
+        # state as gateway-ready payloads (data-URIs / URLs) so the execute
+        # reasoning loop can attach them to a vision-capable model when
+        # ``vision_enabled`` is on. Empty for every text/battery goal → the
+        # vision path stays byte-identical to today. Best-effort: a missing/
+        # unreadable image is dropped (never aborts the run).
+        try:
+            from src.eval.golden import lookup_goal_spec
+            from src.llm.gateway import resolve_image_refs
+
+            spec = lookup_goal_spec(spec_id)
+            if spec is not None and spec.images:
+                payloads = resolve_image_refs(spec.images)
+                if payloads:
+                    state["images"] = payloads
+                    logger.info(
+                        f"Vision: {len(payloads)} image(s) attached to run "
+                        f"{run_id!r} from spec {spec_id!r}"
+                    )
+        except Exception as exc:  # noqa: BLE001 — image threading is best-effort
+            logger.debug(f"Vision image threading skipped for {spec_id!r}: {exc}")
         # A battery run (``--run-id qNN`` resolves to a golden GoalSpec) opts
         # into the Phase-3 correctness layer: enable eval + enforce so the
         # verify node's golden/structural/execution checks actually run and a

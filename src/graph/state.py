@@ -164,6 +164,13 @@ class AgentState(TypedDict, total=False):
     # objective_goal_text(), not the mutable current_goal.text — so a recalled
     # skill/fact/episode can neither drift the objective nor redirect recall.
     submitted_goal: str
+    # ─── Vision (Phase 5c; default-off) ──────────────────────────────────
+    # Gateway-ready image references (data-URIs / URLs) attached to the goal at
+    # run start from a GoalSpec.images spec (see runner._resolve_image_refs).
+    # Empty list ⇒ the vision path is byte-identical to the text-only path
+    # (the gateway's build_content_blocks returns the plain text unchanged).
+    # Set once at run start; never mutated by a node.
+    images: list[str]
     strategy: Strategy
     plan_steps: list[PlanStep]
     current_step_index: int

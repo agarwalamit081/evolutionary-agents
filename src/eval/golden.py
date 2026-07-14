@@ -2143,6 +2143,104 @@ def _battery04_classify_complex() -> GoalSpec:
     )
 
 
+def _vision_extract() -> GoalSpec:
+    """Phase 5c vision validation (NOT in BATTERY04_GOALS).
+
+    A sales-report image (``tests/fixtures/vision_sample.png``) is attached to
+    the goal; the agent must read it with a vision-capable model and extract
+    three known values into ``results/vision_extract/values.json``. The golden
+    checks re-assert each extracted value, so a model that ignores the image or
+    hallucinates the numbers is caught. Registered for ``--score-spec`` /
+    ``--run-id vision_extract`` lookup only — it never runs in the nightly
+    capability-curve battery. Requires ``VISION_ENABLED=true`` + a vision-capable
+    model in the fallback chain (see ``gateway.resolve_image_refs`` +
+    ``_execute_with_fallback``'s ``require_vision`` chain filter).
+    """
+    return GoalSpec(
+        spec_id="vision_extract",
+        name="vision_extract",
+        description=(
+            "Phase 5c vision isolate-validation: read an attached sales-report "
+            "image with a vision model and extract three known values to JSON."
+        ),
+        goal_text=(
+            "An image of a sales report is attached to this goal. Read the image "
+            "and extract exactly these three values from it, then write them to "
+            "results/vision_extract/values.json as a JSON object:\n"
+            '  - "revenue": the Revenue value in USD, as a NUMBER with no currency '
+            "symbol, no commas, no decimal places (e.g. 42500).\n"
+            '  - "units_sold": the Units Sold value, as an INTEGER.\n'
+            '  - "top_region": the Top Region value, as a STRING.\n'
+            "The JSON file must contain exactly those three keys and nothing else. "
+            "Do not invent values — read them from the image."
+        ),
+        category="complex",
+        max_iterations=25,
+        timeout_seconds=600,
+        expected_deliverables=["results/vision_extract/values.json"],
+        success_criteria=[
+            "results/vision_extract/values.json exists and is valid JSON",
+            "revenue, units_sold, and top_region match the image exactly",
+        ],
+        images=["tests/fixtures/vision_sample.png"],
+        checks=[
+            CheckConfig(
+                check_type="golden",
+                name="vision_deliverable_exists",
+                params={
+                    "assertions": [
+                        {"kind": "exists", "deliverable": "results/vision_extract/values.json"},
+                    ]
+                },
+            ),
+            CheckConfig(
+                check_type="golden",
+                name="vision_revenue_matches_image",
+                params={
+                    "assertions": [
+                        {
+                            "kind": "json_path_eq",
+                            "deliverable": "results/vision_extract/values.json",
+                            "path": "revenue",
+                            "value": 42500,
+                            "tolerance": 0.5,
+                        }
+                    ]
+                },
+            ),
+            CheckConfig(
+                check_type="golden",
+                name="vision_units_sold_matches_image",
+                params={
+                    "assertions": [
+                        {
+                            "kind": "json_path_eq",
+                            "deliverable": "results/vision_extract/values.json",
+                            "path": "units_sold",
+                            "value": 1247,
+                            "tolerance": 0.5,
+                        }
+                    ]
+                },
+            ),
+            CheckConfig(
+                check_type="golden",
+                name="vision_top_region_matches_image",
+                params={
+                    "assertions": [
+                        {
+                            "kind": "json_path_eq",
+                            "deliverable": "results/vision_extract/values.json",
+                            "path": "top_region",
+                            "value": "EMEA",
+                        }
+                    ]
+                },
+            ),
+        ],
+    )
+
+
 # Registry keyed by spec_id — the verify node + --eval suite resolve a run's spec
 # via state["eval_goal_spec_id"] → lookup_goal_spec(spec_id).
 GOLDEN_SPECS: dict[str, GoalSpec] = {
@@ -2163,6 +2261,9 @@ GOLDEN_SPECS: dict[str, GoalSpec] = {
         # BATTERY04_GOALS, so the nightly capability-curve battery is unperturbed
         # (same pattern as the classify canaries above).
         *LEARNING_PROBES,
+        # Phase 5c vision isolate-validation spec (same non-battery registration
+        # pattern — discoverable by lookup, never in BATTERY04_GOALS).
+        _vision_extract(),
     )
 }
 

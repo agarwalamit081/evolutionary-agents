@@ -1,0 +1,170 @@
+"""Operator dashboard routes (Phase 5) — server-rendered (FastAPI + Jinja2).
+
+Five read-only HTML views over the existing data (no new schema, no writes):
+  GET /dashboard              — index: summary cards + recent runs + recent mutations
+  GET /dashboard/runs         — run observer (Redis ``turing:run:*``), auto-refreshing
+  GET /dashboard/runs/{id}    — run detail: status, cost-by-model, review card
+  GET /dashboard/curve        — per-run × per-goal eval matrix + summary chart
+  GET /dashboard/mutations    — mutation/promotion timeline (with Phase-3 diff + Phase-4 A/B)
+
+Auto-refresh is a tiny vanilla-JS polling swap (``static/poll.js``) — no SSE, no
+build step. Each list endpoint honors ``?partial=1`` to return just its table
+fragment so the poller can swap a ``<tbody>`` without re-rendering the page.
+
+All views degrade gracefully: a Redis/DB hiccup in the data layer returns an
+empty result, so a page renders "no data yet" rather than 500. The dashboard
+mounts under ``/dashboard`` (no API prefix — it is a UI, not a programmatic API).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import redis.asyncio as aioredis
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from loguru import logger
+
+from src.api.routes import dashboard_data as data
+from src.config import get_settings
+from src.db.session import get_session
+from src.worker.status import RunStatusStore
+
+router = APIRouter()
+
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+
+async def _open_store() -> tuple[RunStatusStore, aioredis.Redis]:
+    """Build a per-request RunStatusStore over a fresh Redis client.
+
+    The caller closes the returned client in a ``finally`` so the connection
+    returns to the pool (the agent routes leave this to GC; the dashboard polls
+    frequently, so an explicit close avoids leaking connections under refresh).
+    """
+    settings = get_settings()
+    redis_client = aioredis.from_url(settings.redis.redis_url)
+    return RunStatusStore(redis_client, settings.worker), redis_client
+
+
+def _is_partial(request: Request) -> bool:
+    """``?partial=1`` → render just the table fragment (polled swap)."""
+    return request.query_params.get("partial") == "1"
+
+
+@router.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_index(request: Request) -> HTMLResponse:
+    """Index: summary cards + the most recent runs + most recent mutations."""
+    store, redis_client = await _open_store()
+    try:
+        async with get_session() as session:
+            runs, summary = await data.runs_with_cost(store, session, limit=10)
+            mutations = await data.mutation_timeline(session, limit=5)
+    except Exception as e:  # noqa: BLE001 — degrade, never 500
+        logger.warning(f"Dashboard index data fetch failed: {e}")
+        runs, summary, mutations = [], {"runs_total": 0, "runs_in_flight": 0, "runs_completed": 0, "total_cost_usd": 0.0}, []
+    finally:
+        await redis_client.aclose()
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"request": request, "summary": summary, "runs": runs, "mutations": mutations},
+    )
+
+
+@router.get("/dashboard/runs", response_class=HTMLResponse)
+async def dashboard_runs(request: Request) -> HTMLResponse:
+    """Run observer — the live run list (Redis), auto-refreshed by poll.js."""
+    store, redis_client = await _open_store()
+    try:
+        async with get_session() as session:
+            runs, summary = await data.runs_with_cost(store, session)
+    except Exception as e:  # noqa: BLE001 — degrade
+        logger.warning(f"Dashboard runs data fetch failed: {e}")
+        runs, summary = [], {"runs_total": 0, "runs_in_flight": 0, "runs_completed": 0, "total_cost_usd": 0.0}
+    finally:
+        await redis_client.aclose()
+    if _is_partial(request):
+        return templates.TemplateResponse(
+            request=request, name="_runs_rows.html", context={"request": request, "runs": runs}
+        )
+    return templates.TemplateResponse(
+        request=request,
+        name="runs.html",
+        context={"request": request, "summary": summary, "runs": runs},
+    )
+
+
+@router.get("/dashboard/runs/{run_id}", response_class=HTMLResponse)
+async def dashboard_run_detail(run_id: str, request: Request) -> HTMLResponse:
+    """One run's status + per-model cost + the HITL review (Q100) card."""
+    store, redis_client = await _open_store()
+    run_view: dict[str, Any] | None = None
+    cost_breakdown: list[dict[str, Any]] = []
+    try:
+        record = await store.get(run_id)
+        if record is not None:
+            run_view = data._run_to_view(record)  # noqa: SLF001 — view-shape helper
+        async with get_session() as session:
+            if run_view is not None:
+                cost_breakdown = await data.run_cost_breakdown(session, run_view)
+    except Exception as e:  # noqa: BLE001 — degrade
+        logger.warning(f"Dashboard run-detail fetch failed for {run_id}: {e}")
+    finally:
+        await redis_client.aclose()
+    if run_view is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown or expired run_id: {run_id}",
+        )
+    # The review card surfaces the full final output + any error (the structured
+    # HumanMessage from the HITL node lives in the checkpoint; the Redis status
+    # carries the rendered output/error the operator reviews).
+    return templates.TemplateResponse(
+        request=request,
+        name="run_detail.html",
+        context={
+            "request": request,
+            "run": run_view,
+            "cost_breakdown": cost_breakdown,
+            "total_cost": sum(c["cost_usd"] for c in cost_breakdown),
+        },
+    )
+
+
+@router.get("/dashboard/curve", response_class=HTMLResponse)
+async def dashboard_curve(
+    request: Request,
+    suffix: str | None = Query(default=None, description="run_id substring filter"),
+) -> HTMLResponse:
+    """Per-run × per-goal eval terminal-state matrix + summary bar chart."""
+    try:
+        async with get_session() as session:
+            curve = await data.generation_curve(session, suffix=suffix)
+    except Exception as e:  # noqa: BLE001 — degrade
+        logger.warning(f"Dashboard curve data fetch failed: {e}")
+        curve = {"runs": [], "goals": [], "matrix": {}, "run_means": {}, "goal_means": {}}
+    return templates.TemplateResponse(
+        request=request,
+        name="curve.html",
+        context={"request": request, "curve": curve, "suffix": suffix or ""},
+    )
+
+
+@router.get("/dashboard/mutations", response_class=HTMLResponse)
+async def dashboard_mutations(request: Request) -> HTMLResponse:
+    """Mutation/promotion timeline with Phase-3 diff + Phase-4 A/B stats."""
+    try:
+        async with get_session() as session:
+            mutations = await data.mutation_timeline(session)
+    except Exception as e:  # noqa: BLE001 — degrade
+        logger.warning(f"Dashboard mutations data fetch failed: {e}")
+        mutations = []
+    return templates.TemplateResponse(
+        request=request,
+        name="mutations.html",
+        context={"request": request, "mutations": mutations},
+    )

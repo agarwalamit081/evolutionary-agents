@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Mutations — Turing Dashboard{% endblock %}
+{% block content %}
+<h1>Mutation timeline</h1>
+<p class="muted small">Every evolution cycle's mutation with its Phase-3 diff and Phase-4 A/B stats. Approve/review generated tools via the <a href="/api/v1/tools">Tools API</a>.</p>
+
+<section>
+  <table>
+    <thead>
+      <tr><th>when</th><th>type</th><th>target</th><th>status</th><th>model</th><th>A/B (n)</th><th>p-value</th><th>significant</th></tr>
+    </thead>
+    <tbody>
+    {% for m in mutations %}
+      <tr>
+        <td class="muted">{{ m.created_at[:19] }}</td>
+        <td><span class="badge badge-type">{{ m.mutation_type }}</span></td>
+        <td class="mono" title="{{ m.description }}">{{ (m.target_path or m.description[:40])[:48] }}</td>
+        <td><span class="badge badge-{{ m.status }}">{{ m.status }}</span></td>
+        <td class="muted mono">{{ m.model_used or "—" }}</td>
+        <td class="num">{{ m.sample_size if m.sample_size is not none else "—" }}</td>
+        <td class="num">{{ "%.3f"|format(m.p_value) if m.p_value is not none else "—" }}</td>
+        <td>{% if m.is_significant is not none %}{{ "✓" if m.is_significant else "✗" }}{% else %}—{% endif %}</td>
+      </tr>
+      {% if m.has_diff %}
+      <tr class="diff-row">
+        <td colspan="8">
+          <details>
+            <summary class="mono small">diff ({{ m.diff_content.count('\n') }} lines) — {{ m.id[:8] }}</summary>
+            <pre class="diff">{{ m.diff_content }}</pre>
+          </details>
+        </td>
+      </tr>
+      {% endif %}
+    {% else %}
+      <tr><td colspan="8" class="empty">No mutations yet. Evolution fires on clean successful runs (recovered-error successes included).</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

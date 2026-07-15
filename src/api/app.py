@@ -98,4 +98,25 @@ def create_app() -> FastAPI:
     except ImportError:
         logger.warning("Tool edit routes not available yet")
 
+    # Phase 5 — operator dashboard (server-rendered HTML at /dashboard) + the
+    # vendored CSS/JS at /dashboard-static. Mounted at the root (a UI, not a
+    # programmatic API). Import-wrapped so the API still boots if jinja2 is
+    # absent (the JSON API stays up even if the dashboard cannot render).
+    try:
+        from pathlib import Path
+
+        from starlette.staticfiles import StaticFiles
+
+        from src.api.routes.dashboard import router as dashboard_router
+        app.include_router(dashboard_router, tags=["dashboard"])
+        static_dir = Path(__file__).resolve().parent / "static"
+        if static_dir.is_dir():
+            app.mount(
+                "/dashboard-static",
+                StaticFiles(directory=str(static_dir)),
+                name="dashboard-static",
+            )
+    except ImportError:
+        logger.warning("Dashboard routes not available (jinja2 missing?)")
+
     return app

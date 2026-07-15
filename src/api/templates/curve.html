@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Generation Curve — Turing Dashboard{% endblock %}
+{% block content %}
+<h1>Generation curve</h1>
+<p class="muted small">Per-run × per-goal terminal-state mean (latest row per check, then averaged). Dashboard quick-glance — the canonical scorer is <code>scripts/run_metrics.py</code>.</p>
+
+<section>
+  <form method="get" action="/dashboard/curve" class="inline-form">
+    <label>run_id suffix filter
+      <input type="text" name="suffix" value="{{ suffix }}" placeholder="e.g. 20260713 or G2">
+    </label>
+    <button type="submit">filter</button>
+    {% if suffix %}<a class="muted small" href="/dashboard/curve">clear</a>{% endif %}
+  </form>
+</section>
+
+{% if curve.runs %}
+{# Server-side SVG bar chart: one bar per run, height = run's overall mean (0..1).
+   No JS chart lib — pure SVG, dependency-free. #}
+<section>
+  <h2>Run means</h2>
+  <svg class="chart" viewBox="0 0 {{ curve.runs|length * 48 + 40 }} 140" preserveAspectRatio="xMidYMid meet" role="img" aria-label="run means bar chart">
+    <line x1="32" y1="120" x2="{{ curve.runs|length * 48 + 36 }}" y2="120" class="axis"/>
+    <line x1="32" y1="20" x2="32" y2="120" class="axis"/>
+    {% for rid in curve.runs %}
+      {% set mean = curve.run_means[rid] %}
+      {% set x = 40 + loop.index0 * 48 %}
+      {% set h = (mean * 100)|round(1) %}
+      <rect x="{{ x }}" y="{{ 120 - h }}" width="32" height="{{ h }}" class="bar bar-{{ "good" if mean >= 0.8 else ("ok" if mean >= 0.5 else "bad") }}"/>
+      <text x="{{ x + 16 }}" y="132" class="barlabel">{{ rid[:8] }}</text>
+      <text x="{{ x + 16 }}" y="{{ 120 - h - 3 }}" class="barval">{{ "%.2f"|format(mean) }}</text>
+    {% endfor %}
+  </svg>
+</section>
+
+<section>
+  <h2>Per-goal matrix</h2>
+  <div class="table-scroll">
+  <table class="matrix">
+    <thead>
+      <tr>
+        <th>goal</th>
+        {% for rid in curve.runs %}<th title="{{ rid }}">{{ rid[:10] }}</th>{% endfor %}
+        <th>avg</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for g in curve.goals %}
+      <tr>
+        <td class="mono">{{ g }}</td>
+        {% for rid in curve.runs %}
+          {% set cell = curve.matrix[rid][g] if g in curve.matrix[rid] else none %}
+          {% if cell %}
+            <td class="num heat heat-{{ "good" if cell.mean >= 0.8 else ("ok" if cell.mean >= 0.5 else "bad") }}" title="{{ cell.n }} checks">{{ "%.2f"|format(cell.mean) }}</td>
+          {% else %}
+            <td class="num muted">—</td>
+          {% endif %}
+        {% endfor %}
+        <td class="num strong">{{ "%.2f"|format(curve.goal_means[g]) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% else %}
+<p class="empty">No eval rows match{{ " suffix '" + suffix + "'" if suffix else "" }}. Run a battery or adjust the filter.</p>
+{% endif %}
+{% endblock %}

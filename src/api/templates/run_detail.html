@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.run_id[:8] }} — Turing Dashboard{% endblock %}
+{% block content %}
+<p><a href="/dashboard/runs">← back to runs</a></p>
+<h1>Run <code>{{ run.run_id }}</code></h1>
+
+<section class="cards">
+  <div class="card"><div class="num"><span class="badge badge-{{ run.status }}">{{ run.status }}</span></div><div class="lbl">status</div></div>
+  <div class="card"><div class="num">{{ run.iteration_count }}</div><div class="lbl">iterations</div></div>
+  <div class="card"><div class="num">{{ "complete" if run.is_complete else "incomplete" }}</div><div class="lbl">completion</div></div>
+  <div class="card"><div class="num">${{ "%.4f"|format(total_cost) }}</div><div class="lbl">spend</div></div>
+</section>
+
+<section>
+  <h2>Detail</h2>
+  <dl class="kv">
+    <dt>thread_id</dt><dd><code>{{ run.thread_id }}</code></dd>
+    <dt>started</dt><dd>{{ run.started_at or "—" }}</dd>
+    <dt>finished</dt><dd>{{ run.finished_at or "—" }}</dd>
+    <dt>results_dir</dt><dd><code>{{ run.results_dir or "—" }}</code></dd>
+  </dl>
+  {% if run.error %}
+  <div class="callout error"><strong>Error:</strong> <pre>{{ run.error }}</pre></div>
+  {% endif %}
+</section>
+
+{# HITL review card (Q100): the full output the operator would review, surfaced
+   verbatim rather than flattened to a truncated string. The structured
+   HumanMessage is in the checkpoint; this is the rendered final_output. #}
+<section>
+  <h2>Review</h2>
+  {% if run.final_output %}
+  <pre class="review">{{ run.final_output }}</pre>
+  {% else %}
+  <p class="empty">No final output yet.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Cost by model</h2>
+  <table>
+    <thead><tr><th>model</th><th>calls</th><th>tokens</th><th>cost</th></tr></thead>
+    <tbody>
+    {% for c in cost_breakdown %}
+      <tr>
+        <td class="mono">{{ c.model }}</td>
+        <td class="num">{{ c.calls }}</td>
+        <td class="num">{{ "{:,}".format(c.total_tokens) }}</td>
+        <td class="num">${{ "%.4f"|format(c.cost_usd) }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="empty">No attributed cost rows for this run.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

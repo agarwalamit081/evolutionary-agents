@@ -54,6 +54,55 @@ class TestHitlGateNode:
         assert result["phase"] == Phase.COMPLETE
 
 
+class TestHitlReviewMessage:
+    """The full review is recorded as a HumanMessage, not just flattened errors (Q100)."""
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_records_review_message(self, sample_state: dict) -> None:
+        """Auto-approve path appends a HumanMessage carrying the review context."""
+        sample_state["final_output"] = "Done output"
+        result = await hitl_gate_node(sample_state)
+
+        messages = result.get("messages", [])
+        assert len(messages) == 1
+        content = messages[0].content
+        assert "AUTO-APPROVED" in content
+        assert "Done output" in content
+
+    @pytest.mark.asyncio
+    async def test_reject_records_review_message_with_feedback(self, sample_state: dict) -> None:
+        """Rejected review is a HumanMessage (not only a flattened errors string)."""
+        sample_state["final_output"] = "Partial"
+        sample_state["is_complete"] = False
+
+        with patch(
+            "langgraph.types.interrupt",
+            return_value={"approved": False, "feedback": "needs more detail"},
+            create=True,
+        ):
+            result = await hitl_gate_node(sample_state)
+
+        content = result["messages"][0].content
+        assert "REJECTED" in content
+        assert "needs more detail" in content
+        # The flattened errors string still carries the short signal too.
+        assert any("rejected" in str(e).lower() for e in result["errors"])
+
+    @pytest.mark.asyncio
+    async def test_approve_records_review_message(self, sample_state: dict) -> None:
+        """Approved review (via interrupt) is recorded as a HumanMessage."""
+        sample_state["final_output"] = "Approved output"
+
+        with patch(
+            "langgraph.types.interrupt", return_value={"approved": True}, create=True
+        ):
+            result = await hitl_gate_node(sample_state)
+
+        content = result["messages"][0].content
+        assert "APPROVED" in content
+        assert "Approved output" in content
+
+
 class TestHitlGateNodeWithInterrupt:
     """Tests for hitl_gate_node with mocked LangGraph interrupt."""
 

@@ -2161,6 +2161,53 @@ class GovernancePruneSettings(BaseSettings):
     )
 
 
+class CheckpointGcSettings(BaseSettings):
+    """Opt-in periodic checkpoint garbage-collection (battery-04 q101 / Phase 6).
+
+    langgraph's ``AsyncPostgresSaver`` writes one row per graph step into
+    ``checkpoints`` / ``checkpoint_writes`` / ``checkpoint_blobs`` and NEVER
+    expires them — a long-lived worker accumulates unbounded checkpoint state
+    (e.g. ~14k checkpoints / ~110k writes across ~240 threads in a few weeks).
+    This registers a periodic job that drops WHOLE threads whose newest
+    checkpoint is older than ``ttl_days`` (runs are bounded to minutes–hours by
+    the cost/iteration caps, so an untouched thread is definitively finished).
+
+    Checkpoint rows carry no wall-clock column; langgraph's ``checkpoint_id`` is
+    a time-ordered UUIDv6 that parses back to a Unix timestamp (validated to
+    0-day drift vs the run-id date suffix). Safety is layered: opt-in
+    (``enabled``) AND dry-run default (``dry_run``) — the job logs candidate
+    threads + counts and deletes nothing until the owner flips ``dry_run`` false
+    after reviewing a log. No migration (deletes on existing tables).
+
+    Opt-in (default False) like the scheduler/curve-gate/prune, so a host run
+    with no env does nothing. ``cron`` defaults to 06:00 UTC — clear of the
+    02:00 battery, 03:30 optimizer, 04:00 prune, 05:00 curve-gate.
+    """
+
+    # Register the periodic checkpoint-GC job at all. Default False.
+    enabled: bool = False  # Env: CHECKPOINT_GC_ENABLED
+    # 5-field crontab for the GC. Default 06:00 UTC.
+    cron: str = "0 6 * * *"  # Env: CHECKPOINT_GC_CRON
+    # IANA zone for the GC cron. Env: CHECKPOINT_GC_TIMEZONE.
+    timezone: str = "UTC"  # Env: CHECKPOINT_GC_TIMEZONE
+    # A thread is stale iff its newest checkpoint is older than this many days.
+    # Runs finish in <1 day, so the default is conservative. Env: CHECKPOINT_GC_TTL_DAYS.
+    ttl_days: int = 7  # Env: CHECKPOINT_GC_TTL_DAYS
+    # If True (default), the job logs candidates + counts and deletes NOTHING.
+    # Flip to False to actually drop stale threads. Env: CHECKPOINT_GC_DRY_RUN.
+    dry_run: bool = True  # Env: CHECKPOINT_GC_DRY_RUN
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps CHECKPOINT_GC_* vars to these fields, mirroring the
+        # Scheduler/Worker/CapabilityCurve/GovernancePrune pattern.
+        env_prefix="checkpoint_gc_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class OptimizerSettings(BaseSettings):
     """Metric-driven prompt-optimization sidecar (Phase 2 C2: DSPy + GEPA).
 
@@ -2688,6 +2735,7 @@ class Settings(BaseSettings):
     scheduler: SchedulerSettings = SchedulerSettings()  # type: ignore[assignment]
     capability_curve: CapabilityCurveSettings = CapabilityCurveSettings()  # type: ignore[assignment]
     governance_prune: GovernancePruneSettings = GovernancePruneSettings()  # type: ignore[assignment]
+    checkpoint_gc: CheckpointGcSettings = CheckpointGcSettings()  # type: ignore[assignment]
     optimizer: OptimizerSettings = OptimizerSettings()  # type: ignore[assignment]
     agent_cron: AgentCronSettings = AgentCronSettings()  # type: ignore[assignment]
     git_clone: GitCloneSettings = GitCloneSettings()  # type: ignore[assignment]

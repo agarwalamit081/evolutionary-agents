@@ -118,6 +118,31 @@ async def _run() -> int:
             f"tz={prune_settings.timezone}"
         )
 
+    # Phase 6 q101: periodic checkpoint garbage-collection. langgraph's
+    # AsyncPostgresSaver never expires checkpoint rows, so a long-lived worker
+    # accumulates unbounded state (~14k ckpts / ~110k writes across ~240
+    # threads in weeks). This drops WHOLE threads whose newest checkpoint is
+    # older than the TTL (runs finish in <1 day). Opt-in (CHECKPOINT_GC_ENABLED,
+    # default off) + dry-run default (CHECKPOINT_GC_DRY_RUN=true): logs
+    # candidates + counts, deletes nothing until dry_run is flipped false.
+    # Default 06:00 UTC — clear of the 02:00/03:30/04:00/05:00 jobs.
+    checkpoint_gc_settings = settings.checkpoint_gc
+    if checkpoint_gc_settings.enabled:
+        from src.scheduler.checkpoint_gc import (  # noqa: PLC0415
+            CheckpointGc,
+            add_checkpoint_gc_job,
+        )
+
+        add_checkpoint_gc_job(
+            scheduler, CheckpointGc(checkpoint_gc_settings), checkpoint_gc_settings
+        )
+        logger.info(
+            f"Checkpoint-GC job registered — cron={checkpoint_gc_settings.cron!r} "
+            f"tz={checkpoint_gc_settings.timezone} "
+            f"ttl_days={checkpoint_gc_settings.ttl_days} "
+            f"dry_run={checkpoint_gc_settings.dry_run}"
+        )
+
     # Phase 2 C2: the nightly metric-driven prompt-optimizer TRIGGER. The
     # optimizer (DSPy + GEPA) runs in a separate sidecar container; the scheduler
     # just POSTs /optimize (empty body — the sidecar owns the node/backend/eval

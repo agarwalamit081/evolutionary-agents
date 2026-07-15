@@ -188,27 +188,27 @@ class TestNodeTierMapOverrides:
             assert node is not None
             assert model in MODEL_REGISTRY, f"{cpx.name}:{node} -> unknown {model!r}"
 
-    def test_execute_override_upgrades_complex_to_glm51(self) -> None:
-        """C3 retier: execute on a COMPLEX goal moves to MODERATE glm-5.1.
-
-        The execute NODE_TIER_MAP override now explicitly pins the strong live
-        tool-caller (glm-5.1) instead of keeping execution CHEAP — the cost uplift
-        is bounded by per-step routing (Phase 3, trivial steps back to CHEAP) +
-        RAG-over-tools, not by a CHEAP execute tier.
+    def test_execute_override_upgrades_complex_to_glm52(self) -> None:
+        """Track-1 re-baseline: execute on a COMPLEX goal moves to MODERATE glm-5.2
+        (the successor to the C3 glm-5.1 primary — 1M ctx, 128K out, stronger
+        cost-effective tool-caller). The execute NODE_TIER_MAP override pins it
+        explicitly instead of keeping execution CHEAP — the cost uplift is bounded
+        by per-step routing (Phase 3, trivial steps back to CHEAP) + RAG-over-tools,
+        not by a CHEAP execute tier. glm-5.1 stays its first FALLBACK_CHAINS entry.
         """
         key = (TaskComplexity.COMPLEX, "execute")
         assert key in NODE_TIER_MAP
         tier, model = NODE_TIER_MAP[key]
         assert tier == ModelTier.MODERATE
-        assert model == "glm-5.1"
+        assert model == "glm-5.2"
         assert MODEL_REGISTRY[model].tier == ModelTier.MODERATE
 
-    def test_execute_override_explicitly_pins_glm51(self) -> None:
-        """The execute override is an explicit glm-5.1 pin. Post C3 retier it
-        coincides with the COMPLEX complexity default (also glm-5.1), but the
+    def test_execute_override_explicitly_pins_glm52(self) -> None:
+        """The execute override is an explicit glm-5.2 pin. Post Track-1 re-baseline
+        it coincides with the COMPLEX complexity default (also glm-5.2), but the
         override entry is KEPT so execute won't silently drift if the complexity
         default ever changes — the model id is locked here, not implied."""
-        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "glm-5.1"
+        assert NODE_TIER_MAP[(TaskComplexity.COMPLEX, "execute")][1] == "glm-5.2"
 
     def test_plan_tier_differs_from_or_refines_default(self) -> None:
         """The plan override for COMPLEX targets the reasoning tier (MODERATE)."""

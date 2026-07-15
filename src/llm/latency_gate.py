@@ -107,10 +107,6 @@ class LatencyGate:
             self._states[provider] = state
         return state
 
-    def is_enabled(self) -> bool:
-        """Whether the gate is active (test/observability)."""
-        return self._enabled
-
     def get_demoted_until(self, provider: str) -> float:
         """Monotonic timestamp until which ``provider`` is demoted (0 if not)."""
         return self._get_state(provider).demoted_until

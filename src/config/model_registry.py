@@ -1048,11 +1048,6 @@ def get_fallback_chain(model_id: str) -> list[str]:
     return same_tier[:4]
 
 
-def get_models_by_tier(tier: ModelTier) -> list[ModelSpec]:
-    """Get all models in a given tier."""
-    return [spec for spec in MODEL_REGISTRY.values() if spec.tier == tier]
-
-
 def get_model_spec(model_id: str) -> ModelSpec | None:
     """Get the ModelSpec for a model, or None if not found."""
     return MODEL_REGISTRY.get(model_id)

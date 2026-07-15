@@ -295,13 +295,6 @@ class ModelRouter:
         """
         return self._fallback_chains.get(model, [])
 
-    def get_fallback_tier0(self) -> str:
-        """Get a cheap fallback model."""
-        chain = self._fallback_chains.get("qwen3.5-flash", [])
-        if chain:
-            return chain[0]
-        return "qwen3.5-flash"
-
     def route_reasoning(self) -> str:
         """Select the configured reasoning model.
 

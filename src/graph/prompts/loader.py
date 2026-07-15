@@ -78,11 +78,6 @@ class PromptManager:
         """Render a named template with the given variables."""
         return self.get(name).format(**kwargs)
 
-    def list_templates(self) -> list[str]:
-        """List all available template names (without .j2 extension)."""
-        template_files = sorted(_TEMPLATE_DIR.glob("*.j2"))
-        return [f.stem for f in template_files]
-
 
 # Module-level singleton
 prompt_manager = PromptManager()

@@ -31,13 +31,10 @@ class LLMProviderSettings(BaseSettings):
     # to the standard public Anthropic API in the gateway.
     anthropic_api_base: Optional[str] = None
     openai_api_key: Optional[str] = None
-    openai_org_id: Optional[str] = None
     deepseek_api_key: Optional[str] = None
     zai_api_key: Optional[str] = None
     minimax_api_key: Optional[str] = None
-    minimax_group_id: Optional[str] = None
     mistral_api_key: Optional[str] = None
-    mistral_org_id: Optional[str] = None
     moonshot_api_key: Optional[str] = None
     dashscope_api_key: Optional[str] = None
     # Explicit Alibaba (Qwen / DashScope service) OpenAI-compatible endpoint.
@@ -49,7 +46,6 @@ class LLMProviderSettings(BaseSettings):
     # key. The provider is "alibaba"; only the API key field keeps the dashscope
     # name (env DASHSCOPE_API_KEY).
     alibaba_api_base: Optional[str] = None
-    alibaba_workspace_id: Optional[str] = None
     openrouter_api_key: Optional[str] = None
     groq_api_key: Optional[str] = None
     google_api_key: Optional[str] = None
@@ -64,10 +60,6 @@ class LLMProviderSettings(BaseSettings):
     # Default model selection
     default_llm_provider: str = "deepseek"
     default_llm_model: str = "deepseek-v4-flash"
-
-    # Fast model for classification, routing, simple tasks
-    fast_llm_provider: str = "openai"
-    fast_llm_model: str = "gpt-4o-mini-2024-07-18"
 
     # Heavy model for reasoning, planning, complex analysis
     reasoning_llm_provider: str = "deepseek"
@@ -106,7 +98,6 @@ class LLMProviderSettings(BaseSettings):
 
     @field_validator(
         "default_llm_provider",
-        "fast_llm_provider",
         "reasoning_llm_provider",
     )
     @classmethod
@@ -1468,7 +1459,6 @@ class AgentSettings(BaseSettings):
     # Default off ⇒ behavior is byte-identical to text-only (no message
     # mutation, no chain filtering). Env: VISION_ENABLED.
     vision_enabled: bool = False
-    context_window_reserve: float = 0.15  # 15% margin
     hitl_enabled: bool = True
     workspace_root: str = ".turing/workspace"
     results_root: str = "results"
@@ -1686,14 +1676,6 @@ class AgentSettings(BaseSettings):
         """Ensure folding temperature is a sane sampling range (0–2)."""
         if not 0.0 <= v <= 2.0:
             raise ValueError(f"Folding temperature must be between 0 and 2. Got: {v}")
-        return v
-
-    @field_validator("context_window_reserve")
-    @classmethod
-    def validate_reserve(cls, v: float) -> float:
-        """Ensure reserve is between 0 and 1."""
-        if not 0.0 <= v < 1.0:
-            raise ValueError(f"Context reserve must be between 0 and 1. Got: {v}")
         return v
 
 
@@ -2758,7 +2740,6 @@ class Settings(BaseSettings):
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"
-    deployment_id: Optional[str] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

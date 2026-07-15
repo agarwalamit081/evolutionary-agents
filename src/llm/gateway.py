@@ -390,10 +390,6 @@ class LLMGateway:
         """
         return list(self._cost_records)
 
-    def reset_cost_records(self) -> None:
-        """Clear the accumulated cost records."""
-        self._cost_records.clear()
-
     def resolve_model(
         self,
         complexity: TaskComplexity,

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.models import EvalResult
 
 if TYPE_CHECKING:
-    from src.eval.models import BenchmarkResult, CheckResult, CorrectnessResult
+    from src.eval.models import CheckResult, CorrectnessResult
 
 
 async def _store_check(
@@ -124,35 +124,6 @@ class EvalStore:
             producer_model,
         )
         return written
-
-    async def record_benchmark(
-        self,
-        result: BenchmarkResult,
-        *,
-        run_id: str,
-        attempt_id: str | None = None,
-        cost_usd: float = 0.0,
-        producer_model: str | None = None,
-    ) -> int:
-        """Persist a BenchmarkResult's checks (one row per check)."""
-        from src.eval.models import CorrectnessResult
-
-        if not result.checks:
-            return 0
-        correctness = CorrectnessResult(
-            spec_id="",
-            overall_score=result.correctness_score or 0.0,
-            passed=all(not c.skipped and c.passed for c in result.checks),
-            checks=list(result.checks),
-        )
-        return await self.record_correctness(
-            correctness,
-            goal_id=result.goal_name,
-            run_id=run_id,
-            attempt_id=attempt_id,
-            cost_usd=cost_usd,
-            producer_model=producer_model,
-        )
 
     async def query_by_run(self, run_id: str) -> list[dict[str, Any]]:
         """Return all eval rows for a run as plain dicts (empty on failure)."""

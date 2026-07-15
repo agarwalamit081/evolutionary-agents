@@ -79,13 +79,3 @@ class CostRecord:
     cost_usd: Decimal
     timestamp: datetime
     metadata: dict[str, Any] | None = None
-
-
-@dataclass
-class ReasoningContent:
-    """Extracted reasoning/thinking content from models that support it."""
-
-    content: str
-    token_count: int
-    model: str
-    provider: str

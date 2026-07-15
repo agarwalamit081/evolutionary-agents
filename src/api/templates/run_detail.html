@@ -53,6 +53,19 @@
     {% endfor %}
     </tbody>
   </table>
+  {# Token mix (Q5): an autonomous agent's overhead is overwhelmingly input-side
+     (system prompt + tool registry + accumulated context re-sent each turn), and
+     a chunk of that input is a prompt-cache hit. This line answers "why so many
+     tokens?" with the input/output/cached split + the cache-hit rate. #}
+  {% if token_split and token_split.total_tokens %}
+  <p class="muted small">
+    Token mix: {{ "{:,}".format(token_split.input_tokens) }} in ·
+    {{ "{:,}".format(token_split.output_tokens) }} out ·
+    {{ "{:,}".format(token_split.cached_tokens) }} cached
+    ({{ token_split.cache_hit_pct }}% cache-hit) —
+    {{ token_split.input_pct }}% of tokens are input (autonomous-agent context overhead).
+  </p>
+  {% endif %}
 </section>
 
 {# Live per-node execution timeline (Q6): the execution_steps table is a per-node

@@ -81,6 +81,17 @@ def _session_raising(exc: BaseException) -> MagicMock:
     return session
 
 
+def _session_one_returning(row: Any) -> MagicMock:
+    """An AsyncSession whose ``execute`` returns a result with ``.one()`` → row.
+
+    ``run_token_split`` aggregates to a single row via ``.one()``, not ``.all()``,
+    so it needs a result whose ``.one()`` yields the row.
+    """
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=MagicMock(one=lambda: row))
+    return session
+
+
 class _FakeSessionCtx:
     """An async context manager standing in for ``get_session()`` in route tests."""
 
@@ -292,6 +303,40 @@ class TestExecutionSteps:
 
 
 @pytest.mark.asyncio
+class TestRunTokenSplit:
+    _ZEROS = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+              "total_tokens": 0, "input_pct": 0.0, "cache_hit_pct": 0.0}
+
+    async def test_split_with_input_pct_and_cache_hit(self) -> None:
+        # 800 in, 200 out, 80 cached (80/800 = 10% of input was a cache hit).
+        row = _row(input_tokens=800, output_tokens=200, cached_tokens=80, total_tokens=1000)
+        run = {"thread_id": "api-r1", "run_id": "r1"}
+        split = await data.run_token_split(_session_one_returning(row), run)
+        assert split["input_tokens"] == 800
+        assert split["output_tokens"] == 200
+        assert split["cached_tokens"] == 80
+        assert split["total_tokens"] == 1000
+        # input_pct = 800 / (800+200) = 80.0 ; cache_hit_pct = 80 / 800 = 10.0
+        assert split["input_pct"] == 80.0
+        assert split["cache_hit_pct"] == 10.0
+
+    async def test_empty_when_no_keys(self) -> None:
+        assert await data.run_token_split(MagicMock(), {}) == self._ZEROS
+
+    async def test_degrades_to_zeros_on_db_error(self) -> None:
+        run = {"thread_id": "api-r1", "run_id": "r1"}
+        assert await data.run_token_split(_session_raising(RuntimeError("db")), run) == self._ZEROS
+
+    async def test_zero_input_does_not_divide_by_zero(self) -> None:
+        # A run with no attributed input tokens → both ratios stay 0.0.
+        row = _row(input_tokens=0, output_tokens=0, cached_tokens=0, total_tokens=0)
+        run = {"thread_id": "api-r1", "run_id": "r1"}
+        split = await data.run_token_split(_session_one_returning(row), run)
+        assert split["cache_hit_pct"] == 0.0
+        assert split["input_pct"] == 0.0
+
+
+@pytest.mark.asyncio
 class TestMutationTimeline:
     @staticmethod
     def _rows() -> list[SimpleNamespace]:
@@ -494,7 +539,9 @@ class TestRunDetailRoute:
                       iteration_count=4, final_output="the answer is 42", error="")
         store.get = AsyncMock(return_value=record)
         breakdown = [{"model": "glm-5.2", "cost_usd": 0.3, "calls": 2, "total_tokens": 200}]
-        with patch.object(data,"run_cost_breakdown", new=AsyncMock(return_value=breakdown)):
+        with patch.object(data,"run_cost_breakdown", new=AsyncMock(return_value=breakdown)), \
+             patch.object(data, "run_token_split",
+                          new=AsyncMock(return_value=TestRunTokenSplit._ZEROS)):
             resp = client.get("/dashboard/runs/r1")
         assert resp.status_code == 200, resp.text
         body = resp.text
@@ -520,7 +567,9 @@ class TestRunDetailRoute:
                   "duration_ms": 22500, "duration_s": 22.5,
                   "created_at": "2026-07-15T12:00:05+00:00"}]
         with patch.object(data, "run_cost_breakdown", new=AsyncMock(return_value=[])), \
-             patch.object(data, "execution_steps", new=AsyncMock(return_value=steps)):
+             patch.object(data, "execution_steps", new=AsyncMock(return_value=steps)), \
+             patch.object(data, "run_token_split",
+                          new=AsyncMock(return_value=TestRunTokenSplit._ZEROS)):
             resp = client.get("/dashboard/runs/r1")
         assert resp.status_code == 200, resp.text
         body = resp.text
@@ -528,6 +577,26 @@ class TestRunDetailRoute:
         assert "execute_node" in body  # a step row rendered server-side (initial render)
         # The polled-swap wiring: the tbody auto-refreshes the steps partial.
         assert 'data-poll="/dashboard/runs/r1/steps?partial=1"' in body
+
+    def test_detail_renders_token_mix(
+        self, client: TestClient, patch_infra: Any
+    ) -> None:
+        store, _ = patch_infra
+        store.get = AsyncMock(return_value=_run("r1", status=JobStatus.COMPLETED))
+        # 80% of tokens input, 10% of input a cache hit (the autonomous-agent
+        # overhead signature the Q5 token-mix line surfaces).
+        split = {"input_tokens": 800, "output_tokens": 200, "cached_tokens": 80,
+                 "total_tokens": 1000, "input_pct": 80.0, "cache_hit_pct": 10.0}
+        with patch.object(data, "run_cost_breakdown", new=AsyncMock(return_value=[])), \
+             patch.object(data, "execution_steps", new=AsyncMock(return_value=[])), \
+             patch.object(data, "run_token_split", new=AsyncMock(return_value=split)):
+            resp = client.get("/dashboard/runs/r1")
+        assert resp.status_code == 200, resp.text
+        body = resp.text
+        assert "Token mix" in body
+        assert "800" in body and "200" in body  # input · output counts
+        assert "80.0% of tokens are input" in body  # input_pct
+        assert "10.0% cache-hit" in body  # cache_hit_pct
 
 
 class TestRunStepsRoute:

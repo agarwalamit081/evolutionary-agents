@@ -106,6 +106,10 @@ async def dashboard_run_detail(run_id: str, request: Request) -> HTMLResponse:
     run_view: dict[str, Any] | None = None
     cost_breakdown: list[dict[str, Any]] = []
     steps: list[dict[str, Any]] = []
+    token_split: dict[str, Any] = {
+        "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+        "total_tokens": 0, "input_pct": 0.0, "cache_hit_pct": 0.0,
+    }
     try:
         record = await store.get(run_id)
         if record is not None:
@@ -114,6 +118,7 @@ async def dashboard_run_detail(run_id: str, request: Request) -> HTMLResponse:
             if run_view is not None:
                 cost_breakdown = await data.run_cost_breakdown(session, run_view)
                 steps = await data.execution_steps(session, run_view)
+                token_split = await data.run_token_split(session, run_view)
     except Exception as e:  # noqa: BLE001 — degrade
         logger.warning(f"Dashboard run-detail fetch failed for {run_id}: {e}")
     finally:
@@ -135,6 +140,7 @@ async def dashboard_run_detail(run_id: str, request: Request) -> HTMLResponse:
             "cost_breakdown": cost_breakdown,
             "total_cost": sum(c["cost_usd"] for c in cost_breakdown),
             "steps": steps,
+            "token_split": token_split,
         },
     )
 

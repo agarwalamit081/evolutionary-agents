@@ -250,6 +250,48 @@ async def execution_steps(
         return []
 
 
+async def run_token_split(
+    session: AsyncSession, run_view: dict[str, Any]
+) -> dict[str, Any]:
+    """Input/output/cached token split for one run (the token-amplification answer).
+
+    An autonomous agent's overhead is overwhelmingly input-side (system prompt +
+    tool registry + accumulated context are re-sent each turn), so surfacing the
+    input/output/cached split answers "why so many tokens?" with data: the input
+    share + what fraction of input was a prompt-cache hit. Matches the run by the
+    same ``_run_cost_keys`` candidates as ``run_cost_breakdown``. Zeros on any
+    failure / when the run has no attributed rows; ``cache_hit_pct`` is
+    ``cached / input``.
+    """
+    keys = _run_cost_keys(run_view)
+    if not keys:
+        return {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+                "total_tokens": 0, "input_pct": 0.0, "cache_hit_pct": 0.0}
+    try:
+        r = (await session.execute(
+            sa.select(
+                sa.func.coalesce(sa.func.sum(CostLedger.input_tokens), 0).label("input_tokens"),
+                sa.func.coalesce(sa.func.sum(CostLedger.output_tokens), 0).label("output_tokens"),
+                sa.func.coalesce(sa.func.sum(CostLedger.cached_tokens), 0).label("cached_tokens"),
+                sa.func.coalesce(sa.func.sum(CostLedger.total_tokens), 0).label("total_tokens"),
+            ).where(CostLedger.run_id.in_(keys))
+        )).one()
+        inp, out, cached, total = int(r.input_tokens), int(r.output_tokens), int(r.cached_tokens), int(r.total_tokens)
+        produced = inp + out
+        return {
+            "input_tokens": inp,
+            "output_tokens": out,
+            "cached_tokens": cached,
+            "total_tokens": total,
+            "input_pct": round(100.0 * inp / produced, 1) if produced else 0.0,
+            "cache_hit_pct": round(100.0 * cached / inp, 1) if inp else 0.0,
+        }
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: run token split failed: {e}")
+        return {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+                "total_tokens": 0, "input_pct": 0.0, "cache_hit_pct": 0.0}
+
+
 async def mutation_timeline(
     session: AsyncSession, *, limit: int = _DEFAULT_LIMIT
 ) -> list[dict[str, Any]]:

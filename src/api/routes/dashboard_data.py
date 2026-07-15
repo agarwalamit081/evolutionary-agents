@@ -466,6 +466,7 @@ async def mutation_counts(session: AsyncSession) -> dict[str, Any]:
         )).all()
         by_type = {str(r.mtype): int(r.n) for r in rows}
     except Exception as e:  # noqa: BLE001 — best-effort
+        await _safe_rollback(session)
         logger.warning(f"Dashboard: mutation counts failed: {e}")
 
     deployed_tools = await _scalar_count(
@@ -491,11 +492,31 @@ async def mutation_counts(session: AsyncSession) -> dict[str, Any]:
     }
 
 
+async def _safe_rollback(session: AsyncSession) -> None:
+    """Clear an aborted transaction so a failed best-effort read can't poison the
+    shared session for sibling queries.
+
+    PostgreSQL leaves a transaction in the "aborted" state after ANY query error
+    (e.g. a column that drifted out of sync with the ORM); every later statement
+    on that connection then fails with ``InFailedSQLTransactionError`` until a
+    ROLLBACK. The dashboard's best-effort fns share ONE session, so a swallowed
+    error here MUST also clear that state — otherwise one drifted column silently
+    zeroes every downstream field (observed live: an unapplied
+    ``agent_config_versions.is_active`` migration made ``web_search`` read 0 even
+    though 132 calls existed). Never raises (preserves the best-effort contract).
+    """
+    try:
+        await session.rollback()
+    except Exception:  # noqa: BLE001 — must not break the never-raise contract
+        logger.warning("Dashboard: session rollback after best-effort failure failed")
+
+
 async def _scalar_count(session: AsyncSession, stmt: Any, label: str) -> int:
     """Run a count SELECT, returning 0 + a warning on any failure."""
     try:
         return int((await session.execute(stmt)).scalar() or 0)
     except Exception as e:  # noqa: BLE001 — best-effort
+        await _safe_rollback(session)
         logger.warning(f"Dashboard: {label} failed: {e}")
         return 0
 
@@ -551,6 +572,7 @@ async def web_search_summary(session: AsyncSession) -> dict[str, Any]:
         )).one()
         return {"total_calls": int(r.calls or 0), "runs_using_search": int(r.runs or 0)}
     except Exception as e:  # noqa: BLE001 — best-effort
+        await _safe_rollback(session)
         logger.warning(f"Dashboard: web-search summary failed: {e}")
         return {"total_calls": 0, "runs_using_search": 0}
 
@@ -577,6 +599,7 @@ async def web_search_runs(session: AsyncSession, run_ids: list[str | None]) -> s
         )).scalars().all()
         return {str(r) for r in rows if r is not None}
     except Exception as e:  # noqa: BLE001 — best-effort
+        await _safe_rollback(session)
         logger.warning(f"Dashboard: web-search run lookup failed: {e}")
         return set()
 
@@ -612,6 +635,7 @@ async def mutations_web_search(
                 )
             )).all()
         except Exception as e:  # noqa: BLE001 — best-effort
+            await _safe_rollback(session)
             logger.warning(f"Dashboard: mutation→run resolution failed: {e}")
             continue
         for smid, orid in rows:

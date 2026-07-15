@@ -73,6 +73,7 @@ def _session_returning(rows: list[Any]) -> MagicMock:
     """An AsyncSession whose ``execute`` returns a result with ``.all()`` → rows."""
     session = MagicMock()
     session.execute = AsyncMock(return_value=MagicMock(all=lambda: rows))
+    session.rollback = AsyncMock()
     return session
 
 
@@ -80,6 +81,7 @@ def _session_raising(exc: BaseException) -> MagicMock:
     """An AsyncSession whose ``execute`` always raises (best-effort path)."""
     session = MagicMock()
     session.execute = AsyncMock(side_effect=exc)
+    session.rollback = AsyncMock()
     return session
 
 
@@ -91,6 +93,7 @@ def _session_one_returning(row: Any) -> MagicMock:
     """
     session = MagicMock()
     session.execute = AsyncMock(return_value=MagicMock(one=lambda: row))
+    session.rollback = AsyncMock()
     return session
 
 
@@ -486,6 +489,7 @@ def _seq_session(results: list[Any]) -> MagicMock:
     order (for fns that issue several queries — e.g. ``mutation_counts``)."""
     session = MagicMock()
     session.execute = AsyncMock(side_effect=list(results))
+    session.rollback = AsyncMock()
     return session
 
 
@@ -711,6 +715,61 @@ def patch_infra() -> Any:
         return_value=_FakeSessionCtx(),
     ):
         yield store, redis_mock
+
+
+@pytest.mark.asyncio
+class TestCascadeResilience:
+    """Regression for the silent ``web_search = 0`` bug.
+
+    A best-effort dashboard query that hits a real DB error (e.g. a column that
+    drifted out of sync with the ORM — the live ``agent_config_versions.is_active``
+    unrun-migration case) aborts the shared PostgreSQL transaction. Pre-fix the
+    per-fn ``try/except`` swallowed the error WITHOUT rolling back, so every
+    LATER query on the same session cascaded to ``InFailedSQLTransactionError``
+    and degraded to 0/empty — which is exactly how ``web_search`` rendered 0
+    despite 132 calls existing. Each best-effort fn must now ROLLBACK so a
+    sibling query afterward still gets its real data.
+    """
+
+    @staticmethod
+    def _session_fail_then_ok(fail_exc: BaseException, ok_row: Any) -> MagicMock:
+        """``execute()`` raises once (the drifted-column query) then returns
+        ``ok_row`` via ``.one()``; ``rollback`` is awaitable (the fns call it)."""
+        session = MagicMock()
+        session.execute = AsyncMock(
+            side_effect=[fail_exc, MagicMock(one=lambda: ok_row)]
+        )
+        session.rollback = AsyncMock()
+        return session
+
+    async def test_scalar_count_rollbacks_and_returns_zero(self) -> None:
+        session = self._session_fail_then_ok(
+            RuntimeError("column agent_config_versions.is_active does not exist"),
+            SimpleNamespace(calls=9, runs=1),
+        )
+        assert await data._scalar_count(session, object(), "active-config count") == 0
+        session.rollback.assert_awaited_once()
+
+    async def test_sibling_query_not_poisoned_after_failure(self) -> None:
+        # The original symptom: a DIFFERENT best-effort fn ran AFTER the failing
+        # query and got cascade-zeroed. With rollback it now gets real data.
+        session = self._session_fail_then_ok(
+            RuntimeError("column agent_config_versions.is_active does not exist"),
+            SimpleNamespace(calls=132, runs=1),
+        )
+        # call #1 — fails (would abort the txn in real Postgres); rolled back
+        assert await data._scalar_count(session, object(), "active-config count") == 0
+        # call #2 — a sibling fn — must still see its REAL result, not 0
+        assert await data.web_search_summary(session) == {
+            "total_calls": 132,
+            "runs_using_search": 1,
+        }
+
+    async def test_safe_rollback_never_propagates(self) -> None:
+        session = MagicMock()
+        session.rollback = AsyncMock(side_effect=RuntimeError("rollback itself failed"))
+        await data._safe_rollback(session)  # must not raise
+        session.rollback.assert_awaited_once()
 
 
 class TestIndexRoute:

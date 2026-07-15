@@ -196,15 +196,53 @@ async def dashboard_curve(
 
 @router.get("/dashboard/mutations", response_class=HTMLResponse)
 async def dashboard_mutations(request: Request) -> HTMLResponse:
-    """Mutation/promotion timeline with Phase-3 diff + Phase-4 A/B stats."""
+    """Mutation timeline + sub-agents + counts + evolution status + web-search use.
+
+    Surfaces what the operator actually wants on a "did the app evolve?" page:
+    the mutation timeline (Phase-3 diff + Phase-4 A/B) AND the sub-agents it
+    spawned, summary counts (prompts/tools mutated), whether the runs behind each
+    mutation used web search, and whether any promotion reached production
+    (channel-B live PROMPT promotions + channel-A deployed tools/sub-agents).
+    """
+    mutations: list[dict[str, Any]] = []
+    subagents: list[dict[str, Any]] = []
+    counts: dict[str, Any] = {
+        "by_type": {}, "prompts_mutated": 0, "tools_mutated": 0,
+        "total_mutations": 0, "deployed_tools": 0, "active_subagents": 0, "active_configs": 0,
+    }
+    evolution: dict[str, Any] = {
+        "live_prompt_promotions": [], "total_live_promotions": 0,
+        "deployed_tools": 0, "active_subagents": 0, "active_configs": 0, "any_evolved": False,
+    }
+    web: dict[str, Any] = {"total_calls": 0, "runs_using_search": 0}
+    ws_by_mutation: dict[str, bool] = {}
+    sub_ws_runs: set[str] = set()
     try:
         async with get_session() as session:
             mutations = await data.mutation_timeline(session)
-    except Exception as e:  # noqa: BLE001 — degrade
+            subagents = await data.sub_agent_timeline(session)
+            counts = await data.mutation_counts(session)
+            evolution = await data.evolution_summary(session, counts)
+            web = await data.web_search_summary(session)
+            ws_by_mutation = await data.mutations_web_search(
+                session, [m["id"] for m in mutations]
+            )
+            sub_ws_runs = await data.web_search_runs(
+                session, [s["owner_run_id"] for s in subagents if s["owner_run_id"]]
+            )
+    except Exception as e:  # noqa: BLE001 — degrade, never 500
         logger.warning(f"Dashboard mutations data fetch failed: {e}")
-        mutations = []
     return templates.TemplateResponse(
         request=request,
         name="mutations.html",
-        context={"request": request, "mutations": mutations},
+        context={
+            "request": request,
+            "mutations": mutations,
+            "mut_web_search": ws_by_mutation,
+            "subagents": subagents,
+            "sub_web_search": sub_ws_runs,
+            "counts": counts,
+            "evolution": evolution,
+            "web": web,
+        },
     )

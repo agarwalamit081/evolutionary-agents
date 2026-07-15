@@ -21,12 +21,23 @@ remains the source of truth for the self-improvement verdict.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, TYPE_CHECKING
 
 import sqlalchemy as sa
 from loguru import logger
 
-from src.db.models import ABTestResult, CostLedger, ExecutionStep, Mutation
+from src.db.models import (
+    ABTestResult,
+    AgentConfigVersion,
+    CostLedger,
+    ExecutionStep,
+    Mutation,
+    SubAgentModel,
+    ToolCallMetric,
+    ToolRegistration,
+)
+from src.graph.enums import MutationType
 from src.worker.schema import RunStatus
 
 if TYPE_CHECKING:
@@ -41,6 +52,20 @@ _RUN_KEY_PREFIX = "turing:run:"
 # Cap the run list + mutation timeline so a large history never renders a huge
 # page (pagination is a fast-follow; the dashboard is a recent-activity view).
 _DEFAULT_LIMIT = 100
+
+# The web-search builtin's registered name (``src/tools/builtin/web_search.py``).
+# ``tool_call_metrics`` — NOT ``execution_steps`` — is the per-invocation audit
+# trail: the execute chokepoint records one row per tool call with ``run_id =
+# get_active_run_id()`` (``execution_steps.tool_name`` is NULL — the node-timer
+# logs phases only). That ``run_id`` is the SAME bare run_id bound by
+# ``runner.run`` and written to ``owner_run_id``, so the attribution join below
+# is a direct equality (no prefix stripping).
+_WEB_SEARCH_TOOL = "web_search"
+# Mutation-type roll-ups for the summary cards. The ``SUB_AGENT_*`` variants
+# only *modify* existing agents (a created sub-agent never gets a ``mutations``
+# row — see ``sub_agent_timeline``) but still count as prompt/tool mutations.
+_PROMPT_TYPES = frozenset({MutationType.PROMPT.value, MutationType.SUB_AGENT_PROMPT.value})
+_TOOL_TYPES = frozenset({MutationType.TOOL.value, MutationType.SUB_AGENT_TOOLS.value})
 
 
 async def list_runs(
@@ -365,6 +390,237 @@ async def mutation_timeline(
     except Exception as e:  # noqa: BLE001 — best-effort
         logger.warning(f"Dashboard: mutation timeline failed: {e}")
         return []
+
+
+async def sub_agent_timeline(
+    session: AsyncSession, *, limit: int = _DEFAULT_LIMIT
+) -> list[dict[str, Any]]:
+    """Recent sub-agent definitions, newest first.
+
+    Sub-agent *creation* writes to ``sub_agent_definitions`` (NOT the ``mutations``
+    table — the ``SUB_AGENT_*`` mutation types only *modify* existing agents), so
+    the mutation timeline never shows a spawned sub-agent. This surfaces them:
+    name, model tier, rolling metrics, the run that spawned it
+    (``owner_run_id``), and whether it is live (``is_active``). Empty list on any
+    failure.
+    """
+    try:
+        result = await session.execute(
+            sa.select(
+                SubAgentModel.id,
+                SubAgentModel.name,
+                SubAgentModel.description,
+                SubAgentModel.model_tier,
+                SubAgentModel.is_active,
+                SubAgentModel.source_mutation_id,
+                SubAgentModel.owner_run_id,
+                SubAgentModel.total_runs,
+                SubAgentModel.success_rate,
+                SubAgentModel.quality_score,
+                SubAgentModel.created_at,
+            )
+            .order_by(SubAgentModel.created_at.desc())
+            .limit(limit)
+        )
+        rows: list[dict[str, Any]] = []
+        for r in result.all():
+            rows.append(
+                {
+                    "id": str(r.id),
+                    "name": r.name,
+                    "description": (r.description or "")[:160],
+                    "model_tier": r.model_tier,
+                    "is_active": bool(r.is_active),
+                    "source_mutation_id": str(r.source_mutation_id) if r.source_mutation_id else None,
+                    "owner_run_id": r.owner_run_id,
+                    "total_runs": int(r.total_runs or 0),
+                    "success_rate": round(float(r.success_rate or 0.0), 3),
+                    "quality_score": round(float(r.quality_score or 0.0), 3),
+                    "created_at": r.created_at.isoformat() if r.created_at else "",
+                }
+            )
+        return rows
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: sub-agent timeline failed: {e}")
+        return []
+
+
+async def mutation_counts(session: AsyncSession) -> dict[str, Any]:
+    """Mutation counts by type + how many capabilities are LIVE.
+
+    ``by_type`` maps each raw ``mutation_type`` value (prompt/tool/code/…) to its
+    row count; ``prompts_mutated``/``tools_mutated`` roll up the ``SUB_AGENT_*``
+    variants for clean summary cards. ``deployed_tools``/``active_subagents``/
+    ``active_configs`` count what actually reached production — channel-A tools
+    active in the registry, active sub-agents, and the one active config version.
+    Each piece is independently best-effort (a single failed count does not zero
+    the rest). Zeros on any failure.
+    """
+    by_type: dict[str, int] = {}
+    try:
+        rows = (await session.execute(
+            sa.select(
+                Mutation.mutation_type.label("mtype"),
+                sa.func.count(Mutation.id).label("n"),
+            ).group_by(Mutation.mutation_type)
+        )).all()
+        by_type = {str(r.mtype): int(r.n) for r in rows}
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: mutation counts failed: {e}")
+
+    deployed_tools = await _scalar_count(
+        session, sa.select(sa.func.count(ToolRegistration.id)).where(ToolRegistration.is_active.is_(True)),
+        "deployed-tool count",
+    )
+    active_subagents = await _scalar_count(
+        session, sa.select(sa.func.count(SubAgentModel.id)).where(SubAgentModel.is_active.is_(True)),
+        "active-subagent count",
+    )
+    active_configs = await _scalar_count(
+        session, sa.select(sa.func.count(AgentConfigVersion.id)).where(AgentConfigVersion.is_active.is_(True)),
+        "active-config count",
+    )
+    return {
+        "by_type": by_type,
+        "prompts_mutated": sum(by_type.get(t, 0) for t in _PROMPT_TYPES),
+        "tools_mutated": sum(by_type.get(t, 0) for t in _TOOL_TYPES),
+        "total_mutations": sum(by_type.values()),
+        "deployed_tools": deployed_tools,
+        "active_subagents": active_subagents,
+        "active_configs": active_configs,
+    }
+
+
+async def _scalar_count(session: AsyncSession, stmt: Any, label: str) -> int:
+    """Run a count SELECT, returning 0 + a warning on any failure."""
+    try:
+        return int((await session.execute(stmt)).scalar() or 0)
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: {label} failed: {e}")
+        return 0
+
+
+async def evolution_summary(
+    session: AsyncSession, counts: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Did the application actually evolve? The "is the app different now?" answer.
+
+    Combines the two evolution channels: **channel-B** live PROMPT promotions
+    (``PromotionGate.active_promotions`` reads ``current.json`` from the
+    ``evolved_handlers_dir`` — the same ``turing-workspace`` volume the api mounts,
+    so the dashboard sees what the worker promoted) and **channel-A** live counts
+    (deployed tools / active sub-agents). ``any_evolved`` is the single yes/no.
+    Best-effort: a promotion-read failure degrades to the channel-A counts alone,
+    NEVER raises (observability-only, mirrors the cost-ledger-resilience pattern).
+
+    Pass the already-computed ``mutation_counts`` dict to avoid re-querying it.
+    """
+    live: list[dict[str, Any]] = []
+    try:
+        from src.evolution.promote import PromotionGate
+
+        live = list(PromotionGate().active_promotions())
+    except Exception as e:  # noqa: BLE001 — observability-only
+        logger.warning(f"Dashboard: live promotions read failed: {e}")
+        live = []
+    base = counts if counts is not None else await mutation_counts(session)
+    total_live = len(live)
+    return {
+        "live_prompt_promotions": live,
+        "total_live_promotions": total_live,
+        "deployed_tools": int(base.get("deployed_tools", 0)),
+        "active_subagents": int(base.get("active_subagents", 0)),
+        "active_configs": int(base.get("active_configs", 0)),
+        "any_evolved": bool(total_live or base.get("deployed_tools") or base.get("active_subagents")),
+    }
+
+
+async def web_search_summary(session: AsyncSession) -> dict[str, Any]:
+    """Page-level web-search usage: total ``web_search`` calls + distinct runs.
+
+    ``tool_call_metrics`` (not ``execution_steps`` — its ``tool_name`` is NULL) is
+    the per-invocation audit trail. Zeros on any failure or when metrics
+    recording is off (``TOOL_METRICS_ENABLED``, default on).
+    """
+    try:
+        r = (await session.execute(
+            sa.select(
+                sa.func.count(ToolCallMetric.id).label("calls"),
+                sa.func.count(ToolCallMetric.run_id.distinct()).label("runs"),
+            ).where(ToolCallMetric.tool_name == _WEB_SEARCH_TOOL)
+        )).one()
+        return {"total_calls": int(r.calls or 0), "runs_using_search": int(r.runs or 0)}
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: web-search summary failed: {e}")
+        return {"total_calls": 0, "runs_using_search": 0}
+
+
+async def web_search_runs(session: AsyncSession, run_ids: list[str | None]) -> set[str]:
+    """Which of the given owner-run-ids invoked ``web_search`` (one grouped query).
+
+    Shared by ``mutations_web_search`` and the sub-agent badge: the run that
+    spawned a tool/sub-agent (``owner_run_id``) is the SAME bare run_id recorded
+    on ``tool_call_metrics.run_id`` (both come from ``get_active_run_id``), so the
+    match is a direct equality. Empty set on any failure.
+    """
+    norm = [str(r) for r in run_ids if r]
+    if not norm:
+        return set()
+    try:
+        rows = (await session.execute(
+            sa.select(ToolCallMetric.run_id)
+            .where(
+                ToolCallMetric.tool_name == _WEB_SEARCH_TOOL,
+                ToolCallMetric.run_id.in_(norm),
+            )
+            .distinct()
+        )).scalars().all()
+        return {str(r) for r in rows if r is not None}
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: web-search run lookup failed: {e}")
+        return set()
+
+
+async def mutations_web_search(
+    session: AsyncSession, mutation_ids: list[str]
+) -> dict[str, bool]:
+    """Per-mutation web-search badge: did the run that produced this mutation
+    invoke ``web_search``?
+
+    Only TOOL/SUB_AGENT_* mutations carry an ``owner_run_id`` (resolved via
+    ``tool_registrations``/``sub_agent_definitions`` ``source_mutation_id``);
+    PROMPT/CODE mutations have no run link and are absent from the result (the
+    template renders "—" for them — no false signal). Three queries total
+    (tool→run, sub-agent→run, then the web-search set) — constant, never N+1
+    regardless of row count.
+    """
+    norm = [str(m) for m in mutation_ids if m]
+    if not norm:
+        return {}
+    try:
+        uuids = [uuid.UUID(m) for m in norm]  # ids are str(UUID); safe
+    except ValueError as e:  # a non-UUID id should not occur, but never 500
+        logger.warning(f"Dashboard: non-UUID mutation id in web-search attribution: {e}")
+        return {}
+    mid_to_run: dict[str, str] = {}
+    for model in (ToolRegistration, SubAgentModel):
+        try:
+            rows = (await session.execute(
+                sa.select(model.source_mutation_id, model.owner_run_id).where(
+                    model.source_mutation_id.in_(uuids),
+                    model.owner_run_id.is_not(None),
+                )
+            )).all()
+        except Exception as e:  # noqa: BLE001 — best-effort
+            logger.warning(f"Dashboard: mutation→run resolution failed: {e}")
+            continue
+        for smid, orid in rows:
+            if smid is not None and orid is not None:
+                mid_to_run[str(smid)] = orid
+    if not mid_to_run:
+        return {}
+    ws_runs = await web_search_runs(session, list(set(mid_to_run.values())))
+    return {mid: (run in ws_runs) for mid, run in mid_to_run.items()}
 
 
 # Per-(run, goal) terminal-state mean. A SQL constant (no user input) using

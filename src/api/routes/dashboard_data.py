@@ -26,7 +26,7 @@ from typing import Any, TYPE_CHECKING
 import sqlalchemy as sa
 from loguru import logger
 
-from src.db.models import ABTestResult, CostLedger, Mutation
+from src.db.models import ABTestResult, CostLedger, ExecutionStep, Mutation
 from src.worker.schema import RunStatus
 
 if TYPE_CHECKING:
@@ -199,6 +199,54 @@ async def run_cost_breakdown(session: AsyncSession, run_view: dict[str, Any]) ->
         ]
     except Exception as e:  # noqa: BLE001 — best-effort
         logger.warning(f"Dashboard: run cost breakdown failed: {e}")
+        return []
+
+
+async def execution_steps(
+    session: AsyncSession, run_view: dict[str, Any], *, limit: int = 200
+) -> list[dict[str, Any]]:
+    """Per-node execution timeline for one run, chronological (oldest first).
+
+    ``execution_steps`` is a per-node wall-clock log keyed by ``run_id`` (written
+    by the graph node-timer in ``task_graph.py`` — one row per node invocation:
+    ``phase`` node name, ``status``, ``duration_ms``, ``created_at``). The timer
+    hard-codes ``step_number=0`` and leaves ``tool_name``/``tokens_used``/
+    ``tool_output`` NULL, so a synthetic 1-based ``seq`` is derived from
+    chronological order rather than the column. Empty list on any failure.
+
+    Matches the run by the same ``_run_cost_keys`` candidates (thread_id then
+    bare run_id) used by ``run_cost_breakdown`` so both ``api-{id}`` and bare ids
+    resolve. Dashboard quick-glance only; the canonical per-node timing lives in
+    ``run_metrics.py``.
+    """
+    keys = _run_cost_keys(run_view)
+    if not keys:
+        return []
+    try:
+        result = await session.execute(
+            sa.select(
+                ExecutionStep.phase,
+                ExecutionStep.status,
+                ExecutionStep.duration_ms,
+                ExecutionStep.created_at,
+            )
+            .where(ExecutionStep.run_id.in_(keys))
+            .order_by(ExecutionStep.created_at.asc(), ExecutionStep.id.asc())
+            .limit(limit)
+        )
+        return [
+            {
+                "seq": i + 1,
+                "phase": r.phase,
+                "status": r.status,
+                "duration_ms": int(r.duration_ms or 0),
+                "duration_s": round(int(r.duration_ms or 0) / 1000, 1),
+                "created_at": r.created_at.isoformat() if r.created_at else "",
+            }
+            for i, r in enumerate(result.all())
+        ]
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: execution steps failed: {e}")
         return []
 
 

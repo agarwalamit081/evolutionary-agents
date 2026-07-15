@@ -54,4 +54,18 @@
     </tbody>
   </table>
 </section>
+
+{# Live per-node execution timeline (Q6): the execution_steps table is a per-node
+   wall-clock log keyed by run_id. poll.js fetches /dashboard/runs/{id}/steps?partial=1
+   every 3s and swaps this tbody's innerHTML, so an operator watches the run's node
+   invocations (phase, status, duration) appear and refresh in flight. #}
+<section>
+  <h2>Execution steps <span class="muted small">(auto-refresh 3s)</span></h2>
+  <table>
+    <thead><tr><th>#</th><th>phase</th><th>status</th><th>duration</th><th>time</th></tr></thead>
+    <tbody data-poll="/dashboard/runs/{{ run.run_id }}/steps?partial=1" data-poll-interval="3">
+      {% include "_steps_rows.html" %}
+    </tbody>
+  </table>
+</section>
 {% endblock %}

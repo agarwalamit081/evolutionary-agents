@@ -257,6 +257,41 @@ class TestRunCostBreakdown:
 
 
 @pytest.mark.asyncio
+class TestExecutionSteps:
+    @staticmethod
+    def _rows() -> list[SimpleNamespace]:
+        # Three node invocations, chronological by created_at.
+        return [
+            _row(phase="classify_node", status="completed", duration_ms=1500,
+                  created_at=datetime(2026, 7, 15, 12, 0, 0, tzinfo=timezone.utc)),
+            _row(phase="execute_node", status="completed", duration_ms=22500,
+                  created_at=datetime(2026, 7, 15, 12, 0, 5, tzinfo=timezone.utc)),
+            _row(phase="verify_node", status="failed", duration_ms=3000,
+                  created_at=datetime(2026, 7, 15, 12, 0, 10, tzinfo=timezone.utc)),
+        ]
+
+    async def test_chronological_seq_phase_status_duration(self) -> None:
+        run = {"thread_id": "api-r1", "run_id": "r1"}
+        steps = await data.execution_steps(_session_returning(self._rows()), run)
+        assert [s["seq"] for s in steps] == [1, 2, 3]  # synthetic seq (step_number is always 0)
+        assert [s["phase"] for s in steps] == ["classify_node", "execute_node", "verify_node"]
+        assert steps[0]["status"] == "completed"
+        assert steps[2]["status"] == "failed"
+        # duration_ms preserved + duration_s derived (22500ms → 22.5s).
+        assert steps[1]["duration_ms"] == 22500
+        assert steps[1]["duration_s"] == 22.5
+        assert steps[0]["created_at"].startswith("2026-07-15T12:00")
+
+    async def test_empty_when_no_keys(self) -> None:
+        # A run view with neither thread_id nor run_id yields no candidate keys.
+        assert await data.execution_steps(MagicMock(), {}) == []
+
+    async def test_degrades_to_empty_on_db_error(self) -> None:
+        run = {"thread_id": "api-r1", "run_id": "r1"}
+        assert await data.execution_steps(_session_raising(RuntimeError("db")), run) == []
+
+
+@pytest.mark.asyncio
 class TestMutationTimeline:
     @staticmethod
     def _rows() -> list[SimpleNamespace]:
@@ -475,6 +510,66 @@ class TestRunDetailRoute:
         store.get = AsyncMock(return_value=None)  # unknown / expired run
         resp = client.get("/dashboard/runs/does-not-exist")
         assert resp.status_code == 404
+
+    def test_detail_renders_live_steps_section(
+        self, client: TestClient, patch_infra: Any
+    ) -> None:
+        store, _ = patch_infra
+        store.get = AsyncMock(return_value=_run("r1", status=JobStatus.RUNNING))
+        steps = [{"seq": 1, "phase": "execute_node", "status": "completed",
+                  "duration_ms": 22500, "duration_s": 22.5,
+                  "created_at": "2026-07-15T12:00:05+00:00"}]
+        with patch.object(data, "run_cost_breakdown", new=AsyncMock(return_value=[])), \
+             patch.object(data, "execution_steps", new=AsyncMock(return_value=steps)):
+            resp = client.get("/dashboard/runs/r1")
+        assert resp.status_code == 200, resp.text
+        body = resp.text
+        assert "Execution steps" in body  # the section header
+        assert "execute_node" in body  # a step row rendered server-side (initial render)
+        # The polled-swap wiring: the tbody auto-refreshes the steps partial.
+        assert 'data-poll="/dashboard/runs/r1/steps?partial=1"' in body
+
+
+class TestRunStepsRoute:
+    def test_partial_renders_step_rows_fragment(
+        self, client: TestClient, patch_infra: Any
+    ) -> None:
+        store, _ = patch_infra
+        store.get = AsyncMock(return_value=_run("r1", status=JobStatus.RUNNING))
+        steps = [{"seq": 1, "phase": "verify_node", "status": "failed",
+                  "duration_ms": 3000, "duration_s": 3.0,
+                  "created_at": "2026-07-15T12:00:10+00:00"}]
+        with patch.object(data, "execution_steps", new=AsyncMock(return_value=steps)):
+            resp = client.get("/dashboard/runs/r1/steps?partial=1")
+        assert resp.status_code == 200, resp.text
+        body = resp.text
+        assert "<html" not in body  # fragment only — not a full document
+        assert "verify_node" in body
+        assert "failed" in body
+        assert "3.0s" in body  # the formatted duration cell
+
+    def test_partial_renders_empty_placeholder(
+        self, client: TestClient, patch_infra: Any
+    ) -> None:
+        store, _ = patch_infra
+        store.get = AsyncMock(return_value=_run("r1", status=JobStatus.QUEUED))
+        with patch.object(data, "execution_steps", new=AsyncMock(return_value=[])):
+            resp = client.get("/dashboard/runs/r1/steps?partial=1")
+        assert resp.status_code == 200
+        assert "No execution steps recorded" in resp.text
+
+    def test_unknown_run_degrades_to_empty_partial_not_404(
+        self, client: TestClient, patch_infra: Any
+    ) -> None:
+        # A polled partial must never 500/404 mid-page: an expired run renders the
+        # empty placeholder so the run-detail page keeps polling cleanly.
+        store, _ = patch_infra
+        store.get = AsyncMock(return_value=None)
+        with patch.object(data, "execution_steps", new=AsyncMock(return_value=[])) as es:
+            resp = client.get("/dashboard/runs/expired/steps?partial=1")
+        assert resp.status_code == 200
+        assert "No execution steps recorded" in resp.text
+        es.assert_not_awaited()  # no run view → no DB hit
 
 
 class TestCurveRoute:

@@ -1,0 +1,14 @@
+{# The <tr> rows for the per-node execution-step timeline. Rendered standalone
+   as the polled partial (poll.js swaps this into the run-detail <tbody>), and
+   {% include %}d by run_detail.html for the initial render. #}
+{% for s in steps %}
+<tr>
+  <td class="num">{{ s.seq }}</td>
+  <td><code>{{ s.phase }}</code></td>
+  <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
+  <td class="num">{{ s.duration_s }}s</td>
+  <td class="muted">{{ s.created_at[:19] }}</td>
+</tr>
+{% else %}
+<tr><td colspan="5" class="empty">No execution steps recorded yet for this run.</td></tr>
+{% endfor %}

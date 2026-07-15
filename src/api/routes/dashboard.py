@@ -3,7 +3,8 @@
 Five read-only HTML views over the existing data (no new schema, no writes):
   GET /dashboard              — index: summary cards + recent runs + recent mutations
   GET /dashboard/runs         — run observer (Redis ``turing:run:*``), auto-refreshing
-  GET /dashboard/runs/{id}    — run detail: status, cost-by-model, review card
+  GET /dashboard/runs/{id}    — run detail: status, cost-by-model, review card, live steps
+  GET /dashboard/runs/{id}/steps — polled partial: per-node execution-step rows (poll.js)
   GET /dashboard/curve        — per-run × per-goal eval matrix + summary chart
   GET /dashboard/mutations    — mutation/promotion timeline (with Phase-3 diff + Phase-4 A/B)
 
@@ -104,6 +105,7 @@ async def dashboard_run_detail(run_id: str, request: Request) -> HTMLResponse:
     store, redis_client = await _open_store()
     run_view: dict[str, Any] | None = None
     cost_breakdown: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
     try:
         record = await store.get(run_id)
         if record is not None:
@@ -111,6 +113,7 @@ async def dashboard_run_detail(run_id: str, request: Request) -> HTMLResponse:
         async with get_session() as session:
             if run_view is not None:
                 cost_breakdown = await data.run_cost_breakdown(session, run_view)
+                steps = await data.execution_steps(session, run_view)
     except Exception as e:  # noqa: BLE001 — degrade
         logger.warning(f"Dashboard run-detail fetch failed for {run_id}: {e}")
     finally:
@@ -131,7 +134,38 @@ async def dashboard_run_detail(run_id: str, request: Request) -> HTMLResponse:
             "run": run_view,
             "cost_breakdown": cost_breakdown,
             "total_cost": sum(c["cost_usd"] for c in cost_breakdown),
+            "steps": steps,
         },
+    )
+
+
+@router.get("/dashboard/runs/{run_id}/steps", response_class=HTMLResponse)
+async def dashboard_run_steps(run_id: str, request: Request) -> HTMLResponse:
+    """Polled partial — the per-node execution-step rows for one run.
+
+    poll.js fetches this every ``data-poll-interval`` seconds and swaps the
+    response into the run-detail steps ``<tbody>`` (HTMX-equivalent). Re-derives
+    the run view from Redis so the ``run_id`` key candidates (thread_id / bare id)
+    match, exactly as the run-detail route does. Best-effort: a Redis/DB hiccup
+    renders the empty partial (never 500). The run-detail route 404s unknown ids;
+    this partial degrades to "no steps" so a poll never errors mid-page.
+    """
+    store, redis_client = await _open_store()
+    steps: list[dict[str, Any]] = []
+    try:
+        record = await store.get(run_id)
+        if record is not None:
+            run_view = data._run_to_view(record)  # noqa: SLF001 — view-shape helper
+            async with get_session() as session:
+                steps = await data.execution_steps(session, run_view)
+    except Exception as e:  # noqa: BLE001 — degrade
+        logger.warning(f"Dashboard steps fetch failed for {run_id}: {e}")
+    finally:
+        await redis_client.aclose()
+    return templates.TemplateResponse(
+        request=request,
+        name="_steps_rows.html",
+        context={"request": request, "steps": steps},
     )
 
 

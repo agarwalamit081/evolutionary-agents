@@ -983,6 +983,17 @@ class BudgetSettings(BaseSettings):
 
 # ─── Evolution Settings ─────────────────────────────────────────────
 
+# Default promotion-canary goal set: gates BOTH deliverable *behavior*
+# (battery04_q01 — normalization/UTC/dedup/row-count) AND deliverable *format
+# fidelity* (probe_format_fidelity — CSV schema depth + an aggregate recomputed
+# from the on-disk content + a rendered, placeholder-leak-free methodology
+# report). A mutation that preserves orchestration yet degrades the report
+# format fails the latter goal (passed=False), which GoldenCanary.score turns
+# into a 0.0 promotion score — the format collapse the q01-only canary could not
+# see. Env PROMOTION_CANARY_GOALS overrides (CSV ``a,b`` or JSON array).
+_DEFAULT_PROMOTION_CANARY_GOALS: list[str] = ["battery04_q01", "probe_format_fidelity"]
+_DEFAULT_PROMOTION_CANARY_GOALS_CSV: str = "battery04_q01,probe_format_fidelity"
+
 
 class EvolutionSettings(BaseSettings):
     """Self-evolution system configuration."""
@@ -1050,7 +1061,7 @@ class EvolutionSettings(BaseSettings):
     # (battery04_q* + LEARNING_PROBES); unresolvable ids are skipped by the
     # canary. Env: PROMOTION_CANARY_GOALS.
     promotion_canary_goals_csv: str = Field(
-        default="battery04_q01",
+        default=_DEFAULT_PROMOTION_CANARY_GOALS_CSV,
         validation_alias=AliasChoices("PROMOTION_CANARY_GOALS"),
     )
     # Directory holding promoted, versioned handler artifacts (prompts first).
@@ -1158,7 +1169,7 @@ class EvolutionSettings(BaseSettings):
 
         raw = (self.promotion_canary_goals_csv or "").strip()
         if not raw:
-            return ["battery04_q01"]
+            return list(_DEFAULT_PROMOTION_CANARY_GOALS)
         if raw.startswith("["):
             try:
                 parsed = _json.loads(raw)
@@ -1166,9 +1177,9 @@ class EvolutionSettings(BaseSettings):
                 parsed = None
             if isinstance(parsed, list):
                 out = [str(x).strip() for x in parsed if str(x).strip()]
-                return out or ["battery04_q01"]
+                return out or list(_DEFAULT_PROMOTION_CANARY_GOALS)
         parts = [p.strip() for p in raw.split(",") if p.strip()]
-        return parts or ["battery04_q01"]
+        return parts or list(_DEFAULT_PROMOTION_CANARY_GOALS)
 
     @field_validator("evolution_max_tokens_factor")
     @classmethod

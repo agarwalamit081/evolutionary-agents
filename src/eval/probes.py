@@ -509,6 +509,223 @@ def _probe_multi_orchestration() -> GoalSpec:
     )
 
 
+# ── Format-fidelity canary (Q1) ───────────────────────────────────────────────
+# The q01-only promotion canary rewards orchestration/normalization but is blind
+# to deliverable FORMAT quality — CSV schema depth, a methodology report that was
+# actually RENDERED (not shipped as an unrendered template), and an aggregate
+# recomputed from the on-disk content. This probe closes that gap: it demands a
+# fixed-schema CSV + a short report, and gates BOTH a recomputed aggregate AND a
+# placeholder-leak scan. A mutation that preserves q01 orchestration yet degrades
+# report fidelity fails this goal (passed=False), which GoldenCanary.score turns
+# into a 0.0 promotion score — exactly the q04-style format collapse the
+# mean-only canary averaged away. Self-contained + deterministic; no upstream deps.
+_FORMAT_FIDELITY_PRICE = 25.0  # USD per unit, fixed
+_FORMAT_FIDELITY_INPUT: list[tuple[str, int]] = [
+    ("Jan", 100),
+    ("Feb", 150),
+    ("Mar", 120),
+    ("Apr", 180),
+]
+_FORMAT_FIDELITY_N_ROWS = len(_FORMAT_FIDELITY_INPUT)  # 4 months
+_FORMAT_FIDELITY_TOTAL_UNITS = sum(u for _, u in _FORMAT_FIDELITY_INPUT)  # 550
+_FORMAT_FIDELITY_TOTAL_REVENUE = round(
+    sum(u * _FORMAT_FIDELITY_PRICE for _, u in _FORMAT_FIDELITY_INPUT), 2
+)  # 13750.0
+
+
+def _recompute_sales_summary_code(
+    n_rows: int, price: float, total_units: int, total_revenue: float
+) -> str:
+    """Sandbox recompute probe for the sales-summary CSV.
+
+    Anti-fabrication: reads the CSV's OWN ``units`` column and recomputes
+    ``revenue_usd = units * price`` per row, then asserts the on-disk
+    ``revenue_usd`` matches (a fabricated CSV with invented revenue fails the
+    per-row consistency check) AND the totals (units / revenue) match the known
+    deterministic values. Trailing ``Total`` / blank rows are skipped so a
+    legitimate grand-total row does not false-positive.
+    """
+    return (
+        "import csv, sys\n"
+        "path = next((p for p in _DELIVERABLES if p.endswith('sales_summary.csv')), '')\n"
+        "if not path:\n"
+        "    print('no sales_summary.csv'); sys.exit(1)\n"
+        "rows = list(csv.DictReader(open(path, newline='')))\n"
+        "def _col(r, want):\n"
+        "    for k, v in r.items():\n"
+        "        if k.strip().lower() == want:\n"
+        "            return v\n"
+        "    return None\n"
+        "data = []\n"
+        "for r in rows:\n"
+        "    m = (_col(r, 'month') or '').strip().lower()\n"
+        "    if not m or m in ('total', 'sum', 'grand total', 'totals'):\n"
+        "        continue\n"
+        "    data.append(r)\n"
+        f"if len(data) < {n_rows}:\n"
+        f"    print('expected >={n_rows} data rows, got %d' % len(data)); sys.exit(1)\n"
+        "required = {'month', 'units', 'revenue_usd'}\n"
+        "for r in data:\n"
+        "    cols = {k.strip().lower() for k in r.keys()}\n"
+        "    missing = required - cols\n"
+        "    if missing:\n"
+        "        print('csv missing columns %s' % sorted(missing)); sys.exit(1)\n"
+        f"price = {price}\n"
+        "tot_units = 0.0\n"
+        "tot_rev = 0.0\n"
+        "for r in data:\n"
+        "    try:\n"
+        "        u = float(_col(r, 'units'))\n"
+        "        rev = float(_col(r, 'revenue_usd'))\n"
+        "    except (TypeError, ValueError):\n"
+        "        print('non-numeric units/revenue in row %r' % r); sys.exit(1)\n"
+        "    want = round(u * price, 2)\n"
+        "    if abs(rev - want) > 0.01:\n"
+        "        print('revenue_usd got %.2f but units*price = %.2f' % (rev, want)); sys.exit(1)\n"
+        "    tot_units += u\n"
+        "    tot_rev += rev\n"
+        f"if abs(tot_units - {total_units}) > 0.5:\n"
+        f"    print('total units got %.2f expected %.2f' % (tot_units, {total_units})); sys.exit(1)\n"
+        f"if abs(tot_rev - {total_revenue}) > 0.5:\n"
+        f"    print('total revenue got %.2f expected %.2f' % (tot_rev, {total_revenue})); sys.exit(1)\n"
+        "print('ok: sales_summary internally consistent + totals verified')\n"
+    )
+
+
+def _placeholder_leak_code(report_suffix: str) -> str:
+    """Sandbox probe mirroring the verify-node F-j scanner (verify.py
+    ``_placeholder_leak_reason``): strip fenced + inline code spans, then flag
+    >=2 DISTINCT unsubstituted template residues across the three forms
+    (``.format()`` ``{name}``, Jinja ``{{ name }}``, Jinja ``{% tag %}``) in the
+    report prose. A shipped-but-unrendered template fails. Reused here as an
+    execution check so a format-degrading mutation fails the promotion canary
+    even when orchestration (q01) still passes.
+    """
+    return (
+        "import re, sys\n"
+        "path = next((p for p in _DELIVERABLES if p.endswith("
+        f"'{report_suffix}')), '')\n"
+        "if not path:\n"
+        f"    print('no {report_suffix}'); sys.exit(1)\n"
+        "t = open(path, encoding='utf-8', errors='replace').read()\n"
+        "if not t.strip():\n"
+        "    print('empty report'); sys.exit(1)\n"
+        "t = re.sub(r'```.*?```', '', t, flags=re.DOTALL)\n"
+        "t = re.sub(r'`[^`\\n]*`', '', t)\n"
+        "fmt = set(re.findall(r'(?<!\\{)\\{([a-z_][a-z0-9_]{2,})\\}(?!\\})', t))\n"
+        "jv = set(re.findall(r'\\{\\{\\s*([a-zA-Z_][a-zA-Z0-9_.-]*)\\s*\\}\\}', t))\n"
+        "jt = set(re.findall(r'\\{%[^}%]*%\\}', t))\n"
+        "leaks = fmt | jv | jt\n"
+        "if len(leaks) >= 2:\n"
+        "    print('placeholder leak: ' + ', '.join(sorted(leaks)[:6])); sys.exit(1)\n"
+        "print('ok: no template-placeholder residue in report')\n"
+    )
+
+
+def _probe_format_fidelity() -> GoalSpec:
+    """Format-fidelity promotion canary (Q1).
+
+    Demands a fixed-schema sales-summary CSV plus a short, RENDERED methodology
+    report, then gates: (a) CSV schema + min row count (structural), (b) an
+    aggregate RECOMPUTED from the on-disk ``units`` column (execution), (c) a
+    placeholder-leak scan of the report prose (execution, mirroring verify.py's
+    ``_placeholder_leak_reason``). The default q01 canary checks existence / UTC /
+    duplicates / row-count but is blind to all three — so a mutation that
+    degrades report fidelity passed it. This probe makes that degradation fail
+    (``passed=False``), which ``GoldenCanary.score`` turns into 0.0. Self-contained
+    + deterministic; no upstream deliverable dependency.
+    """
+    return GoalSpec(
+        spec_id="probe_format_fidelity",
+        name="probe_format_fidelity",
+        description=(
+            "Format-fidelity promotion canary (Q1): compute a fixed-schema "
+            "sales-summary CSV AND a rendered methodology report. Gates CSV "
+            "schema depth, a recomputed aggregate, and a placeholder-leak scan "
+            "— the format dimensions the q01-only canary cannot see."
+        ),
+        goal_text=(
+            "A small retailer sold units at a FIXED price of "
+            f"${int(_FORMAT_FIDELITY_PRICE)}/unit. Units sold by month:\n"
+            "  Jan: 100\n"
+            "  Feb: 150\n"
+            "  Mar: 120\n"
+            "  Apr: 180\n\n"
+            f"Compute revenue_usd = units * {_FORMAT_FIDELITY_PRICE:g} for each month "
+            "and write results/probe_format/sales_summary.csv with the columns "
+            "month,units,revenue_usd — one data row per month, every value "
+            "rendered (not a template placeholder).\n\n"
+            "Then write results/probe_format/methodology.md: a SHORT (1-2 "
+            "paragraph) report in plain prose explaining how revenue_usd was "
+            "computed. Write it as FINISHED prose — render every value into the "
+            "text; do NOT leave unsubstituted template variables such as "
+            "{revenue} or {{ total }} or {% if x %}."
+        ),
+        category="simple",
+        max_iterations=25,
+        timeout_seconds=300,
+        expected_deliverables=[
+            "results/probe_format/sales_summary.csv",
+            "results/probe_format/methodology.md",
+        ],
+        success_criteria=[
+            "sales_summary.csv exists, is valid CSV, with columns month,units,revenue_usd",
+            "Each revenue_usd = units * 25 (Jan=2500, Feb=3750, Mar=3000, Apr=4500)",
+            "methodology.md exists and is free of unsubstituted template placeholders",
+        ],
+        checks=[
+            CheckConfig(
+                check_type="golden",
+                name="probe_format_csv_exists",
+                params={
+                    "assertions": [
+                        {"kind": "exists", "deliverable": "results/probe_format/sales_summary.csv"},
+                    ]
+                },
+            ),
+            CheckConfig(
+                check_type="golden",
+                name="probe_format_report_exists",
+                params={
+                    "assertions": [
+                        {"kind": "exists", "deliverable": "results/probe_format/methodology.md"},
+                    ]
+                },
+            ),
+            CheckConfig(
+                check_type="structural",
+                name="probe_format_csv_schema",
+                params={
+                    "deliverable": "results/probe_format/sales_summary.csv",
+                    "format": "csv",
+                    "min_rows": _FORMAT_FIDELITY_N_ROWS,
+                },
+            ),
+            CheckConfig(
+                check_type="execution",
+                name="probe_format_csv_recompute",
+                params={
+                    "code": _recompute_sales_summary_code(
+                        _FORMAT_FIDELITY_N_ROWS,
+                        _FORMAT_FIDELITY_PRICE,
+                        _FORMAT_FIDELITY_TOTAL_UNITS,
+                        _FORMAT_FIDELITY_TOTAL_REVENUE,
+                    ),
+                    "timeout": 20,
+                },
+            ),
+            CheckConfig(
+                check_type="execution",
+                name="probe_format_report_no_leak",
+                params={
+                    "code": _placeholder_leak_code("probe_format/methodology.md"),
+                    "timeout": 20,
+                },
+            ),
+        ],
+    )
+
+
 # Ordered list — the experiment enqueuer iterates this; wiring into GOLDEN_SPECS
 # makes each resolvable via lookup_goal_spec(spec_id).
 LEARNING_PROBES: list[GoalSpec] = [
@@ -516,4 +733,5 @@ LEARNING_PROBES: list[GoalSpec] = [
     _probe_reuse_tool(),
     _probe_analytics_recall(),
     _probe_multi_orchestration(),
+    _probe_format_fidelity(),
 ]

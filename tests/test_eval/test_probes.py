@@ -1,7 +1,7 @@
 """Unit tests for src/eval/probes.py — the learning probes (cross-run signal).
 
 Two concerns:
-- **Registration invariants:** all 3 probes resolve via ``lookup_goal_spec`` and
+- **Registration invariants:** all probes resolve via ``lookup_goal_spec`` and
   live in ``GOLDEN_SPECS``; none are in ``BATTERY04_GOALS`` (mirrors the classify
   canaries — the nightly capability-curve battery must stay unperturbed).
 - **Anti-fabrication backbone:** each probe's ``execution`` recompute code PASSES
@@ -27,6 +27,7 @@ _PROBE_IDS = [
     "probe_reuse_tool",
     "probe_analytics_recall",
     "probe_multi_orchestration",
+    "probe_format_fidelity",
 ]
 
 
@@ -326,3 +327,171 @@ def test_probe_multi_summary_crosscheck_fails_on_missing_upstream(
     )
     assert not ok
     assert "probe_multi/ranges.json" in out
+
+
+# ─── probe_format_fidelity recompute + placeholder-leak (Q1 canary) ───────────
+
+
+_CORRECT_SALES: list[tuple[str, int, float]] = [
+    ("Jan", 100, 2500.0),
+    ("Feb", 150, 3750.0),
+    ("Mar", 120, 3000.0),
+    ("Apr", 180, 4500.0),
+]
+
+
+def _write_sales_csv(path: Path, rows: list[tuple[str, int, float]]) -> str:
+    """Write a sales_summary.csv with header month,units,revenue_usd."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["month", "units", "revenue_usd"])
+        for m, u, r in rows:
+            w.writerow([m, u, f"{r:.2f}"])
+    return str(path)
+
+
+def test_probe_format_fidelity_has_two_deliverables_and_simple_category() -> None:
+    spec = GOLDEN_SPECS["probe_format_fidelity"]
+    assert spec.category == "simple"
+    assert len(spec.expected_deliverables) == 2
+    # Two execution checks (CSV recompute + report placeholder-leak scan).
+    exec_checks = [c for c in spec.checks if c.check_type == "execution"]
+    assert len(exec_checks) == 2
+
+
+def test_probe_format_fidelity_csv_recompute_passes_on_correct(tmp_path: Path) -> None:
+    dlv = _write_sales_csv(tmp_path / "probe_format" / "sales_summary.csv", _CORRECT_SALES)
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_format_fidelity", "probe_format_csv_recompute"),
+        [dlv], str(tmp_path),
+    )
+    assert ok, out
+    assert "internally consistent" in out
+
+
+def test_probe_format_fidelity_csv_recompute_passes_with_total_row(tmp_path: Path) -> None:
+    """A legitimate trailing grand-total row is skipped, not counted as a data row."""
+    dlv = _write_sales_csv(
+        tmp_path / "probe_format" / "sales_summary.csv",
+        _CORRECT_SALES + [("Total", 550, 13750.0)],
+    )
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_format_fidelity", "probe_format_csv_recompute"),
+        [dlv], str(tmp_path),
+    )
+    assert ok, out
+
+
+def test_probe_format_fidelity_csv_recompute_fails_on_fabricated_revenue(
+    tmp_path: Path,
+) -> None:
+    # Mar revenue should be 3000 (120*25); 9999 is fabricated → per-row mismatch.
+    fabricated = [(*r[:2], 9999.0) if r[0] == "Mar" else r for r in _CORRECT_SALES]
+    dlv = _write_sales_csv(tmp_path / "probe_format" / "sales_summary.csv", fabricated)
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_format_fidelity", "probe_format_csv_recompute"),
+        [dlv], str(tmp_path),
+    )
+    assert not ok
+    assert "units*price" in out
+
+
+def test_probe_format_fidelity_csv_recompute_fails_on_missing_column(
+    tmp_path: Path,
+) -> None:
+    # CSV without the revenue_usd column → the schema requirement fails.
+    path = tmp_path / "probe_format" / "sales_summary.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["month", "units"])
+        for m, u, _ in _CORRECT_SALES:
+            w.writerow([m, u])
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_format_fidelity", "probe_format_csv_recompute"),
+        [str(path)], str(tmp_path),
+    )
+    assert not ok
+    assert "missing columns" in out
+
+
+def test_probe_format_fidelity_report_no_leak_passes_on_clean(tmp_path: Path) -> None:
+    path = tmp_path / "probe_format" / "methodology.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Methodology\n\nRevenue was computed as units sold multiplied by the "
+        "fixed $25/unit price. Total revenue was 13750.0 across 550 units.\n",
+        encoding="utf-8",
+    )
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_format_fidelity", "probe_format_report_no_leak"),
+        [str(path)], str(tmp_path),
+    )
+    assert ok, out
+    assert "no template-placeholder" in out
+
+
+def test_probe_format_fidelity_report_no_leak_fails_on_placeholders(
+    tmp_path: Path,
+) -> None:
+    """The Q1 discriminator: a shipped-but-unrendered report with >=2 distinct
+    {var}/{{ var }} residues fails (the q01-only canary could not see this)."""
+    path = tmp_path / "probe_format" / "methodology.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Methodology\n\nRevenue is {revenue_usd} for {month_count} months. "
+        "Total {{ total_revenue }}.\n",
+        encoding="utf-8",
+    )
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_format_fidelity", "probe_format_report_no_leak"),
+        [str(path)], str(tmp_path),
+    )
+    assert not ok
+    assert "placeholder leak" in out
+
+
+def test_probe_format_fidelity_report_no_leak_ignores_code_spans(
+    tmp_path: Path,
+) -> None:
+    """Placeholders appearing ONLY inside fenced/inline code are not leaks
+    (legitimate docs of a template) — mirroring verify.py's _strip_markdown_code."""
+    path = tmp_path / "probe_format" / "methodology.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Methodology\n\nThe transform `f'{revenue_usd:.2f}'` rounds each row. "
+        "```\n{month_count}\n{{ total_revenue }}\n```\nTotal revenue was 13750.0.\n",
+        encoding="utf-8",
+    )
+    ok, _ = _run_recompute(
+        _exec_check_by_name("probe_format_fidelity", "probe_format_report_no_leak"),
+        [str(path)], str(tmp_path),
+    )
+    assert ok
+
+
+def test_probe_format_fidelity_report_no_leak_fails_when_missing(
+    tmp_path: Path,
+) -> None:
+    ok, out = _run_recompute(
+        _exec_check_by_name("probe_format_fidelity", "probe_format_report_no_leak"),
+        [], str(tmp_path),
+    )
+    assert not ok
+    assert "no probe_format/methodology.md" in out
+
+
+def test_default_promotion_canary_goals_gate_format_fidelity() -> None:
+    """The CODE default canary set gates BOTH behavior (q01) AND format fidelity.
+
+    Asserts the field-default attribute — not the resolved env value, which host
+    pytest reads from the live .env override (PROMOTION_CANARY_GOALS).
+    """
+    from src.config.settings import EvolutionSettings
+
+    default_csv = EvolutionSettings.model_fields["promotion_canary_goals_csv"].default
+    assert default_csv is not None
+    ids = [p.strip() for p in str(default_csv).split(",") if p.strip()]
+    assert "battery04_q01" in ids
+    assert "probe_format_fidelity" in ids

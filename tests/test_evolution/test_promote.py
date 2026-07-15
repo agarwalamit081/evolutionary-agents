@@ -941,14 +941,20 @@ class TestPromotionCanaryGoalsConfig:
     q01 non-converges (loops past the inline budget) the canary was always
     inconclusive → channel-B prompt promotion never fired. The field makes the
     benchmark operator-configurable (CSV/JSON/list) so a CONVERGING goal can be
-    chosen. Default is unchanged (``battery04_q01``).
+    chosen. Default gates BOTH behavior (``battery04_q01``) AND deliverable
+    format fidelity (``probe_format_fidelity``) — see src/eval/probes.py.
     """
 
-    def test_default_is_q01(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_gates_behavior_and_format(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from src.config.settings import EvolutionSettings
 
         monkeypatch.delenv("PROMOTION_CANARY_GOALS", raising=False)
-        assert EvolutionSettings().promotion_canary_goals == ["battery04_q01"]
+        assert EvolutionSettings().promotion_canary_goals == [
+            "battery04_q01",
+            "probe_format_fidelity",
+        ]
 
     def test_csv_env_splits_and_strips(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from src.config.settings import EvolutionSettings
@@ -972,7 +978,10 @@ class TestPromotionCanaryGoalsConfig:
         from src.config.settings import EvolutionSettings
 
         monkeypatch.setenv("PROMOTION_CANARY_GOALS", "")
-        assert EvolutionSettings().promotion_canary_goals == ["battery04_q01"]
+        assert EvolutionSettings().promotion_canary_goals == [
+            "battery04_q01",
+            "probe_format_fidelity",
+        ]
 
 
 class TestGoldenCanaryGoalSelection:

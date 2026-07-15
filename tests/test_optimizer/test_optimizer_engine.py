@@ -1,6 +1,6 @@
 """Decision-logic tests for :class:`PromptOptimizer` (Phase 2 C2).
 
-The engine's ``optimize()`` is a branchy state machine (textgrad → un-shipped
+The engine's ``optimize()`` is a branchy state machine (textgrad/dspy-gepa → un-shipped
 node → C1 curve guard → budget cp1 → no-signal → compile → budget cp2 → margin
 → promote). Each branch is pinned here WITHOUT a real LLM / DB / DSPy compile:
 
@@ -14,7 +14,7 @@ node → C1 curve guard → budget cp1 → no-signal → compile → budget cp2 
     ``src.optimizer.engine.dspy`` with ``_FakeDspy`` (``FakeDspy.LM`` records
     kwargs so the ``cache=False`` + ``callbacks`` invariant is asserted).
 
-The two entry guards (textgrad backend / un-shipped node) raise
+The three entry guards (textgrad / dspy-gepa backends / un-shipped node) raise
 :class:`ConfigurationError` BEFORE any gateway construction, so they need no
 mocks at all. ``CostAccountingCallback`` is exercised directly (its own unit
 test) since it is the cost-ledger seam for the otherwise-gateway-bypassing
@@ -219,8 +219,9 @@ class _TestOptimizer(PromptOptimizer):
         return self._model_id, {}
 
     def _resolve_reflection_model(self, _node: str) -> tuple[str, dict[str, Any]]:
-        # Real optimize() now resolves a reflection LM before _compile (GEPA
-        # needs one); the unit fake supplies one so the 5-arg _compile below runs.
+        # Real optimize() now resolves a proposal LM before _compile
+        # (MIPROv2/COPRO's prompt_model needs one); the unit fake supplies one
+        # so the 5-arg _compile below runs.
         return "fake-reflection-model", {}
 
     def _compile(
@@ -247,6 +248,15 @@ async def test_textgrad_backend_raises_configuration_error() -> None:
     opt = _TestOptimizer(_FakeSettings(_make_opt()))
     with pytest.raises(ConfigurationError, match="textgrad"):
         await opt.optimize(OptimizeRequest(node="classify", backend="textgrad"))
+
+
+@pytest.mark.asyncio
+async def test_dspy_gepa_backend_raises_configuration_error() -> None:
+    """dspy-gepa is deferred (GEPA is the external ``gepa`` package, not a dspy
+    teleprompter) — a guarded seam, not a phantom-API crash at compile time."""
+    opt = _TestOptimizer(_FakeSettings(_make_opt()))
+    with pytest.raises(ConfigurationError, match="dspy-gepa"):
+        await opt.optimize(OptimizeRequest(node="classify", backend="dspy-gepa"))
 
 
 @pytest.mark.asyncio
@@ -329,12 +339,12 @@ async def test_compile_failure_is_a_structured_skip(monkeypatch: pytest.MonkeyPa
     opt = _TestOptimizer(
         _FakeSettings(_make_opt(require_curve_clear=False)),
         canary=_FakeCanary(baseline=0.5, candidate=0.8),
-        compile_raises=RuntimeError("GEPA blew up"),
+        compile_raises=RuntimeError("teleprompter blew up"),
     )
     resp = await opt.optimize(OptimizeRequest())
     assert resp.promoted is False
     assert resp.reason.startswith("compile failed")
-    assert "GEPA blew up" in resp.reason
+    assert "teleprompter blew up" in resp.reason
 
 
 # ── No improvement ───────────────────────────────────────────────────────────
@@ -449,7 +459,7 @@ def test_cost_accounting_callback_reads_dict_form_usage() -> None:
     """Regression: dspy stores ``history[-1]['usage']`` as ``dict(response.usage)``
     — a PLAIN dict (keys prompt_tokens/completion_tokens/total_tokens), NOT the
     raw litellm ``Usage`` object. The prior ``getattr``-based read returned 0 for
-    every real GEPA call (``getattr`` on a dict returns the default), so the cost
+    every real teleprompter call (``getattr`` on a dict returns the default), so the cost
     ledger showed 6 calls / 0 tokens. The form-agnostic ``_read_usage`` must
     extract tokens from a dict (the live dspy 3.x shape, proven via
     ``dict(litellm.types.utils.Usage(...))``)."""
@@ -585,7 +595,7 @@ class TestReflectionModelGuard:
     Guards the pydantic-settings inline-comment leak: ``OPTIMIZER_REFLECTION_MODEL=
     # comment`` parses as the comment *text* (pydantic-settings 2.x does not strip
     inline comments — verified), which would otherwise reach ``dspy.LM`` as an
-    invalid model id and fail GEPA/MIPROv2/COPRO. A valid id is a single
+    invalid model id and fail MIPROv2/COPRO. A valid id is a single
     whitespace-free, registered token; anything else falls back to routing.
     """
 

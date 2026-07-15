@@ -13,11 +13,19 @@ COPY requirements.txt .
 # first (resolves cleanly), then litellm itself with --no-deps so its over-strict
 # metadata never blocks resolution. fastuuid (litellm's only base dep not otherwise
 # required) is pinned in requirements.txt and lands in the core install below.
+#
+# dspy==2.6.27 (the prompt-optimizer backend) depends on litellm, so it is ALSO
+# excluded from req.core — installing it there would pull litellm transitively and
+# re-trigger the over-pinned resolution. Installed AFTER the --no-deps litellm step
+# (with deps) so its `litellm>=1.60.3` requirement is satisfied by the already-
+# installed 1.83.14; its other deps (datasets/optuna/…) resolve cleanly.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    grep -v -E '^\s*litellm\b' requirements.txt > /tmp/req.core.txt && \
+    grep -v -E '^\s*(litellm|dspy)\b' requirements.txt > /tmp/req.core.txt && \
     grep -E '^\s*litellm\b' requirements.txt > /tmp/req.litellm.txt && \
+    grep -E '^\s*dspy\b' requirements.txt > /tmp/req.dspy.txt && \
     pip install --prefix=/install -r /tmp/req.core.txt && \
-    pip install --no-deps --prefix=/install -r /tmp/req.litellm.txt
+    pip install --no-deps --prefix=/install -r /tmp/req.litellm.txt && \
+    pip install --prefix=/install -r /tmp/req.dspy.txt
 
 # ── Stage 2: Runtime ───────────────────────────────────────────────
 FROM python:3.12-slim AS runtime

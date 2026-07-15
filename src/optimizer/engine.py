@@ -1,4 +1,4 @@
-"""Metric-driven prompt optimizer engine (Phase 2 C2: DSPy + GEPA).
+"""Metric-driven prompt optimizer engine (Phase 2 C2: DSPy MIPROv2/COPRO).
 
 ``PromptOptimizer.optimize`` searches a better prompt for a node and — when a
 candidate beats the baseline — promotes it through the EXISTING
@@ -7,15 +7,16 @@ is the missing piece C1 left out: C1 gave the system *measurement* (detect a
 regression + roll back); this gives it *improvement* (turn the golden canary
 into an objective and search against it).
 
-Architecture (forced by GEPA's real API — see plan §1.3):
-  GEPA optimizes a DSPy *student module's* predictor instruction; it never hands
-  candidate instructions back to caller code. The real golden canary runs the
-  full agent graph, so it CANNOT be GEPA's in-loop metric (too expensive, and it
-  does not return a per-example float GEPA can reflect on). So:
+Architecture (forced by the DSPy teleprompter API — see plan §1.3):
+  The teleprompter (MIPROv2/COPRO) optimizes a DSPy *student module's* predictor
+  instruction; it never hands candidate instructions back to caller code. The
+  real golden canary runs the full agent graph, so it CANNOT be the in-loop
+  metric (too expensive, and it does not return a per-example float the
+  teleprompter can score against). So:
 
-  1. GEPA searches candidate instructions against a CHEAP proxy metric over a
-     DSPy student (bounds cost — each metric call is one cheap LLM call) and
-     gives GEPA its reflective-feedback loop.
+  1. The teleprompter searches candidate instructions against a CHEAP proxy
+     metric over a DSPy student (bounds cost — each metric call is one cheap LLM
+     call) and uses that for its in-loop scoring.
   2. The optimized instruction is VALIDATED against the REAL golden canary (full
      agent runs) — baseline (current prompt) vs candidate.
   3. If the candidate beats the baseline by the configured margin, it goes
@@ -24,6 +25,12 @@ Architecture (forced by GEPA's real API — see plan §1.3):
 
   The eval metric stays the promotion gate -> DoD ("prompts improve against the
   eval metric, automatically") is satisfied.
+
+  GEPA is DEFERRED: it is now the external ``gepa`` package (a different
+  functional API — ``gepa.optimize`` + ``GEPAAdapter``), not the ``dspy.GEPA``
+  teleprompter this engine originally targeted. The ``dspy-gepa`` backend raises
+  a clear ``ConfigurationError`` at the optimize() entry; use ``dspy-mipro``
+  (default) or ``dspy-copro``.
 
 Preconditions (default-off, both must hold before any spend):
   * ``OPTIMIZER_ENABLED`` (the scheduler only registers the job when true); and
@@ -192,7 +199,13 @@ class PromptOptimizer:
 
         if backend == "textgrad":
             raise ConfigurationError(
-                "textgrad backend deferred (torch); use dspy-gepa/mipro/copro"
+                "textgrad backend deferred (torch); use dspy-mipro/copro"
+            )
+        if backend == "dspy-gepa":
+            raise ConfigurationError(
+                "dspy-gepa backend deferred (GEPA is now the external `gepa` "
+                "package with a different API — gepa.optimize/GEPAAdapter — not "
+                "a dspy teleprompter); use dspy-mipro (default) or dspy-copro"
             )
         profile = get_profile(node)
         if profile is None:
@@ -552,13 +565,14 @@ class PromptOptimizer:
         """Run the teleprompter and return the optimized instruction string.
 
         ``lm`` is the cheap student (set as DSPy's global default for the
-        predictor); ``reflection_lm`` is the stronger proposal/reflection model
-        passed explicitly to each teleprompter — GEPA needs ``reflection_lm``,
-        MIPROv2/COPRO need ``prompt_model`` (GEPA raises without one).
+        predictor); ``reflection_lm`` is the stronger proposal model passed as
+        ``prompt_model`` to MIPROv2/COPRO (each benefits from a stronger model
+        than the cheap student). ``dspy-gepa`` is guarded out at the entry to
+        ``optimize`` (deferred — see module docstring) so it never reaches here.
         """
         dspy.configure(lm=lm)
         student = dspy.Predict(profile.signature_def)
-        # Anchor the search at the current node prompt. GEPA rewrites the
+        # Anchor the search at the current node prompt. MIPROv2/COPRO rewrite the
         # predictor's ``instructions`` during search; this seeds the starting
         # point. ``setattr`` (not attribute assignment) because DSPy's type stubs
         # do not declare ``instructions`` on ``Predict`` (it is set lazily).
@@ -567,15 +581,7 @@ class PromptOptimizer:
             dspy.Example(**ex).with_inputs(profile.input_field) for ex in profile.examples
         ]
 
-        if backend == "dspy-gepa":
-            tele = dspy.GEPA(
-                metric=profile.metric,
-                reflection_lm=reflection_lm,
-                auto=("light" if (opt.max_trials or 0) <= 0 else None),
-                max_full_evals=(opt.max_trials if (opt.max_trials or 0) > 0 else None),
-            )
-            compiled = tele.compile(student, trainset=trainset)
-        elif backend == "dspy-mipro":
+        if backend == "dspy-mipro":
             tele = dspy.MIPROv2(
                 metric=profile.metric,
                 prompt_model=reflection_lm,
@@ -601,9 +607,9 @@ class PromptOptimizer:
     def _extract_instruction(self, compiled: Any, fallback: str) -> str:
         """Read the optimized instruction off the compiled student's predictor.
 
-        GEPA/MIPROv2/COPRO rewrite the predictor's ``.instructions`` during
-        search; a single-predictor student exposes it on its predictor. Falls
-        back to the seed when no predictor carries a non-empty instruction.
+        MIPROv2/COPRO rewrite the predictor's ``.instructions`` during search; a
+        single-predictor student exposes it on its predictor. Falls back to the
+        seed when no predictor carries a non-empty instruction.
         """
         try:
             predictors = (

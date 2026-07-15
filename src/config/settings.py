@@ -2187,7 +2187,7 @@ class OptimizerSettings(BaseSettings):
     runs) before promotion through the EXISTING ``PromotionGate`` (canary-gated,
     auto-rollback). The eval metric stays the promotion gate — so the DoD
     ("prompts improve against the eval metric, automatically") is satisfied;
-    GEPA supplies the search. The proxy→canary transfer risk is backstopped by
+    The DSPy teleprompter (MIPROv2/COPRO) supplies the search. The proxy→canary transfer risk is backstopped by
     C1 (``capability_curve``): a promoted prompt that later regresses the
     battery trend is detected + (optionally) rolled back.
 
@@ -2199,12 +2199,13 @@ class OptimizerSettings(BaseSettings):
     # Register the optimizer at all. Default False — a host run with no env
     # does nothing; the compose ``optimizer`` service (profile-gated) forces it.
     enabled: bool = False  # Env: OPTIMIZER_ENABLED
-    # Search backend. ``dspy-gepa`` (default, reflective) / ``dspy-mipro``
-    # (few-shot bootstrap) / ``dspy-copro`` (coordinate). All three are real
-    # DSPy teleprompters sharing the same student+trainset+metric; ``textgrad``
-    # (torch) is deferred — requested via the /optimize body, not here. Env:
-    # OPTIMIZER_BACKEND.
-    backend: Literal["dspy-gepa", "dspy-mipro", "dspy-copro"] = "dspy-gepa"  # noqa: E501
+    # Search backend. ``dspy-mipro`` (default, joint instruction + few-shot
+    # search) / ``dspy-copro`` (coordinate ascent over module instructions) are
+    # the live DSPy teleprompters. ``dspy-gepa`` is DEFERRED (GEPA is now the
+    # external ``gepa`` package with a different API, not a dspy teleprompter) —
+    # requesting it raises a clear ConfigurationError at optimize() entry.
+    # ``textgrad`` (torch) is likewise deferred. Env: OPTIMIZER_BACKEND.
+    backend: Literal["dspy-mipro", "dspy-copro", "dspy-gepa"] = "dspy-mipro"  # noqa: E501
     # The graph node whose system prompt is optimized. v1 ships a ``classify``
     # profile (cleanest DSPy signature — goal→complexity, exact-match metric);
     # ``execute``/``verify`` profiles are pluggable but un-shipped in v1 (a
@@ -2214,22 +2215,20 @@ class OptimizerSettings(BaseSettings):
     # GEPA's proxy loop is bounded separately by max_candidates/max_trials.
     # Env: OPTIMIZER_EVAL_SPEC_LIMIT.
     eval_spec_limit: int = 2  # Env: OPTIMIZER_EVAL_SPEC_LIMIT
-    # MIPROv2/COPRO candidate-search breadth (num_candidates); unused by GEPA,
-    # whose budget is max_trials. Env: OPTIMIZER_MAX_CANDIDATES.
+    # MIPROv2/COPRO candidate-search breadth (num_candidates / breadth). Env:
+    # OPTIMIZER_MAX_CANDIDATES.
     max_candidates: int = 8  # Env: OPTIMIZER_MAX_CANDIDATES
-    # GEPA full-eval rounds → ``max_full_evals`` (×(trainset+valset) metric
-    # calls). 0 lets GEPA pick via ``auto="light"``. Env: OPTIMIZER_MAX_TRIALS.
+    # MIPROv2 search trials → ``num_trials`` (used at compile time). Env:
+    # OPTIMIZER_MAX_TRIALS.
     max_trials: int = 1  # Env: OPTIMIZER_MAX_TRIALS
     # LM call params for the DSPy student module AND the reflection/proposal LM.
     max_tokens: int = 1024  # Env: OPTIMIZER_MAX_TOKENS
     temperature: float = 0.7  # Env: OPTIMIZER_TEMPERATURE
-    # Reflection/proposal model for the teleprompter search — GEPA's
-    # ``reflection_lm`` (REQUIRED — its probe raises "requires a reflection
-    # language model" without one); MIPROv2's & COPRO's ``prompt_model``. All
-    # three benefit from a STRONGER model than the cheap student. Empty → route a
-    # COMPLEX-tier model via ModelRouter (genuinely stronger than the SIMPLE
-    # student, e.g. glm-4.7; NOT anthropic-blocked). A literal model id pins one.
-    # Env: OPTIMIZER_REFLECTION_MODEL.
+    # Proposal model for the teleprompter search — MIPROv2's & COPRO's
+    # ``prompt_model``. Both benefit from a STRONGER model than the cheap
+    # student. Empty → route a COMPLEX-tier model via ModelRouter (genuinely
+    # stronger than the SIMPLE student, e.g. glm-4.7). A literal model id pins
+    # one. Env: OPTIMIZER_REFLECTION_MODEL.
     reflection_model: str = ""  # Env: OPTIMIZER_REFLECTION_MODEL
     # Nightly trigger. Default 03:30 UTC — between the 02:00 battery and the
     # 05:00 curve-gate, so the optimizer runs on a fresh night then the gate

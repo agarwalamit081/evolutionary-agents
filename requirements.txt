@@ -121,6 +121,18 @@ arxiv==4.0.0                        # arXiv API client — allowlisted for gener
 pyomo==6.10.1                       # Algebraic modeling (LP/MILP/MINLP) — allowlisted; offline solver via highspy
 highspy==1.14.0                     # HiGHS LP/MILP/QP solver (bundled in wheel) — pyomo's appsi_highs backend + direct use
 
+# ─── Prompt Optimizer (DSPy MIPROv2/COPRO, opt-in) ─────────────
+# Host venv carries dspy==2.6.27 (clean install; the old dspy-ai/dspy PyPI
+# rename collision that masked dspy.GEPA as a phantom API is gone). DSPy supplies
+# the MIPROv2/COPRO teleprompters in src/optimizer/engine.py (backend default
+# dspy-mipro; dspy-gepa is DEFERRED — GEPA is the external `gepa` package with a
+# different functional API, not a dspy teleprompter). Minima are satisfied by the
+# pins above (openai>=0.28.1, pydantic>=2.0, litellm>=1.60.3, numpy>=1.26,
+# pandas>=2.1.1) so this adds cleanly WITHOUT forcing litellm/openai/pydantic/
+# numpy higher. Pulls datasets/optuna/litellm transitively. NEVER install the
+# abandoned `dspy-ai` package — it is a rename collision that overwrites this.
+dspy==2.6.27
+
 # ─── Development & Testing ──────────────────────────────────────
 pytest==8.4.2
 pytest-asyncio==0.23.8

@@ -9,7 +9,7 @@ real seam code reaches:
     patched (construction is cheap: ``EvalStore`` has no ``__init__`` and
     ``CapabilityCurve`` reads only 3 config floats — no DB until detect runs).
   * real ``_compile``        → ``src.optimizer.engine.dspy`` is replaced with a
-    fleshed-out ``_CompileFakeDspy`` (Predict/Example/GEPA/compiled.predictors)
+    fleshed-out ``_CompileFakeDspy`` (Predict/Example/MIPROv2/compiled.predictors)
     so the REAL extract-the-instruction flow runs and yields a candidate.
   * the two concessions: ``_build_canary`` (the full tools/sub-agents/GoldenCanary
     stack) and ``_resolve_lm`` (deep ``ModelRouter``+settings read) ARE overridden
@@ -135,7 +135,7 @@ class _FakeExample:
 
 
 class _FakeTeleprompter:
-    """GEPA/MIPROv2/COPRO all share this shape: compile() -> _FakeCompiled."""
+    """MIPROv2/COPRO share this shape: compile() -> _FakeCompiled."""
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
@@ -204,7 +204,7 @@ class _IntegrationOptimizer(PromptOptimizer):
         return "fake-model", {}
 
     def _resolve_reflection_model(self, _node: str) -> tuple[str, dict[str, Any]]:
-        # Real optimize() now resolves a reflection LM (GEPA raises without one);
+        # Real optimize() now resolves a proposal LM (MIPROv2/COPRO's prompt_model);
         # the integration fake supplies one so the REAL _compile runs without a
         # deep ModelRouter+settings read.
         return "fake-reflection-model", {}
@@ -255,10 +255,10 @@ async def test_candidate_score_guard_promote_end_to_end(
 
 
 @pytest.mark.asyncio
-async def test_gepa_receives_reflection_lm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Regression: GEPA raises "requires a reflection language model" unless
-    ``reflection_lm=`` is wired; the real _compile() must pass it (MIPROv2/COPRO
-    likewise take ``prompt_model=``). Captures the GEPA constructor kwargs."""
+async def test_mipro_receives_prompt_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: MIPROv2 (default) takes ``prompt_model=``; the real _compile()
+    must pass the resolved proposal LM through. Captures the MIPROv2 constructor
+    kwargs (COPRO shares the ``prompt_model`` param)."""
     captured: dict[str, Any] = {}
 
     class _Capturing(_FakeTeleprompter):
@@ -268,9 +268,9 @@ async def test_gepa_receives_reflection_lm(monkeypatch: pytest.MonkeyPatch) -> N
 
     _wire_base(monkeypatch)
     monkeypatch.setattr("src.optimizer.engine.dspy", _CompileFakeDspy)
-    # GEPA is the default backend; swap in the capturing subclass so the real
-    # _compile()'s GEPA(...) construction is observable.
-    monkeypatch.setattr(_CompileFakeDspy, "GEPA", _Capturing)
+    # MIPROv2 is the default backend; swap in the capturing subclass so the real
+    # _compile()'s MIPROv2(...) construction is observable.
+    monkeypatch.setattr(_CompileFakeDspy, "MIPROv2", _Capturing)
     _wire_gate(monkeypatch, result={"promoted": True, "canary_score": 0.9})
 
     async def _clear(_self: Any) -> dict[str, Any]:
@@ -282,10 +282,12 @@ async def test_gepa_receives_reflection_lm(monkeypatch: pytest.MonkeyPatch) -> N
     opt = _IntegrationOptimizer(
         _FakeSettings(_make_opt(require_curve_clear=False)), canary
     )
-    await opt.optimize(OptimizeRequest())  # default backend → GEPA path
+    # Pin the backend explicitly so the assertion is hermetic to .env drift (the
+    # default is also dspy-mipro, but this test targets the MIPROv2 compile path).
+    await opt.optimize(OptimizeRequest(backend="dspy-mipro"))
 
-    assert "reflection_lm" in captured, f"GEPA missing reflection_lm: {captured}"
-    assert captured["reflection_lm"] is not None
+    assert "prompt_model" in captured, f"MIPROv2 missing prompt_model: {captured}"
+    assert captured["prompt_model"] is not None
 
 
 @pytest.mark.asyncio

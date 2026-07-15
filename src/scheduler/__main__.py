@@ -143,6 +143,31 @@ async def _run() -> int:
             f"dry_run={checkpoint_gc_settings.dry_run}"
         )
 
+    # Phase 9 Q84: periodic cold-memory consolidation. MemoryManager.consolidate()
+    # decays old cold-episode importance (x0.5) and deletes those below the floor
+    # — but it was never registered, so a long-lived worker accumulated stale
+    # low-value episodes forever. This registers it on a cron, mirroring the
+    # checkpoint-GC / governance-prune pattern (observability-only run()).
+    # Opt-in (MEMORY_CONSOLIDATE_ENABLED, default off). Default 03:00 UTC — a
+    # fresh night between the 02:00 battery and the 03:30 optimizer / 04:00 prune.
+    memory_settings = settings.memory
+    if memory_settings.consolidate_enabled:
+        from src.memory.consolidate_job import (  # noqa: PLC0415
+            MemoryConsolidator,
+            add_memory_consolidation_job,
+        )
+
+        add_memory_consolidation_job(
+            scheduler, MemoryConsolidator(settings), memory_settings
+        )
+        logger.info(
+            f"Memory-consolidation job registered — "
+            f"cron={memory_settings.consolidate_cron!r} "
+            f"tz={memory_settings.consolidate_timezone} "
+            f"max_age_days={memory_settings.consolidate_max_age_days} "
+            f"min_importance={memory_settings.consolidate_min_importance}"
+        )
+
     # Phase 2 C2: the nightly metric-driven prompt-optimizer TRIGGER. The
     # optimizer (DSPy + GEPA) runs in a separate sidecar container; the scheduler
     # just POSTs /optimize (empty body — the sidecar owns the node/backend/eval

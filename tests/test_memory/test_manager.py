@@ -40,6 +40,12 @@ def mock_settings() -> MagicMock:
     # I3: Neo4j graph mirror stays OFF in unit tests (default-off in prod too) so
     # store_skill/store_fact don't attempt a real driver/connectivity check.
     settings.neo4j.enabled = False
+    # Phase 9 (Q81-84): memory recall/consolidate knobs read by retrieve_context /
+    # retrieve_facts / retrieve_skills / consolidate — defaults reproduce today's
+    # behavior so existing assertions stay valid.
+    settings.memory.recall_min_similarity = 0.0
+    settings.memory.consolidate_max_age_days = 90
+    settings.memory.consolidate_min_importance = 0.1
     return settings
 
 
@@ -378,7 +384,7 @@ class TestRetrieveContext:
 
         manager._mock_cold.search_by_tags.assert_not_called()
         manager._mock_cold.search_by_query.assert_called_once_with(
-            query="semantic query", limit=3
+            query="semantic query", limit=3, min_similarity=0.0
         )
 
     @pytest.mark.asyncio

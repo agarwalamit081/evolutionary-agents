@@ -509,3 +509,65 @@ class TestStoreMemoryIntentFacts:
         result = await store_memory_node(state, memory=memory)
 
         assert result["phase"] == Phase.COMPLETE
+
+
+class TestRetrieveMemoryRRFFusion:
+    """Q83: cross-tier RRF fusion. Off ⇒ today's plain concatenation (golden
+    order); on ⇒ reordered by per-tier rank alone (a 4th-place skill promoted up
+    past lower-rank context items from a longer tier), sidestepping the
+    heterogeneous per-tier scores."""
+
+    @staticmethod
+    def _memory() -> MagicMock:
+        memory = MagicMock()
+        memory.retrieve_context = AsyncMock(
+            return_value=[
+                {"content": "c1", "tier": "cold", "score": 0.9},
+                {"content": "c2", "tier": "cold", "score": 0.5},
+                {"content": "c3", "tier": "cold", "score": 0.2},
+            ]
+        )
+        memory.warm = MagicMock()
+        memory.warm.retrieve = AsyncMock(return_value=[])  # evolved/folded empty
+        memory.retrieve_facts = AsyncMock(return_value=[])  # facts empty
+        memory.retrieve_skills = AsyncMock(
+            return_value=[{"id": "skill-uuid-1", "content": "s1", "fitness_score": 0.8}]
+        )
+        memory.cold = MagicMock()
+        memory.cold.search_by_query = AsyncMock(return_value=[])  # error episodes empty
+        return memory
+
+    @pytest.mark.asyncio
+    async def test_rrf_off_preserves_concatenation_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.config import get_settings
+
+        monkeypatch.setattr(get_settings().memory, "recall_rrf_enabled", False)
+
+        state = initial_state("normalize timestamps", "thread-rrf-off")
+        result = await retrieve_memory_node(state, memory=self._memory())
+
+        # Concatenation order unchanged: context (c1,c2,c3) then skills (s1).
+        contents = [m["content"] for m in result["retrieved_memories"]]
+        assert contents == ["c1", "c2", "c3", "s1"]
+
+    @pytest.mark.asyncio
+    async def test_rrf_on_reorders_by_cross_tier_rank(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.config import get_settings
+
+        ms = get_settings().memory
+        monkeypatch.setattr(ms, "recall_rrf_enabled", True)
+        monkeypatch.setattr(ms, "recall_rrf_k", 60)
+        monkeypatch.setattr(ms, "recall_top_k", 20)
+
+        state = initial_state("normalize timestamps", "thread-rrf-on")
+        result = await retrieve_memory_node(state, memory=self._memory())
+
+        # RRF by per-tier rank: c1 (cold r1)=1/61, c2 (cold r2)=1/62,
+        # c3 (cold r3)=1/63, s1 (skill r1)=1/61. The 1/61 tie breaks by original
+        # index → [c1, s1, c2, c3] (s1 promoted up from 4th to 2nd).
+        contents = [m["content"] for m in result["retrieved_memories"]]
+        assert contents == ["c1", "s1", "c2", "c3"]

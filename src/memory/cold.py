@@ -85,6 +85,26 @@ class ColdMemory:
                 logger.debug(f"Cold memory embedding generation failed: {e}")
                 embedding = None
 
+        # Q81 — store-time near-duplicate merge (opt-in). Before inserting, look
+        # for an existing episode within the dedup cosine-similarity threshold; if
+        # found, skip the insert and return the existing id so the cold tier
+        # doesn't accumulate near-identical episodes. Default off
+        # (MEMORY_DEDUP_ENABLED); skipped when no embedding is available.
+        if embedding is not None:
+            from src.config import get_settings  # noqa: PLC0415
+
+            ms = get_settings().memory
+            if ms.dedup_enabled:
+                existing_id = await self._find_similar_episode(
+                    query_embedding=embedding, threshold=ms.dedup_threshold
+                )
+                if existing_id is not None:
+                    logger.info(
+                        f"Cold memory dedup hit → existing {existing_id[:8]} "
+                        f"(>= {ms.dedup_threshold}); skipped insert"
+                    )
+                    return existing_id
+
         memory_id = str(uuid.uuid4())
         entry = ColdMemoryModel(
             id=uuid.UUID(memory_id),
@@ -100,12 +120,42 @@ class ColdMemory:
         logger.debug(f"Cold memory stored: {episode_type} ({content[:40]}...)")
         return memory_id
 
+    async def _find_similar_episode(
+        self,
+        *,
+        query_embedding: list[float],
+        threshold: float,
+    ) -> str | None:
+        """Return the id of an existing episode within ``threshold`` similarity.
+
+        Q81 dedup helper. Cosine distance is converted to similarity
+        (``1 - distance``); an existing episode at ``>= threshold`` similarity
+        means the incoming episode is a near-duplicate. Returns the most-similar
+        match's id, else ``None``. Parameterized ORM query (pgvector ``<=>``),
+        no interpolation.
+        """
+        max_distance = 1.0 - threshold
+        distance = ColdMemoryModel.embedding.cosine_distance(query_embedding)
+        stmt = (
+            sa.select(ColdMemoryModel.id)
+            .where(
+                ColdMemoryModel.embedding.isnot(None),
+                distance <= max_distance,
+            )
+            .order_by(distance)
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return str(row) if row is not None else None
+
     async def search_by_embedding(
         self,
         query_embedding: list[float],
         limit: int = 5,
         min_importance: float = 0.0,
         episode_type: str | None = None,
+        min_similarity: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Search cold memory using vector similarity.
 
@@ -114,6 +164,9 @@ class ColdMemory:
             limit: Maximum results to return.
             min_importance: Minimum importance threshold.
             episode_type: Optional type filter.
+            min_similarity: Drop results whose cosine similarity
+                (``1 - distance``) is below this. Default ``0.0`` = keep all
+                (Q82 recall threshold; complementary to per-tier ranking).
 
         Returns:
             List of similar memories with similarity scores.
@@ -139,6 +192,10 @@ class ColdMemory:
         result = await self._session.execute(query)
         rows = result.all()
 
+        # Q82 — post-query relevance filter. Rows are ordered by distance asc
+        # (similarity desc), so dropping items below ``min_similarity`` keeps a
+        # contiguous high-quality prefix. DB-agnostic (pgvector distance already
+        # selected). Default 0.0 keeps everything.
         return [
             {
                 "id": str(row[0].id),
@@ -149,6 +206,7 @@ class ColdMemory:
                 "similarity": 1.0 - float(row[1]),
             }
             for row in rows
+            if (1.0 - float(row[1])) >= min_similarity
         ]
 
     async def search_by_query(
@@ -157,6 +215,7 @@ class ColdMemory:
         limit: int = 5,
         min_importance: float = 0.0,
         episode_type: str | None = None,
+        min_similarity: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Semantic search: embed a text query and rank memories by similarity.
 
@@ -171,6 +230,8 @@ class ColdMemory:
             limit: Maximum results to return.
             min_importance: Minimum importance threshold.
             episode_type: Optional type filter.
+            min_similarity: Drop results below this cosine similarity (Q82).
+                Default ``0.0`` = keep all.
 
         Returns:
             List of similar memories with similarity scores.
@@ -187,6 +248,7 @@ class ColdMemory:
             limit=limit,
             min_importance=min_importance,
             episode_type=episode_type,
+            min_similarity=min_similarity,
         )
 
     async def search_by_tags(

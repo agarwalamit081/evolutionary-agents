@@ -168,7 +168,11 @@ class MemoryManager:
         # cold.search_by_query returns [] when no generator is wired.
         seen_cold_ids: set[str] = set()
         if query:
-            for item in await self.cold.search_by_query(query=query, limit=3):
+            for item in await self.cold.search_by_query(
+                query=query,
+                limit=3,
+                min_similarity=self._settings.memory.recall_min_similarity,
+            ):
                 if item.get("id") not in seen_cold_ids:
                     seen_cold_ids.add(item["id"])
                     results.append({"tier": "cold", **item})
@@ -242,7 +246,11 @@ class MemoryManager:
         Returns:
             List of fact dicts (key, value, source, confidence, similarity?).
         """
-        return await self.warm.retrieve_facts(query=query, limit=limit)
+        return await self.warm.retrieve_facts(
+            query=query,
+            limit=limit,
+            min_similarity=self._settings.memory.recall_min_similarity,
+        )
 
     async def retrieve_skills(
         self,
@@ -259,7 +267,11 @@ class MemoryManager:
             List of skill dicts (id, type, name, content, tags, fitness_score,
             access_count, similarity?).
         """
-        return await self.warm.retrieve_skills(query=query, limit=limit)
+        return await self.warm.retrieve_skills(
+            query=query,
+            limit=limit,
+            min_similarity=self._settings.memory.recall_min_similarity,
+        )
 
     async def extract_and_store_facts(
         self,
@@ -310,14 +322,18 @@ class MemoryManager:
     async def consolidate(self) -> dict[str, int]:
         """Run background consolidation across tiers.
 
-        Decays old cold memories, archives stale hot entries.
+        Decays old cold-episode importance (×0.5) and deletes those that fall
+        below the configured floor. Reaches the same pass the scheduled
+        ``MemoryConsolidator`` (Q84) runs; both read the ``memory.consolidate_*``
+        knobs so they stay in lockstep.
 
         Returns:
             Dict with consolidation stats.
         """
+        ms = self._settings.memory
         cold_deleted = await self.cold.consolidate(
-            max_age_days=90,
-            min_importance=0.1,
+            max_age_days=ms.consolidate_max_age_days,
+            min_importance=ms.consolidate_min_importance,
         )
 
         return {

@@ -94,7 +94,8 @@ class TestColdMemorySemanticSearch:
 
         gen.generate.assert_awaited_once_with("find me")
         cold.search_by_embedding.assert_awaited_once_with(
-            query_embedding=vec, limit=3, min_importance=0.0, episode_type=None
+            query_embedding=vec, limit=3, min_importance=0.0, episode_type=None,
+            min_similarity=0.0,
         )
         assert results == [{"id": "c1", "content": "match", "similarity": 0.88}]
 

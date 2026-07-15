@@ -15,6 +15,7 @@ DB) and a canned gateway (no real-LLM spend): extraction → per-fact storage as
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -46,7 +47,9 @@ class _FakeWarm:
         })
         return fact_id
 
-    async def retrieve_facts(self, *, query: str = "", limit: int = 5) -> list[dict[str, Any]]:
+    async def retrieve_facts(
+        self, *, query: str = "", limit: int = 5, min_similarity: float = 0.0,
+    ) -> list[dict[str, Any]]:
         if query:
             hits = [f for f in self.stored if query.lower() in f["key"].lower()
                     or query.lower() in f["value"].lower()]
@@ -58,8 +61,13 @@ class _FakeWarm:
 def _manager() -> tuple[MemoryManager, _FakeWarm]:
     warm = _FakeWarm()
     mgr = MemoryManager.__new__(MemoryManager)  # bypass __init__ (no DB/Redis)
-    mgr.warm = warm
+    mgr.warm = warm  # type: ignore[attr-defined]
     mgr._graph = None  # type: ignore[attr-defined]
+    # Phase 9 (Q82): retrieve_facts reads the recall threshold off settings.memory;
+    # __init__ normally wires this, so the bypass path must stub it explicitly.
+    mgr._settings = SimpleNamespace(  # type: ignore[attr-defined]
+        memory=SimpleNamespace(recall_min_similarity=0.0)
+    )
     return mgr, warm
 
 

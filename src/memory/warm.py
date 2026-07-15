@@ -76,27 +76,98 @@ class WarmMemoryStore:
             extra_data=extra_data or {},
             access_count=0,
         )
-        self._session.add(entry)
 
-        # Persist an embedding row alongside the warm memory (§10.2). Both rows
-        # are committed together; SQLAlchemy inserts the FK parent first.
+        # Compute the embedding once (§10.2): reused for store-time dedup (Q81)
+        # and for the persisted ``memory_embeddings`` row. Best-effort — an
+        # embedding failure is logged and the store proceeds without one. The
+        # model name is captured alongside so the row-write below stays
+        # pyright-narrowable (``_generator`` is Optional).
+        embedding: list[float] | None = None
+        embedding_model: str | None = None
         if self._generator is not None:
             try:
                 embedding = await self._generator.generate(embed_text or content)
-                self._session.add(
-                    MemoryEmbedding(
-                        memory_id=entry.id,
-                        embedding=embedding,
-                        embedding_model=self._generator.model,
-                    )
-                )
+                embedding_model = self._generator.model
             except Exception as e:  # embedding is non-critical; warm store must not fail
                 logger.debug(f"Warm memory embedding skipped: {e}")
+
+        # Q81 — store-time near-duplicate merge (opt-in). Before persisting, look
+        # for an existing memory of the same type within the dedup cosine-
+        # similarity threshold; if found, skip the insert and return the existing
+        # id so the warm tier doesn't accumulate near-identical crystallizations.
+        # ``entry`` is intentionally NOT added to the session before this check,
+        # so a dedup hit leaves the (shared) session clean. Default off
+        # (MEMORY_DEDUP_ENABLED); skipped when no embedding is available.
+        if embedding is not None:
+            from src.config import get_settings  # noqa: PLC0415
+
+            ms = get_settings().memory
+            if ms.dedup_enabled:
+                existing_id = await self._find_similar_memory(
+                    memory_type=memory_type,
+                    query_embedding=embedding,
+                    threshold=ms.dedup_threshold,
+                )
+                if existing_id is not None:
+                    logger.info(
+                        f"Warm memory dedup hit: {memory_type}/{name} → existing "
+                        f"{existing_id[:8]} (>= {ms.dedup_threshold}); skipped insert"
+                    )
+                    return existing_id
+
+        # Persist the warm memory + its embedding row together (§10.2).
+        # SQLAlchemy inserts the FK parent first.
+        self._session.add(entry)
+        if embedding is not None and embedding_model is not None:
+            self._session.add(
+                MemoryEmbedding(
+                    memory_id=entry.id,
+                    embedding=embedding,
+                    embedding_model=embedding_model,
+                )
+            )
 
         await self._session.commit()
 
         logger.info(f"Warm memory stored: {memory_type}/{name} (id={memory_id[:8]})")
         return memory_id
+
+    async def _find_similar_memory(
+        self,
+        *,
+        memory_type: str,
+        query_embedding: list[float],
+        threshold: float,
+    ) -> str | None:
+        """Return the id of an active same-type memory within ``threshold`` similarity.
+
+        Q81 dedup helper. Cosine distance → similarity (``1 - distance``); an
+        existing memory at ``>= threshold`` similarity means the incoming one is a
+        near-duplicate. Scoped to the same ``memory_type`` (a skill never dedups
+        against a procedure) and active rows (``expires_at IS NULL``). Returns
+        the most-similar match's id, else ``None``. Parameterized ORM query
+        (pgvector ``<=>``), no interpolation.
+        """
+        max_distance = 1.0 - threshold
+        distance = MemoryEmbedding.embedding.cosine_distance(query_embedding)
+        stmt = (
+            sa.select(WarmMemory.id)
+            .join(
+                MemoryEmbedding,
+                MemoryEmbedding.memory_id == WarmMemory.id,
+            )
+            .where(
+                WarmMemory.memory_type == memory_type,
+                WarmMemory.expires_at.is_(None),
+                MemoryEmbedding.embedding.isnot(None),
+                distance <= max_distance,
+            )
+            .order_by(distance)
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return str(row) if row is not None else None
 
     async def store_fact(
         self,
@@ -203,6 +274,7 @@ class WarmMemoryStore:
         query: str = "",
         limit: int = 5,
         min_confidence: float = 0.0,
+        min_similarity: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Recall durable facts, ranked by semantic similarity when possible.
 
@@ -215,6 +287,9 @@ class WarmMemoryStore:
             query: Natural-language query; empty → fitness-ordered fallback.
             limit: Maximum facts to return.
             min_confidence: Minimum fitness_score (== extraction confidence).
+            min_similarity: Drop semantic results whose cosine similarity
+                (``1 - distance``) is below this. Default ``0.0`` = keep all
+                (Q82 recall threshold).
 
         Returns:
             List of fact dicts: ``{id, key, value, source, confidence,
@@ -248,6 +323,8 @@ class WarmMemoryStore:
                 result = await self._session.execute(stmt)
                 rows = result.all()
                 if rows:
+                    # Q82 — drop low-similarity facts (rows are distance-asc =
+                    # similarity-desc, so this keeps a contiguous prefix).
                     return [
                         {
                             "id": str(row[0].id),
@@ -258,6 +335,7 @@ class WarmMemoryStore:
                             "similarity": 1.0 - float(row[1]),
                         }
                         for row in rows
+                        if (1.0 - float(row[1])) >= min_similarity
                     ]
                 # No embedded facts matched — fall through to fitness fallback.
 
@@ -332,6 +410,7 @@ class WarmMemoryStore:
         query: str = "",
         limit: int = 5,
         min_fitness: float = 0.0,
+        min_similarity: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Recall skills/procedures/workflows, ranked semantically when possible.
 
@@ -382,6 +461,8 @@ class WarmMemoryStore:
                 result = await self._session.execute(stmt)
                 rows = result.all()
                 if rows:
+                    # Q82 — drop low-similarity skills (rows are distance-asc =
+                    # similarity-desc, so this keeps a contiguous prefix).
                     return [
                         {
                             "id": str(row[0].id),
@@ -394,6 +475,7 @@ class WarmMemoryStore:
                             "similarity": 1.0 - float(row[1]),
                         }
                         for row in rows
+                        if (1.0 - float(row[1])) >= min_similarity
                     ]
                     # No embedded skills matched — fall through to fitness fallback.
 

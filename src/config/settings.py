@@ -2201,6 +2201,68 @@ class CheckpointGcSettings(BaseSettings):
     )
 
 
+class MemorySettings(BaseSettings):
+    """Opt-in recall-fusion / relevance-threshold / store-dedup / scheduled
+    consolidation knobs (Phase 9 — Q81-84). All four default OFF so a host run
+    with no env keeps today's recall behavior byte-for-byte (capability features
+    default-off so battery conditions don't drift).
+
+    Groups (all share the ``memory_`` env prefix):
+      * recall_* — cross-tier Reciprocal Rank Fusion + a per-tier cosine-
+        similarity floor (Q82/Q83). RRF reorders the concatenated recall list by
+        per-tier rank, sidestepping heterogeneous scores (fitness / confidence /
+        cosine-similarity / 0.0). Default top_k (20) ≥ the ~19-item recall total,
+        so enabling RRF reorders but never drops.
+      * dedup_* — store-time near-duplicate merge (Q81). Before inserting a new
+        warm skill/procedure or a cold episode, skip it if an existing memory of
+        the same type is within ``dedup_threshold`` cosine similarity and return
+        the existing id. Conservative 0.92 ⇒ near-identical only.
+      * consolidate_* — register the EXISTING ``MemoryManager.consolidate()``
+        decay/prune pass as a scheduler job (Q84) and feed its knobs. Decays old
+        cold-episode importance (x0.5) and deletes those below
+        ``consolidate_min_importance``; never registered before, so a long-lived
+        worker accumulated stale low-value episodes forever.
+    """
+
+    # ── Recall fusion (Q83) + relevance threshold (Q82) ──
+    # Fuse the node's concatenated recall list by per-tier rank.
+    recall_rrf_enabled: bool = False  # Env: MEMORY_RECALL_RRF_ENABLED
+    # RRF smoothing constant (standard 60). Larger ⇒ flatter ranking.
+    recall_rrf_k: int = 60  # Env: MEMORY_RECALL_RRF_K
+    # Max fused items returned (>= ~19-item recall total ⇒ reorder, never drop).
+    recall_top_k: int = 20  # Env: MEMORY_RECALL_TOP_K
+    # Per-tier cosine-similarity floor (1 - distance); 0.0 = keep all.
+    recall_min_similarity: float = 0.0  # Env: MEMORY_RECALL_MIN_SIMILARITY
+
+    # ── Store-time near-duplicate merge (Q81) ──
+    dedup_enabled: bool = False  # Env: MEMORY_DEDUP_ENABLED
+    # Skip a new memory if an existing same-type one is within this similarity.
+    dedup_threshold: float = 0.92  # Env: MEMORY_DEDUP_THRESHOLD
+
+    # ── Scheduled consolidation (Q84) ──
+    consolidate_enabled: bool = False  # Env: MEMORY_CONSOLIDATE_ENABLED
+    # 5-field crontab for the decay/prune pass. Default 03:00 UTC.
+    consolidate_cron: str = "0 3 * * *"  # Env: MEMORY_CONSOLIDATE_CRON
+    # IANA zone for the consolidate cron. Env: MEMORY_CONSOLIDATE_TIMEZONE.
+    consolidate_timezone: str = "UTC"  # Env: MEMORY_CONSOLIDATE_TIMEZONE
+    # Decay episodes older than this many days. Env: MEMORY_CONSOLIDATE_MAX_AGE_DAYS.
+    consolidate_max_age_days: int = 90  # Env: MEMORY_CONSOLIDATE_MAX_AGE_DAYS
+    # Episodes below this importance after decay are deleted.
+    consolidate_min_importance: float = 0.1  # Env: MEMORY_CONSOLIDATE_MIN_IMPORTANCE
+
+    model_config = SettingsConfigDict(
+        # env_prefix maps MEMORY_* vars to these fields. The cron/timezone are
+        # consolidate-specific (consolidate_cron → MEMORY_CONSOLIDATE_CRON) so
+        # the MEMORY_CONSOLIDATE_* group stays unambiguous vs MEMORY_RECALL_* /
+        # MEMORY_DEDUP_* — mirrors the checkpoint_gc_ / governance_prune_ pattern.
+        env_prefix="memory_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class OptimizerSettings(BaseSettings):
     """Metric-driven prompt-optimization sidecar (Phase 2 C2: DSPy + GEPA).
 
@@ -2730,6 +2792,7 @@ class Settings(BaseSettings):
     governance_prune: GovernancePruneSettings = GovernancePruneSettings()  # type: ignore[assignment]
     checkpoint_gc: CheckpointGcSettings = CheckpointGcSettings()  # type: ignore[assignment]
     optimizer: OptimizerSettings = OptimizerSettings()  # type: ignore[assignment]
+    memory: MemorySettings = MemorySettings()  # type: ignore[assignment]
     agent_cron: AgentCronSettings = AgentCronSettings()  # type: ignore[assignment]
     git_clone: GitCloneSettings = GitCloneSettings()  # type: ignore[assignment]
     lats: LatsSettings = LatsSettings()  # type: ignore[assignment]

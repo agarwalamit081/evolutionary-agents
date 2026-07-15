@@ -184,6 +184,26 @@ async def retrieve_memory_node(
     else:
         logger.debug("No MemoryManager available, returning empty memories")
 
+    # Q83 — cross-tier rank fusion (opt-in). The accumulated ``retrieved`` list
+    # concatenates per-tier recall whose scores are heterogeneous (fitness /
+    # confidence / cosine-similarity / 0.0) and therefore incomparable — a
+    # low-rank item from an early tier always outranks a high-rank item from a
+    # later one. RRF reorders by per-tier rank ALONE, so enabling it never trusts
+    # the scores. Default off (MEMORY_RECALL_RRF_ENABLED) ⇒ today's plain
+    # concatenation is returned unchanged; default top_k (20) ≥ the ~19-item
+    # total, so the first enable reorders but never drops.
+    if retrieved:
+        from src.config import get_settings  # noqa: PLC0415
+        from src.memory.fusion import fuse_rrf  # noqa: PLC0415
+
+        ms = get_settings().memory
+        if ms.recall_rrf_enabled:
+            retrieved = fuse_rrf(
+                retrieved,
+                k=ms.recall_rrf_k,
+                top_k=ms.recall_top_k,
+            )
+
     return {
         "phase": Phase.EXECUTE,
         "retrieved_memories": retrieved,

@@ -41,7 +41,7 @@ from src.llm.thinking_control import thinking_params_for
 from src.llm.model_router import ModelRouter
 from src.llm.models import BatchRequest, BatchResponse, LLMResponse, ToolCallResponse
 from src.llm.rate_limiter import RateLimiterRegistry
-from src.observability.metrics import record_prompt_cache_tokens
+from src.observability.metrics import record_llm_request, record_prompt_cache_tokens
 from src.observability.tracing import get_tracer
 from src.llm.structured_output import (
     StructuredOutputManager,
@@ -87,6 +87,32 @@ def _set_llm_span_response_attrs(span: Any, response: Any, latency_ms: int) -> N
         span.set_attribute("llm.response_model", response.model)
     except Exception:  # noqa: BLE001 — tracing must never raise into a run
         pass
+
+
+def _tier_for_model(model: str) -> str:
+    """Best-effort cost-tier label for ``model`` (e.g. ``"cheap"``), else ``"unknown"``.
+
+    Resolved from the model registry so the Prometheus LLM series can be sliced
+    by routing tier. Never raises — an unknown/unregistered model yields
+    ``"unknown"`` (bounded cardinality), and the call site wraps this in a
+    resilience try/except regardless.
+    """
+    spec = MODEL_REGISTRY.get(model)
+    return spec.tier.value if spec is not None else "unknown"
+
+
+def _complexity_label(complexity: Any) -> str:
+    """Normalize a ``complexity`` value to a bounded Prometheus label.
+
+    Accepts a ``TaskComplexity`` enum (uses ``.value``), a plain string, or
+    ``None`` (→ ``"unknown"``). ``str(enum)`` on a mixed-in enum is name-based,
+    so ``.value`` is read explicitly to emit ``"complex"`` not
+    ``"TaskComplexity.COMPLEX"``.
+    """
+    if complexity is None:
+        return "unknown"
+    value = getattr(complexity, "value", None)
+    return value if isinstance(value, str) else str(complexity)
 
 
 # Transient errors that warrant retry (litellm exposes these at runtime)
@@ -591,6 +617,26 @@ class LLMGateway:
                 run_id=self._run_id,
                 cached_tokens=response.cache_read_tokens,
             )
+
+        # Prometheus LLM metrics (duration / tokens / cost), sliced by cost tier
+        # and the call's TaskComplexity. The cost-ledger write above is the
+        # durable record; this is the in-process counter the /metrics endpoint
+        # exposes. Observability-only and non-fatal — mirrors the cost-ledger +
+        # latency-gate resilience pattern so a scrape-recording hiccup never
+        # aborts a run.
+        try:
+            record_llm_request(
+                model=response.model,
+                provider=response.provider,
+                duration_seconds=latency_ms / 1000,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                cost_usd=response.cost_usd,
+                tier=_tier_for_model(response.model),
+                complexity=_complexity_label(complexity),
+            )
+        except Exception as exc:  # noqa: BLE001 — metrics must never break a run
+            logger.debug(f"prometheus record_llm_request failed: {exc}")
 
         # Latency gate: feed this call's effective latency (attributed to the
         # provider that served it) so persistently-slow providers get demoted

@@ -41,22 +41,27 @@ def _gauge(name: str, description: str, labels: list[str] | None = None) -> Any:
 
 # ─── LLM Metrics ────────────────────────────────────────────────────
 
+# ``tier`` (cost tier) and ``complexity`` (task complexity) let the LLM
+# duration/token/cost series be sliced by routing tier and call complexity.
+# Both are bounded-cardinality enums — tier ∈ {very_cheap, cheap, moderate, …}
+# + "unknown", complexity ∈ {trivial, simple, complex, critical} + "unknown" —
+# so label cardinality stays small.
 LLM_REQUEST_DURATION = _histogram(
     "llm_request_duration_seconds",
     "Duration of LLM API requests",
-    ["model", "provider"],
+    ["model", "provider", "tier", "complexity"],
 )
 
 LLM_REQUEST_TOKENS = _counter(
     "llm_request_tokens_total",
     "Total tokens consumed by LLM requests",
-    ["model", "provider", "token_type"],
+    ["model", "provider", "token_type", "tier", "complexity"],
 )
 
 LLM_REQUEST_COST = _counter(
     "llm_request_cost_usd_total",
     "Total cost of LLM requests in USD",
-    ["model", "provider"],
+    ["model", "provider", "tier", "complexity"],
 )
 
 LLM_REQUEST_ERRORS = _counter(
@@ -175,16 +180,33 @@ def record_llm_request(
     input_tokens: int = 0,
     output_tokens: int = 0,
     cost_usd: float = 0.0,
+    *,
+    tier: str = "unknown",
+    complexity: str = "unknown",
 ) -> None:
-    """Record metrics for an LLM request."""
+    """Record metrics for an LLM request.
+
+    ``tier`` and ``complexity`` are keyword-only and default to ``"unknown"`` so
+    pre-existing callers (tests) keep working unchanged; the gateway call site
+    passes the resolved cost tier (from ``MODEL_REGISTRY``) and the call's
+    ``TaskComplexity`` so the series can be sliced by routing tier / complexity.
+    """
     if LLM_REQUEST_DURATION:
-        LLM_REQUEST_DURATION.labels(model=model, provider=provider).observe(duration_seconds)
+        LLM_REQUEST_DURATION.labels(
+            model=model, provider=provider, tier=tier, complexity=complexity
+        ).observe(duration_seconds)
     if LLM_REQUEST_TOKENS and input_tokens:
-        LLM_REQUEST_TOKENS.labels(model=model, provider=provider, token_type="input").inc(input_tokens)
+        LLM_REQUEST_TOKENS.labels(
+            model=model, provider=provider, token_type="input", tier=tier, complexity=complexity
+        ).inc(input_tokens)
     if LLM_REQUEST_TOKENS and output_tokens:
-        LLM_REQUEST_TOKENS.labels(model=model, provider=provider, token_type="output").inc(output_tokens)
+        LLM_REQUEST_TOKENS.labels(
+            model=model, provider=provider, token_type="output", tier=tier, complexity=complexity
+        ).inc(output_tokens)
     if LLM_REQUEST_COST and cost_usd > 0:
-        LLM_REQUEST_COST.labels(model=model, provider=provider).inc(cost_usd)
+        LLM_REQUEST_COST.labels(
+            model=model, provider=provider, tier=tier, complexity=complexity
+        ).inc(cost_usd)
 
 
 def record_cache_lookup(model: str, hit: bool) -> None:

@@ -434,17 +434,19 @@ class TestGetCheaperFallback:
         self, gateway: LLMGateway, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Regression: the budget-fallback must skip every model whose provider
-        is in _TEMPORARY_DISABLED_PROVIDERS. Without this guard, exhausting the
-        daily budget would degrade a run onto a provider that returns 400/quota
-        on every call, burning the whole fallback chain. (Monkeypatches the set
-        so the test does not depend on which provider is temporarily disabled.)"""
+        is in the resolved disabled-provider set. Without this guard, exhausting
+        the daily budget would degrade a run onto a provider that returns
+        400/quota on every call, burning the whole fallback chain. (Stubs the
+        resolver so the test does not depend on which provider is disabled.)
+        Track-1 1C replaced the old ``_TEMPORARY_DISABLED_PROVIDERS`` module set
+        with the env-driven ``_resolved_disabled_providers`` resolver."""
         import src.llm.model_router as mr
         from src.config.model_registry import MODEL_REGISTRY, ModelTier
 
         # claude-sonnet-4-6 is MODERATE → it has cheaper fallbacks across
         # providers. Disable 'openai' and assert the result is still a cheaper
         # model, just never an openai one.
-        monkeypatch.setattr(mr, "_TEMPORARY_DISABLED_PROVIDERS", frozenset({"openai"}))
+        monkeypatch.setattr(mr, "_resolved_disabled_providers", lambda _s: {"openai"})
         result = gateway._get_cheaper_fallback("claude-sonnet-4-6")
         assert result is not None
         fb_spec = MODEL_REGISTRY.get(result)
@@ -721,6 +723,79 @@ class TestAcompletion:
         assert tracker.record_usage.call_args.kwargs["cached_tokens"] == 1000
         # The in-memory CostRecord (flushed to graph state) carries the same.
         assert gateway.get_cost_records()[-1].cached_tokens == 1000
+
+    @pytest.mark.asyncio
+    async def test_acompletion_records_prometheus_metrics_with_tier_and_complexity(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """Phase 6b (Q105): a successful acompletion records the Prometheus LLM
+        metrics (duration / tokens / cost) with the resolved cost ``tier`` (from
+        MODEL_REGISTRY) and the call's ``TaskComplexity``. The cost-ledger write
+        is the durable record; this is the in-process counter /metrics exposes.
+        ``record_llm_request`` is patched at the gateway-module namespace (where
+        it is imported), mirroring the prompt-cache-token wiring test."""
+        from src.config.model_registry import MODEL_REGISTRY
+
+        # gpt-4o-mini-2024-07-18 is a VERY_CHEAP registry entry → "very_cheap".
+        model = "gpt-4o-mini-2024-07-18"
+        assert MODEL_REGISTRY[model].tier.value == "very_cheap"
+        mock_resp = _make_litellm_response(content="ok", input_tokens=12, output_tokens=8)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm, \
+             patch("src.llm.gateway.record_llm_request") as rec:
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            await gateway.acompletion(
+                messages=simple_messages,
+                model=model,
+                complexity=TaskComplexity.COMPLEX,
+            )
+
+        rec.assert_called_once()
+        kw = rec.call_args.kwargs
+        assert kw["model"] == model
+        assert kw["provider"] == "openai"
+        assert kw["tier"] == "very_cheap"
+        assert kw["complexity"] == "complex"
+        assert kw["input_tokens"] == 12
+        assert kw["output_tokens"] == 8
+        assert kw["duration_seconds"] >= 0.0
+        # cost_usd is computed by _parse_response from registry pricing (>=0).
+        assert kw["cost_usd"] >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_acompletion_record_llm_request_failure_never_aborts(
+        self, gateway: LLMGateway, simple_messages: list[dict[str, Any]]
+    ) -> None:
+        """Resilience: a ``record_llm_request`` crash is swallowed (mirrors the
+        cost-ledger + latency-gate contract) — the run still returns its
+        response; Prometheus metrics are observability-only."""
+        mock_resp = _make_litellm_response(content="ok", input_tokens=2, output_tokens=1)
+
+        with patch("src.llm.gateway.litellm") as mock_litellm, \
+             patch("src.llm.gateway.record_llm_request", side_effect=RuntimeError("boom")):
+            mock_litellm.acompletion = AsyncMock(return_value=mock_resp)
+            mock_litellm.Usage = MagicMock
+            mock_litellm.RateLimitError = Exception
+            mock_litellm.Timeout = Exception
+            mock_litellm.ServiceUnavailableError = Exception
+            mock_litellm.APIConnectionError = Exception
+            mock_litellm.AuthenticationError = Exception
+            mock_litellm.BadRequestError = Exception
+
+            result = await gateway.acompletion(
+                messages=simple_messages,
+                model="gpt-4o-mini-2024-07-18",
+            )
+
+        assert result.content == "ok"
 
     @pytest.mark.asyncio
     async def test_per_call_timeout_threads_to_litellm(

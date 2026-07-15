@@ -74,33 +74,64 @@ class TestMetricRegistrySurface:
 
 class TestRecordIncrementsRightCounter:
     def test_record_llm_request_increments_tokens_and_cost(self) -> None:
+        # Phase 6b: tokens/cost children now carry ``tier`` + ``complexity``
+        # labels (Q105), so the label set must include them.
+        labels_in = {
+            "model": "glm-4.7", "provider": "zai", "token_type": "input",
+            "tier": "moderate", "complexity": "complex",
+        }
+        labels_cost = {"model": "glm-4.7", "provider": "zai",
+                       "tier": "moderate", "complexity": "complex"}
         before_in = _samples().get(
-            ("llm_request_tokens_total",
-             frozenset({"model": "glm-4.7", "provider": "zai", "token_type": "input"}.items())),
-            0.0,
-        )
+            ("llm_request_tokens_total", frozenset(labels_in.items())), 0.0)
         before_cost = _samples().get(
-            ("llm_request_cost_usd_total",
-             frozenset({"model": "glm-4.7", "provider": "zai"}.items())),
-            0.0,
-        )
+            ("llm_request_cost_usd_total", frozenset(labels_cost.items())), 0.0)
         m.record_llm_request("glm-4.7", "zai", 0.5,
-                             input_tokens=7, output_tokens=3, cost_usd=0.02)
+                             input_tokens=7, output_tokens=3, cost_usd=0.02,
+                             tier="moderate", complexity="complex")
         after = _samples()
         assert after[("llm_request_tokens_total",
-                      frozenset({"model": "glm-4.7", "provider": "zai",
-                                 "token_type": "input"}.items()))] == before_in + 7
+                      frozenset(labels_in.items()))] == before_in + 7
+        labels_out = {**labels_in, "token_type": "output"}
         assert after[("llm_request_tokens_total",
-                      frozenset({"model": "glm-4.7", "provider": "zai",
-                                 "token_type": "output"}.items()))] >= 3
+                      frozenset(labels_out.items()))] >= 3
         assert after[("llm_request_cost_usd_total",
-                      frozenset({"model": "glm-4.7", "provider": "zai"}.items()))] == before_cost + 0.02
+                      frozenset(labels_cost.items()))] == before_cost + 0.02
+
+    def test_record_llm_request_defaults_tier_complexity_to_unknown(self) -> None:
+        # Pre-Phase-6b callers omit tier/complexity → they default to "unknown"
+        # so the existing record_* surface stays backward-compatible.
+        m.record_llm_request("legacy-model", "p", 0.1, input_tokens=1, cost_usd=0.01)
+        labels = frozenset({"model": "legacy-model", "provider": "p", "token_type": "input",
+                            "tier": "unknown", "complexity": "unknown"}.items())
+        assert _samples()[("llm_request_tokens_total", labels)] >= 1
+
+    def test_record_llm_request_label_cardinality_is_bounded(self) -> None:
+        # Q105 guard: tier/complexity are bounded enums. Recording many distinct
+        # (model, provider) pairs must NOT explode the cardinality of either
+        # label beyond its enum — every child's tier ∈ the ModelTier values ∪
+        # "unknown" and complexity ∈ TaskComplexity values ∪ "unknown".
+        valid_tiers = {"very_cheap", "cheap", "moderate", "unknown"}
+        valid_complexities = {"trivial", "simple", "complex", "critical", "unknown"}
+        m.record_llm_request("a", "p1", 0.1, input_tokens=1,
+                             tier="cheap", complexity="trivial")
+        m.record_llm_request("b", "p2", 0.1, input_tokens=1,
+                             tier="moderate", complexity="complex")
+        for (name, labels), _value in _samples().items():
+            if name != "llm_request_tokens_total":
+                continue
+            label_map = dict(labels)
+            assert label_map["tier"] in valid_tiers
+            assert label_map["complexity"] in valid_complexities
 
     def test_record_llm_request_skips_zero_cost(self) -> None:
-        # A free call (cost_usd=0) must not create a cost child.
+        # A free call (cost_usd=0) must not create a cost child. Uses the full
+        # Phase-6b label set so the assertion is meaningful (not vacuously true
+        # on a 2-label child that can never exist now).
+        labels = frozenset({"model": "free-model", "provider": "free",
+                            "tier": "unknown", "complexity": "unknown"}.items())
         m.record_llm_request("free-model", "free", 0.1, cost_usd=0.0)
-        assert ("llm_request_cost_usd_total",
-                frozenset({"model": "free-model", "provider": "free"}.items())) not in _samples()
+        assert ("llm_request_cost_usd_total", labels) not in _samples()
 
     def test_record_cache_lookup_routes_hit_and_miss(self) -> None:
         before_hit = _samples().get(

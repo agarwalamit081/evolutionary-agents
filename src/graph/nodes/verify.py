@@ -20,7 +20,7 @@ from src.llm.exceptions import BudgetExhaustedError
 from src.tools._paths import resolve_existing, resolve_deliverable, results_root
 
 if TYPE_CHECKING:
-    from src.eval.models import GoalSpec
+    from src.eval.models import CheckResult, GoalSpec
     from src.llm.gateway import LLMGateway
 
 
@@ -823,6 +823,26 @@ async def _run_correctness_checks(
         _adhoc_eval = True
 
     correctness = await run_checks(spec, deliverable_paths, state, gateway=gateway)
+    # Phase E (Fix A): an ad-hoc spec only checks parse + non-empty, so a prose
+    # report that FABRICATES numbers contradicting its sibling data artifact is
+    # rubber-stamped. Probe cross-file numeric consistency and fold the finding
+    # into the recorded result — observability-only (the ad-hoc branch never
+    # enforces), surfaced as a scored check so the drift is machine-visible.
+    # ``None`` (no prose+data pair / no decimal claims) leaves the structural
+    # check count and score untouched.
+    if _adhoc_eval:
+        _drift = _cross_file_numeric_drift(deliverable_paths)
+        if _drift is not None:
+            from src.eval.models import CorrectnessResult
+
+            _all_checks = [*correctness.checks, _drift]
+            _scored = [c for c in _all_checks if not c.skipped]
+            correctness = CorrectnessResult(
+                spec_id=correctness.spec_id,
+                overall_score=(sum(c.score for c in _scored) / len(_scored)) if _scored else 1.0,
+                passed=(all(c.passed for c in _scored) if _scored else True),
+                checks=_all_checks,
+            )
     # Observability: the eval layer previously ran silently on its happy path,
     # making it impossible to tell from a log whether correctness checks engaged
     # at all (battery-04 q4 slipped a {"status":"failed"} stub through because
@@ -1228,6 +1248,247 @@ def _build_adhoc_spec(deliverable_paths: list[str]) -> GoalSpec | None:
         expected_deliverables=on_disk,
         checks=checks,
         target_node=None,
+    )
+
+
+# ─── Ad-hoc cross-file numeric-consistency probe (Phase E, Fix A) ────────
+# A prose report (.md/.txt) shipped alongside a computed data artifact
+# (.csv/.jsonl/…) can be well-structured and parseable yet still FABRICATE its
+# numbers: battery-04 d-validation produced sales_report.md whose combined
+# region totals were correct but whose monthly/daily figures contradicted the
+# sibling sales_summary.csv (the LLM authored the prose from memory instead of
+# reading the computed file). The ad-hoc spec only checks parse + non-empty, so
+# it rubber-stamped the contradiction. This probe makes the drift machine-visible.
+_ADHOC_PROSE_SUFFIXES = frozenset({".md", ".markdown", ".txt"})
+_ADHOC_DATA_SUFFIXES = frozenset({".csv", ".tsv", ".json", ".jsonl"})
+# Decimal/currency figures — the high-precision claims a report cites (totals,
+# averages, rates). Bare integers are deliberately EXCLUDED: a row count, a
+# year, a version, or an index is too often a legitimate non-data figure and
+# would drown the drift signal in false positives. Currency prefix + thousands
+# separators are stripped before comparison.
+_ADHOC_CLAIM_RE = re.compile(r"[$€£]\s?-?\d[\d,]*(?:\.\d{1,4})?|-?\d[\d,]*\.\d{1,4}")
+# Drift tolerance: relative 0.5% with a 1¢ absolute floor (rounding / cent noise).
+_ADHOC_DRIFT_REL = 0.005
+_ADHOC_DRIFT_ABS = 0.01
+
+
+def _parse_claim(token: str) -> float | None:
+    """Parse a numeric/currency token to a float, or None if it is not a number."""
+    cleaned = (
+        token.replace("$", "").replace("€", "").replace("£", "").replace(",", "").strip()
+    )
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _claim_matches(value: float, truth: set[float]) -> bool:
+    """True if ``value`` is within tolerance of any ground-truth number."""
+    return any(abs(value - t) <= max(_ADHOC_DRIFT_ABS, abs(value) * _ADHOC_DRIFT_REL) for t in truth)
+
+
+def _walk_numbers(obj: Any, out: set[float]) -> None:
+    """Recursively collect numeric leaves from a JSON-decoded object."""
+    if isinstance(obj, bool):
+        return
+    if isinstance(obj, (int, float)):
+        out.add(float(obj))
+    elif isinstance(obj, dict):
+        for _v in obj.values():
+            _walk_numbers(_v, out)
+    elif isinstance(obj, list):
+        for _v in obj:
+            _walk_numbers(_v, out)
+
+
+def _ingest_table(text: str, out: set[float], delimiter: str) -> None:
+    """Fold a CSV/TSV table's numeric cells + recomputed aggregates into ``out``.
+
+    Adds every numeric cell, each numeric column's grand total, and — for every
+    categorical column — the per-group SUM of each numeric column. The group
+    sums are what let a legitimately-cited region/month total (a SUM of CSV
+    rows, not a cell value) match instead of registering as drift. Per-group
+    MEANS are deliberately omitted: they double the ground-truth density and
+    open false-negative windows where a fabricated figure near a recomputed
+    mean slips through within tolerance (e.g. a fabricated monthly total within
+    0.5% of a region mean) — the exact fabrication this probe must catch.
+    """
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    rows = [r for r in reader if any(c.strip() for c in r)]
+    if not rows:
+        return
+    ncols = max(len(r) for r in rows)
+    body = rows[1:][:5000]
+    numeric_cols: list[int] = []
+    for col in range(ncols):
+        vals: list[float] = []
+        nonempty = 0
+        for r in body:
+            if col < len(r) and r[col].strip():
+                nonempty += 1
+                v = _parse_claim(r[col].strip())
+                if v is not None:
+                    vals.append(v)
+        if vals and nonempty and len(vals) / nonempty > 0.6:
+            numeric_cols.append(col)
+            out.update(vals)
+            out.add(round(sum(vals), 6))
+    cat_cols = [c for c in range(ncols) if c not in numeric_cols][:8]
+    for gcol in cat_cols:
+        for ncol in numeric_cols:
+            groups: dict[str, list[float]] = {}
+            for r in body:
+                if gcol < len(r) and ncol < len(r) and r[gcol].strip():
+                    v = _parse_claim(r[ncol].strip())
+                    if v is not None:
+                        groups.setdefault(r[gcol].strip(), []).append(v)
+            for gvals in groups.values():
+                out.add(round(sum(gvals), 6))
+
+
+def _ingest_records(objs: list[Any], out: set[float]) -> None:
+    """Fold a JSON list-of-records' numeric values + aggregates into ``out``.
+
+    Mirrors ``_ingest_table`` for JSON: numeric leaf values, per-key totals,
+    and per-categorical-key group sums (means omitted — see ``_ingest_table``).
+    Non-dict elements fall back to a raw numeric-leaf walk.
+    """
+    dicts = [o for o in objs if isinstance(o, dict)]
+    if not dicts:
+        for o in objs:
+            _walk_numbers(o, out)
+        return
+    keys = set()
+    for d in dicts:
+        keys.update(k for k in d.keys() if isinstance(k, str))
+    numeric_keys: list[str] = []
+    for k in keys:
+        vals: list[float] = []
+        for d in dicts:
+            v = d.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                vals.append(float(v))
+        if vals:
+            numeric_keys.append(k)
+            out.update(vals)
+            out.add(round(sum(vals), 6))
+    cat_keys = [k for k in keys if k not in numeric_keys][:8]
+    for gk in cat_keys:
+        for nk in numeric_keys:
+            groups: dict[str, list[float]] = {}
+            for d in dicts:
+                gv = d.get(gk)
+                nv = d.get(nk)
+                if (
+                    isinstance(gv, (str, int, float))
+                    and not isinstance(gv, bool)
+                    and isinstance(nv, (int, float))
+                    and not isinstance(nv, bool)
+                ):
+                    groups.setdefault(str(gv), []).append(float(nv))
+            for gvals in groups.values():
+                out.add(round(sum(gvals), 6))
+
+
+def _ground_truth_numbers(data: list[Path]) -> set[float]:
+    """Build the set of numbers implied by the computed data artifact(s)."""
+    out: set[float] = set()
+    for p in data:
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        suf = p.suffix.lower()
+        try:
+            if suf in (".csv", ".tsv"):
+                _ingest_table(text, out, "\t" if suf == ".tsv" else ",")
+            elif suf == ".jsonl":
+                objs = [json.loads(line) for line in text.splitlines() if line.strip()]
+                _ingest_records(objs, out)
+            elif suf == ".json":
+                obj = json.loads(text)
+                if isinstance(obj, list):
+                    _ingest_records(obj, out)
+                else:
+                    _walk_numbers(obj, out)
+        except (json.JSONDecodeError, ValueError, csv.Error):
+            continue
+    return out
+
+
+def _cross_file_numeric_drift(deliverable_paths: list[str]) -> "CheckResult | None":
+    """Cross-file numeric-consistency probe for ad-hoc runs (Phase E, Fix A).
+
+    Builds a ground-truth number set from the data artifact(s) (cells + recomputed
+    totals/group sums/means so a legitimately-cited aggregate is not a false
+    positive), extracts the decimal/currency figures the prose report cites, and
+    flags any that do not match within tolerance.
+
+    Observability-only (the caller never enforces ad-hoc checks): a fabricated
+    report records a failing ``adhoc:cross_file_consistency`` row + lower score so
+    the drift is machine-visible instead of silent. Returns ``None`` (skip, no
+    signal) when there is no prose+data pair, the data yields no numbers, or the
+    report cites no decimal figures — so a data-only/prose-only/claim-free run is
+    untouched and the structural check count is unchanged.
+    """
+    from src.eval.models import CheckResult
+
+    prose: list[Path] = []
+    data: list[Path] = []
+    for raw in deliverable_paths:
+        resolved = _resolve_deliverable(raw)
+        if resolved is None or not resolved.is_file():
+            continue
+        suf = resolved.suffix.lower()
+        if suf in _ADHOC_PROSE_SUFFIXES:
+            prose.append(resolved)
+        elif suf in _ADHOC_DATA_SUFFIXES:
+            data.append(resolved)
+    if not prose or not data:
+        return None
+    truth = _ground_truth_numbers(data)
+    if not truth:
+        return None
+    claims: list[tuple[float, str]] = []
+    for pf in prose:
+        try:
+            text = pf.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for m in _ADHOC_CLAIM_RE.finditer(text):
+            val = _parse_claim(m.group(0))
+            if val is not None:
+                claims.append((val, m.group(0)))
+    if not claims:
+        return None
+    drift: list[dict[str, Any]] = []
+    matched = 0
+    for val, raw in claims:
+        if _claim_matches(val, truth):
+            matched += 1
+        else:
+            drift.append({"claimed": raw, "value": round(val, 6)})
+    total = len(claims)
+    return CheckResult(
+        check_name="adhoc:cross_file_consistency",
+        check_type="cross_file_consistency",
+        passed=len(drift) == 0,
+        score=matched / total if total else 1.0,
+        evidence={
+            "total_claims": total,
+            "matched": matched,
+            "drift_count": len(drift),
+            "drift": drift[:25],
+            "prose_files": [str(p) for p in prose],
+            "data_files": [str(p) for p in data],
+            "ground_truth_count": len(truth),
+        },
+        error=(
+            ""
+            if not drift
+            else f"{len(drift)} report figure(s) not found in the computed data artifact(s)"
+        ),
     )
 
 

@@ -192,3 +192,56 @@ async def test_adhoc_folds_score_and_checks_into_result(
     assert out["eval_correctness_passed"] is True
     assert len(out["eval_checks"]) == 1
     assert out["eval_checks"][0]["check_name"] == "adhoc:report.csv"
+
+
+# ─── Phase E, Fix A: cross-file numeric-consistency probe ────────────────
+# A prose report shipped alongside a computed data artifact can be parseable +
+# non-empty yet still FABRICATE its numbers (battery-04 d-validation:
+# sales_report.md contradicted sales_summary.csv). The ad-hoc eval now records a
+# cross_file_consistency check so the drift is machine-visible — observability
+# only (never enforced: is_complete is never downgraded).
+
+_SALES_CSV = (
+    "region,month,total_sales,daily_avg\n"
+    "east,2026-01,2323.42,232.34\n"
+    "east,2026-02,2725.81,247.8\n"
+    "north,2026-01,2005.24,222.8\n"
+    "north,2026-02,2666.45,266.64\n"
+    "south,2026-01,3230.67,293.7\n"
+    "south,2026-02,2624.44,291.6\n"
+)
+_FABRICATED_REPORT = (
+    "# Sales Report\n"
+    "East total: $5,049.23. North total: $4,671.69. South total: $5,855.11.\n"
+    "Monthly: north-2026-01 $2,226.65; north-2026-02 $2,445.04; "
+    "south-2026-01 $2,926.18; south-2026-02 $2,928.93; east-2026-02 avg $272.58.\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_adhoc_cross_file_drift_recorded_not_enforced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A fabricated report is detected (failing cross_file_consistency check +
+    lower score) but stays observability-only — is_complete is NOT downgraded
+    even with eval_enforce=True (a synthetic spec never loops a real run)."""
+    results = _install_roots(monkeypatch, tmp_path)  # enforce=True default
+    calls = _capture_store(monkeypatch)
+    (results / "sales_summary.csv").write_text(_SALES_CSV, encoding="utf-8")
+    (results / "sales_report.md").write_text(_FABRICATED_REPORT, encoding="utf-8")
+    deliverables = ["results/sales_summary.csv", "results/sales_report.md"]
+
+    out = await _run_correctness_checks(_result_complete(), _state(), deliverables, None)
+
+    assert len(calls) == 1
+    checks = {c.check_name: c for c in calls[0].correctness.checks}
+    # Two structural checks (one per file) + one cross-file consistency check.
+    assert len(calls[0].correctness.checks) == 3
+    xf = checks["adhoc:cross_file_consistency"]
+    assert xf.passed is False
+    assert xf.evidence["drift_count"] == 5
+    # The score reflects the drift; passed is False on the aggregate.
+    assert out["eval_correctness_passed"] is False
+    assert out["eval_correctness_score"] < 1.0
+    # Observability-only — never enforced.
+    assert out["is_complete"] is True

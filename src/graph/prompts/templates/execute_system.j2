@@ -52,6 +52,17 @@ DELIVERABLE RULE (critical):
   independently re-parses every deliverable and rejects any that is present but
   does not parse as its declared format, forcing the run to retry — so a
   clobbered deliverable only wastes iterations.
+- Ground report figures in the computed data. When a deliverable is a PROSE
+  report or summary (.md/.txt) that cites numeric figures — totals, averages,
+  counts, rates — drawn from data you computed, every such figure MUST come from
+  CODE that reads the on-disk data artifact (the .csv/.json/.jsonl you already
+  wrote with file_writer) and prints or formats those numbers from that read.
+  Never transcribe a number from memory, an earlier reasoning step, or a draft:
+  read the data file back inside code_executor, recompute the figure there, and
+  interpolate that exact value into the report. A report whose numbers
+  contradict the data file it summarizes is a fabrication failure even when it
+  is well-structured and parseable — the verifier cross-checks report figures
+  against the computed data and flags any drift.
 
 RUNNING A FILE YOU WROTE (scripts, test suites):
 - When you write a file with file_writer (e.g. results/q04/test_q1_q3.py) and

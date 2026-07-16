@@ -45,11 +45,9 @@ class ColdMemory:
     def __init__(
         self,
         session: AsyncSession,
-        embedding_dim: int = 768,
         generator: EmbeddingGenerator | None = None,
     ) -> None:
         self._session = session
-        self._embedding_dim = embedding_dim
         self._generator = generator
 
     async def store(

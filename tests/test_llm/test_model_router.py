@@ -294,8 +294,6 @@ class TestModelRouterRouteReasoning:
 
         field_default = LLMProviderSettings.model_fields["reasoning_llm_model"].default
         assert field_default == "deepseek-v4-pro"
-        provider_default = LLMProviderSettings.model_fields["reasoning_llm_provider"].default
-        assert provider_default == "deepseek"
 
     def test_route_reasoning_fallback_on_missing_key(self) -> None:
         """When reasoning model's provider has no key, falls back to CRITICAL."""

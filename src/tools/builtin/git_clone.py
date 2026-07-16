@@ -306,9 +306,7 @@ async def _index_chunks(chunks: list[dict[str, str]], repo_url: str) -> int:
         generator = EmbeddingGenerator(get_settings())
         stored = 0
         async with get_session() as session:
-            memory = ColdMemory(
-                session, embedding_dim=generator.dimension, generator=generator
-            )
+            memory = ColdMemory(session, generator=generator)
             for ch in chunks:
                 tags = [
                     f"repo:{repo_url}",
@@ -464,9 +462,7 @@ async def code_search(query: str, top_k: int = 5) -> str:
 
         generator = EmbeddingGenerator(get_settings())
         async with get_session() as session:
-            memory = ColdMemory(
-                session, embedding_dim=generator.dimension, generator=generator
-            )
+            memory = ColdMemory(session, generator=generator)
             rows = await memory.search_by_query(
                 query, limit=limit, episode_type="code"
             )

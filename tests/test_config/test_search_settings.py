@@ -18,25 +18,25 @@ class TestSearchSettings:
         from src.config.settings import SearchSettings
 
         for var in (
-            "SEARCH_PRIMARY", "SEARXNG_URL", "SEARXNG_TIMEOUT",
-            "SEARXNG_MAX_RESULTS_PER_QUERY", "MEILISEARCH_URL", "MEILISEARCH_KEY",
+            "SEARXNG_URL", "SEARXNG_TIMEOUT",
+            "MEILISEARCH_URL", "MEILISEARCH_KEY",
             "MEILISEARCH_INDEX", "MEILISEARCH_TIMEOUT", "SEARCH_FALLBACK_PROVIDERS",
             "SEARCH_BATCH_CONCURRENCY", "CHUNK_SIZE", "CHUNK_OVERLAP",
-            "DEEP_CRAWL_ENABLED",
+            "DEEP_CRAWL_ENABLED", "CORPUS_RRF_K",
         ):
             monkeypatch.delenv(var, raising=False)
 
         s = SearchSettings(_env_file=None)
-        assert s.search_primary == "searxng"
         assert s.searxng_url == "http://localhost:8081"
         assert s.searxng_timeout == 10.0
-        assert s.searxng_max_results_per_query == 10
         assert s.meilisearch_url == "http://localhost:7701"
         assert s.meilisearch_key == ""
         assert s.meilisearch_index == "turing_corpus"
         assert s.search_batch_concurrency == 5
         assert s.chunk_size == 1200
         assert s.chunk_overlap == 150
+        # RRF fusion constant promoted from corpus.py's hardcoded k=60.
+        assert s.corpus_rrf_k == 60
         # Heavy providers OFF by default — they are provisioned-only.
         assert s.deep_crawl_enabled is False
 

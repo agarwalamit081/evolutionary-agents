@@ -15,7 +15,8 @@ Dual-write store:
   * **pgvector cold memory** — *semantic* index. Reuses the existing
     ``ColdMemory``/``EmbeddingGenerator`` (litellm embeddings + hash fallback).
 
-Search fuses the two legs with **Reciprocal Rank Fusion** (RRF, k=60), the
+Search fuses the two legs with **Reciprocal Rank Fusion** (RRF; k from
+``SearchSettings.corpus_rrf_k``, default 60), the
 same algorithm as ``web-search/.../search_service.perform_hybrid_search``.
 Batch/parallel: ``index_corpus(documents=[...])`` and
 ``corpus_search(queries=[...])`` fan out under ``asyncio.gather`` +
@@ -116,9 +117,13 @@ async def _meili_request(
     url = f"{_meili_url()}{path}"
     headers = _meili_headers()
     timeout = _meili_timeout()
+    limits = get_settings().tools
     async for attempt in AsyncRetrying(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential_jitter(initial=0.3, max=1.5),
+        stop=stop_after_attempt(limits.corpus_search_max_attempts),
+        wait=wait_exponential_jitter(
+            initial=limits.corpus_retry_initial_delay,
+            max=limits.corpus_retry_max_delay,
+        ),
         retry=retry_if_exception_type(TransientCorpusError),
         reraise=True,
     ):
@@ -288,9 +293,7 @@ async def _cold_semantic_search(query: str, limit: int) -> list[dict[str, Any]]:
 
         generator = EmbeddingGenerator(get_settings())
         async with get_session() as session:
-            memory = ColdMemory(
-                session, embedding_dim=generator.dimension, generator=generator
-            )
+            memory = ColdMemory(session, generator=generator)
             rows = await memory.search_by_query(query, limit=limit)
     except Exception as exc:  # embedding/db failure must not break the tool
         logger.debug(f"corpus semantic leg unavailable: {exc}")
@@ -326,9 +329,7 @@ async def _cold_store(
 
         generator = EmbeddingGenerator(get_settings())
         async with get_session() as session:
-            memory = ColdMemory(
-                session, embedding_dim=generator.dimension, generator=generator
-            )
+            memory = ColdMemory(session, generator=generator)
             tags = [f"url:{url}"] if url else []
             if content_hash:
                 tags.append(f"hash:{content_hash}")
@@ -519,7 +520,9 @@ async def _search_single(query: str, top_k: int) -> str:
         logger.debug(f"corpus_search keyword leg failed: {exc}")
 
     semantic_hits = await _cold_semantic_search(query, leg_limit)
-    fused = rrf_fuse(keyword_hits, semantic_hits, k=60, final_limit=top_k)
+    fused = rrf_fuse(
+        keyword_hits, semantic_hits, k=get_settings().search.corpus_rrf_k, final_limit=top_k
+    )
     return _format_hits(query, fused)
 
 

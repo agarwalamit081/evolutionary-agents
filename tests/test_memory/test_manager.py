@@ -169,7 +169,7 @@ class TestMemoryManagerInit:
         mock_db_session: MagicMock,
         mock_settings: MagicMock,
     ) -> None:
-        """Cold tier is initialized with db_session, settings embedding_dim, and a generator."""
+        """Cold tier is initialized with db_session and a generator."""
         with patch("src.memory.manager.ColdMemoryStore") as cold_cls:
             MemoryManager(
                 redis_client=mock_redis,
@@ -179,7 +179,6 @@ class TestMemoryManagerInit:
             cold_cls.assert_called_once()
             kwargs = cold_cls.call_args.kwargs
             assert kwargs["session"] is mock_db_session
-            assert kwargs["embedding_dim"] == 768  # from settings.llm.embedding_dim
             assert "generator" in kwargs  # EmbeddingGenerator wired (§10.2)
 
     def test_stores_settings_reference(

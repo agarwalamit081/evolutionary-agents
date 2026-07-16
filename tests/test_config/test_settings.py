@@ -146,6 +146,36 @@ class TestAgentSettings:
         assert agent.max_tools_per_run == 12
         assert agent.max_sub_agents_per_run == 5
 
+    def test_reflect_thresholds_default_to_today_literals(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reflection completion/confidence cut points pin the literals previously
+        hardcoded in reflect.py, so promoting them is behavior-preserving."""
+        from src.config.settings import AgentSettings
+
+        for var in (
+            "REFLECT_COMPLETION_HIGH", "REFLECT_COMPLETION_MEDIUM",
+            "REFLECT_COMPLETION_REPLAN_FLOOR", "REFLECT_CONFIDENCE_HIGH",
+            "REFLECT_CONFIDENCE_MEDIUM",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        agent = AgentSettings(_env_file=None)
+        assert agent.reflect_completion_high == 0.8
+        assert agent.reflect_completion_medium == 0.5
+        assert agent.reflect_completion_replan_floor == 0.3
+        assert agent.reflect_confidence_high == 0.7
+        assert agent.reflect_confidence_medium == 0.4
+
+    def test_reflect_thresholds_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reflection thresholds are env-overridable (case-insensitive)."""
+        from src.config.settings import AgentSettings
+
+        monkeypatch.setenv("reflect_completion_high", "0.9")
+        monkeypatch.setenv("reflect_confidence_medium", "0.45")
+        agent = AgentSettings(_env_file=None)
+        assert agent.reflect_completion_high == 0.9
+        assert agent.reflect_confidence_medium == 0.45
+
     def test_no_module_level_max_per_run_constants(self) -> None:
         """Regression: the dead module-level MAX_TOOLS_PER_RUN / MAX_SUB_AGENTS_PER_RUN
         constants were removed — settings.agent.* is the single source of truth.

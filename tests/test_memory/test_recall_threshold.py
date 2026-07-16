@@ -65,7 +65,7 @@ class TestColdThreshold:
         m2 = ColdMemoryModel(id=uuid.uuid4(), episode_type="execution", content="low")
         # cosine distances → similarities 0.9 / 0.5 / 0.1.
         session = _FakeSession(row_sets=[[(m0, 0.1), (m1, 0.5), (m2, 0.9)]])
-        cold = ColdMemory(session, embedding_dim=768, generator=None)  # type: ignore[arg-type]
+        cold = ColdMemory(session, generator=None)  # type: ignore[arg-type]
 
         out = await cold.search_by_embedding(
             query_embedding=[0.0] * 768, limit=5, min_similarity=0.6
@@ -80,7 +80,7 @@ class TestColdThreshold:
         m0 = ColdMemoryModel(id=uuid.uuid4(), episode_type="execution", content="high")
         m1 = ColdMemoryModel(id=uuid.uuid4(), episode_type="execution", content="low")
         session = _FakeSession(row_sets=[[(m0, 0.1), (m1, 0.9)]])
-        cold = ColdMemory(session, embedding_dim=768, generator=None)  # type: ignore[arg-type]
+        cold = ColdMemory(session, generator=None)  # type: ignore[arg-type]
 
         out = await cold.search_by_embedding(
             query_embedding=[0.0] * 768, limit=5, min_similarity=0.0
@@ -95,7 +95,7 @@ class TestColdThreshold:
         m0 = ColdMemoryModel(id=uuid.uuid4(), episode_type="execution", content="keep")
         m1 = ColdMemoryModel(id=uuid.uuid4(), episode_type="execution", content="drop")
         session = _FakeSession(row_sets=[[(m0, 0.05), (m1, 0.8)]])
-        cold = ColdMemory(session, embedding_dim=768, generator=_FakeGen())  # type: ignore[arg-type]
+        cold = ColdMemory(session, generator=_FakeGen())  # type: ignore[arg-type]
 
         out = await cold.search_by_query(query="anything", min_similarity=0.5)
 

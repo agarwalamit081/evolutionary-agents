@@ -36,7 +36,7 @@ class _FakeScheduler:
 
 
 class _FakeSettings:
-    """Bare settings stub: run() reads .memory + .llm.embedding_dim."""
+    """Bare settings stub: run() reads .memory (consolidate_* knobs)."""
 
     def __init__(self, ms: MemorySettings | None = None) -> None:
         self.memory = ms or MemorySettings(
@@ -65,8 +65,8 @@ class _FakeCold:
     consolidate_calls: list[tuple[int, float]] = []
     raise_on_consolidate = False
 
-    def __init__(self, *, session: Any, embedding_dim: int, generator: Any) -> None:
-        _FakeCold.last_init = (session, embedding_dim, generator)
+    def __init__(self, *, session: Any, generator: Any) -> None:
+        _FakeCold.last_init = (session, generator)
 
     async def consolidate(self, *, max_age_days: int, min_importance: float) -> int:
         _FakeCold.consolidate_calls.append((max_age_days, min_importance))
@@ -157,8 +157,8 @@ class TestMemoryConsolidatorRun:
         # The session was opened and consolidate ran with the configured knobs.
         assert ctx.entered == 1
         assert _FakeCold.consolidate_calls == [(90, 0.1)]
-        # generator=None (consolidate needs no embeddings) + the configured dim.
-        assert _FakeCold.last_init == ("session", 768, None)
+        # generator=None (consolidate needs no embeddings).
+        assert _FakeCold.last_init == ("session", None)
 
     @pytest.mark.asyncio
     async def test_run_is_observability_only_never_raises(

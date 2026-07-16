@@ -28,8 +28,8 @@ class MemoryConsolidator:
     """Run the cold-memory consolidation pass (decay + prune) on a schedule.
 
     ``settings`` is the full :class:`~src.config.settings.Settings`; knobs are
-    read from ``settings.memory`` (``consolidate_*``) and ``settings.llm``
-    (``embedding_dim``). ``session_factory`` is injectable for testing.
+    read from ``settings.memory`` (``consolidate_*``).
+    ``session_factory`` is injectable for testing.
     """
 
     def __init__(
@@ -57,13 +57,10 @@ class MemoryConsolidator:
 
                 session_factory = get_session
 
-            embedding_dim = getattr(getattr(s, "llm", None), "embedding_dim", 768)
             from src.memory.cold import ColdMemory  # noqa: PLC0415
 
             async with session_factory() as session:
-                cold = ColdMemory(
-                    session=session, embedding_dim=embedding_dim, generator=None
-                )
+                cold = ColdMemory(session=session, generator=None)
                 deleted = await cold.consolidate(
                     max_age_days=max_age_days,
                     min_importance=min_importance,

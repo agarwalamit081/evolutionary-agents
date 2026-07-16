@@ -150,6 +150,9 @@ class TestToolLimitsSettings:
             "WEB_SCRAPER_TIMEOUT", "WEB_SCRAPER_MAX_BYTES", "WEB_SCRAPER_MAX_CHARS",
             "CODE_EXECUTOR_TIMEOUT", "WEB_SEARCH_MAX_ATTEMPTS",
             "WEB_SEARCH_DELAY_MIN", "WEB_SEARCH_DELAY_MAX",
+            "CORPUS_SEARCH_MAX_ATTEMPTS", "CORPUS_RETRY_INITIAL_DELAY",
+            "CORPUS_RETRY_MAX_DELAY", "WEB_SEARCH_RETRY_INITIAL_DELAY",
+            "WEB_SEARCH_RETRY_MAX_DELAY",
         ):
             monkeypatch.delenv(var, raising=False)
         t = ToolLimitsSettings(_env_file=None)
@@ -165,6 +168,12 @@ class TestToolLimitsSettings:
         assert t.web_search_max_attempts == 3
         assert t.web_search_delay_min == 0.2
         assert t.web_search_delay_max == 0.6
+        # Retry/backoff knobs promoted from corpus.py + web_search.py literals.
+        assert t.corpus_search_max_attempts == 3
+        assert t.corpus_retry_initial_delay == 0.3
+        assert t.corpus_retry_max_delay == 1.5
+        assert t.web_search_retry_initial_delay == 0.4
+        assert t.web_search_retry_max_delay == 2.0
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from src.config.settings import ToolLimitsSettings
@@ -172,10 +181,14 @@ class TestToolLimitsSettings:
         monkeypatch.setenv("TERMINAL_COMMAND_TIMEOUT", "99")
         monkeypatch.setenv("CODE_EXECUTOR_TIMEOUT", "5")
         monkeypatch.setenv("HTTP_MAX_BODY_BYTES", "2048")
+        monkeypatch.setenv("CORPUS_SEARCH_MAX_ATTEMPTS", "7")
+        monkeypatch.setenv("WEB_SEARCH_RETRY_MAX_DELAY", "5.0")
         t = ToolLimitsSettings(_env_file=None)
         assert t.terminal_command_timeout == 99.0
         assert t.code_executor_timeout == 5
         assert t.http_max_body_bytes == 2048
+        assert t.corpus_search_max_attempts == 7
+        assert t.web_search_retry_max_delay == 5.0
 
     def test_delay_range_validator_rejects_inverted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """WEB_SEARCH_DELAY_MIN > WEB_SEARCH_DELAY_MAX must raise."""

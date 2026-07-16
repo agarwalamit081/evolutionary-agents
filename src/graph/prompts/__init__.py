@@ -67,10 +67,6 @@ TOOL_GENERATE_USER = PromptTemplate("tool_generate_user")
 AGENT_SPAWN_SYSTEM = PromptTemplate("agent_spawn_system")
 AGENT_SPAWN_USER = PromptTemplate("agent_spawn_user")
 
-# ── Task Delegation ────────────────────────────────────────────────────
-DELEGATE_SYSTEM = PromptTemplate("delegate_system")
-DELEGATE_USER = PromptTemplate("delegate_user")
-
 __all__ = [
     "PromptManager",
     "PromptTemplate",
@@ -107,6 +103,4 @@ __all__ = [
     "TOOL_GENERATE_USER",
     "AGENT_SPAWN_SYSTEM",
     "AGENT_SPAWN_USER",
-    "DELEGATE_SYSTEM",
-    "DELEGATE_USER",
 ]

@@ -152,7 +152,7 @@ class TestColdStoreDedup:
     ) -> None:
         _enable_dedup(monkeypatch)
         session = _FakeSession(scalar="existing-episode")
-        cold = ColdMemory(session, embedding_dim=768, generator=None)  # type: ignore[arg-type]
+        cold = ColdMemory(session, generator=None)  # type: ignore[arg-type]
 
         returned = await cold.store(
             episode_type="execution",
@@ -171,7 +171,7 @@ class TestColdStoreDedup:
     ) -> None:
         _enable_dedup(monkeypatch)
         session = _FakeSession(scalar=None)
-        cold = ColdMemory(session, embedding_dim=768, generator=None)  # type: ignore[arg-type]
+        cold = ColdMemory(session, generator=None)  # type: ignore[arg-type]
 
         returned = await cold.store(
             episode_type="execution", content="fresh episode", embedding=[0.0] * 768
@@ -188,7 +188,7 @@ class TestColdStoreDedup:
     ) -> None:
         _disable_dedup(monkeypatch)
         session = _FakeSession(scalar="should-not-be-used")
-        cold = ColdMemory(session, embedding_dim=768, generator=None)  # type: ignore[arg-type]
+        cold = ColdMemory(session, generator=None)  # type: ignore[arg-type]
 
         returned = await cold.store(
             episode_type="execution", content="c", embedding=[0.0] * 768

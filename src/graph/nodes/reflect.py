@@ -155,6 +155,11 @@ def _heuristic_reflect(
     tools: ToolRegistry | None = None,
 ) -> dict[str, Any]:
     """Heuristic-based reflection using completion ratios."""
+    # Completion/confidence cut points are operator-tunable (AgentSettings) so
+    # the replan/evolve thresholds are not hardcoded business literals.
+    from src.config.settings import get_settings
+
+    _reflect_cfg = get_settings().agent
     plan_steps = state.get("plan_steps", [])
     total_steps = len(plan_steps) if plan_steps else 1
     completed_count = len(completed_steps) if completed_steps else 0
@@ -169,9 +174,9 @@ def _heuristic_reflect(
     has_errors = bool(blocking_errors)
     if has_errors:
         confidence = Confidence.LOW
-    elif completion_ratio >= 0.8:
+    elif completion_ratio >= _reflect_cfg.reflect_completion_high:
         confidence = Confidence.HIGH
-    elif completion_ratio >= 0.5:
+    elif completion_ratio >= _reflect_cfg.reflect_completion_medium:
         confidence = Confidence.MEDIUM
     else:
         confidence = Confidence.LOW
@@ -212,9 +217,11 @@ def _heuristic_reflect(
             f"code_executor used {code_exec_count} times — consider a dedicated tool"
         )
 
-    should_replan = completion_ratio < 0.3 and has_errors
+    should_replan = (
+        completion_ratio < _reflect_cfg.reflect_completion_replan_floor and has_errors
+    )
     should_evolve = (
-        completion_ratio >= 0.5
+        completion_ratio >= _reflect_cfg.reflect_completion_medium
         and confidence in {Confidence.HIGH, Confidence.VERY_HIGH}
         and len(completed_steps) >= 3
     )
@@ -449,9 +456,12 @@ async def _llm_reflect(
         if analysis is None:
             return None
 
-        # Map LLM confidence to enum
-        conf = Confidence.HIGH if analysis.confidence >= 0.7 else (
-            Confidence.MEDIUM if analysis.confidence >= 0.4 else Confidence.LOW
+        # Map LLM confidence to enum (cut points from AgentSettings).
+        from src.config.settings import get_settings
+
+        _reflect_cfg = get_settings().agent
+        conf = Confidence.HIGH if analysis.confidence >= _reflect_cfg.reflect_confidence_high else (
+            Confidence.MEDIUM if analysis.confidence >= _reflect_cfg.reflect_confidence_medium else Confidence.LOW
         )
 
         # Ground should_evolve in objective success (deliverable on disk, no

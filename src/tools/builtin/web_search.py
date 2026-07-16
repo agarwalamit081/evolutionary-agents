@@ -96,7 +96,10 @@ async def _run_with_retry(
     attempts = max(1, limits.web_search_max_attempts)
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(attempts),
-        wait=wait_exponential_jitter(initial=0.4, max=2.0),
+        wait=wait_exponential_jitter(
+            initial=limits.web_search_retry_initial_delay,
+            max=limits.web_search_retry_max_delay,
+        ),
         retry=retry_if_exception_type(TransientSearchError),
         before_sleep=_log_retry,
         reraise=True,

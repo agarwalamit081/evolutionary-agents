@@ -205,7 +205,7 @@ class TestColdCosineRanking:
                 ],
             ]
         )
-        cold = ColdMemory(session=session, embedding_dim=4)
+        cold = ColdMemory(session=session)
 
         out = await cold.search_by_embedding([0.1, 0.2, 0.3, 0.4], limit=3)
 
@@ -219,7 +219,7 @@ class TestColdCosineRanking:
     async def test_similarity_is_one_minus_distance(self) -> None:
         near, d_near = _cold_row(content="a")
         session = _FakeSession(row_sets=[[(near, 0.25)]])
-        cold = ColdMemory(session=session, embedding_dim=4)
+        cold = ColdMemory(session=session)
 
         out = await cold.search_by_embedding([0.0, 0.0, 0.0, 0.0], limit=1)
 
@@ -232,7 +232,7 @@ class TestColdCosineRanking:
         # that the limit value reached the compiled SELECT.
         rows = [(_cold_row(content=f"c{i}")[0], 0.1 * i) for i in range(5)]
         session = _FakeSession(row_sets=[rows])
-        cold = ColdMemory(session=session, embedding_dim=4)
+        cold = ColdMemory(session=session)
 
         await cold.search_by_embedding([0.0, 0.0, 0.0, 0.0], limit=2)
 
@@ -247,7 +247,7 @@ class TestColdCosineRanking:
         # WHERE clause for episode_type was composed (2nd .where on the stmt).
         row, _ = _cold_row(content="x", episode_type="reflection")
         session = _FakeSession(row_sets=[[(row, 0.1)]])
-        cold = ColdMemory(session=session, embedding_dim=4)
+        cold = ColdMemory(session=session)
 
         out = await cold.search_by_embedding(
             [0.0, 0.0, 0.0, 0.0], limit=5, episode_type="reflection"
@@ -266,7 +266,7 @@ class TestColdStoreEmbeddingFallback:
         session = _FakeSession()
         gen = MagicMock()
         gen.generate = AsyncMock(return_value=[0.1, 0.2])
-        cold = ColdMemory(session=session, embedding_dim=2, generator=gen)
+        cold = ColdMemory(session=session, generator=gen)
 
         mem_id = await cold.store("execution", "content")
 
@@ -283,7 +283,7 @@ class TestColdStoreEmbeddingFallback:
         session = _FakeSession()
         gen = MagicMock()
         gen.generate = AsyncMock(side_effect=RuntimeError("embed down"))
-        cold = ColdMemory(session=session, embedding_dim=2, generator=gen)
+        cold = ColdMemory(session=session, generator=gen)
 
         mem_id = await cold.store("execution", "content")  # must not raise
 
@@ -298,14 +298,14 @@ class TestColdSearchByQueryBestEffort:
 
     @pytest.mark.asyncio
     async def test_no_generator_returns_empty(self) -> None:
-        cold = ColdMemory(session=_FakeSession(), embedding_dim=4, generator=None)
+        cold = ColdMemory(session=_FakeSession(), generator=None)
         assert await cold.search_by_query("anything") == []
 
     @pytest.mark.asyncio
     async def test_empty_query_returns_empty(self) -> None:
         gen = MagicMock()
         gen.generate = AsyncMock(return_value=[0.0, 0.0])
-        cold = ColdMemory(session=_FakeSession(), embedding_dim=2, generator=gen)
+        cold = ColdMemory(session=_FakeSession(), generator=gen)
         assert await cold.search_by_query("") == []
         gen.generate.assert_not_awaited()
 
@@ -313,7 +313,7 @@ class TestColdSearchByQueryBestEffort:
     async def test_embed_failure_returns_empty(self) -> None:
         gen = MagicMock()
         gen.generate = AsyncMock(side_effect=RuntimeError("no key"))
-        cold = ColdMemory(session=_FakeSession(), embedding_dim=2, generator=gen)
+        cold = ColdMemory(session=_FakeSession(), generator=gen)
         assert await cold.search_by_query("q") == []  # never raises
 
 
@@ -619,7 +619,7 @@ class TestPerTierNonFatalFailure:
         session = _FakeSession()
         gen = MagicMock()
         gen.generate = AsyncMock(side_effect=RuntimeError("no key"))
-        cold = ColdMemory(session=session, embedding_dim=4, generator=gen)
+        cold = ColdMemory(session=session, generator=gen)
 
         mem_id = await cold.store("execution", "content")  # must not raise
 
@@ -632,7 +632,7 @@ class TestPerTierNonFatalFailure:
     async def test_cold_search_query_failure_returns_empty(self) -> None:
         gen = MagicMock()
         gen.generate = AsyncMock(side_effect=RuntimeError("no key"))
-        cold = ColdMemory(session=_FakeSession(), embedding_dim=4, generator=gen)
+        cold = ColdMemory(session=_FakeSession(), generator=gen)
         # search_by_query swallows the embedding failure → [] (never raises).
         assert await cold.search_by_query("q") == []
 

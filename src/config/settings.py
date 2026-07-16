@@ -62,7 +62,6 @@ class LLMProviderSettings(BaseSettings):
     default_llm_model: str = "deepseek-v4-flash"
 
     # Heavy model for reasoning, planning, complex analysis
-    reasoning_llm_provider: str = "deepseek"
     reasoning_llm_model: str = "deepseek-v4-pro"
 
     # Embedding generation (§10.2) — litellm embedding model + output dimension.
@@ -98,7 +97,6 @@ class LLMProviderSettings(BaseSettings):
 
     @field_validator(
         "default_llm_provider",
-        "reasoning_llm_provider",
     )
     @classmethod
     def validate_provider(cls, v: str) -> str:
@@ -734,6 +732,18 @@ class ToolLimitsSettings(BaseSettings):
     web_search_max_attempts: int = 3  # Env: WEB_SEARCH_MAX_ATTEMPTS
     web_search_delay_min: float = 0.2  # Env: WEB_SEARCH_DELAY_MIN
     web_search_delay_max: float = 0.6  # Env: WEB_SEARCH_DELAY_MAX
+    # Retry/backoff tuning for the corpus (Meilisearch) + web_search tenacity
+    # wrappers. The web_search ATTEMPT count is ``web_search_max_attempts``
+    # above; these bound the exponential-jitter backoff timing and the corpus
+    # attempt count (previously hardcoded ``stop_after_attempt(3)`` +
+    # ``initial=0.3/max=1.5`` in corpus.py, ``initial=0.4/max=2.0`` in
+    # web_search.py). Env: CORPUS_SEARCH_MAX_ATTEMPTS,
+    # CORPUS_RETRY_INITIAL_DELAY/MAX_DELAY, WEB_SEARCH_RETRY_INITIAL_DELAY/MAX_DELAY.
+    corpus_search_max_attempts: int = 3  # Env: CORPUS_SEARCH_MAX_ATTEMPTS
+    corpus_retry_initial_delay: float = 0.3  # Env: CORPUS_RETRY_INITIAL_DELAY
+    corpus_retry_max_delay: float = 1.5  # Env: CORPUS_RETRY_MAX_DELAY
+    web_search_retry_initial_delay: float = 0.4  # Env: WEB_SEARCH_RETRY_INITIAL_DELAY
+    web_search_retry_max_delay: float = 2.0  # Env: WEB_SEARCH_RETRY_MAX_DELAY
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -1262,6 +1272,18 @@ class AgentSettings(BaseSettings):
     # and stalled before a 600s timeout fired). ON by default — correctness fix.
     # Env: CAP_LOOP_BREAK_THRESHOLD.
     cap_loop_break_threshold: int = 2
+    # Reflection thresholds (battery-04 centralized-config). The heuristic
+    # reflector maps plan-completion ratio → Confidence (HIGH/MEDIUM/LOW) and
+    # gates replan/evolve on these cut points; the LLM reflector maps the
+    # model's 0..1 confidence → the same enum. Defaults are the literals
+    # previously hardcoded in src/graph/nodes/reflect.py; promoting them keeps
+    # today's behavior identical while honoring the no-hardcoded-values rule.
+    # Env: REFLECT_COMPLETION_HIGH/MEDIUM/REPLAN_FLOOR, REFLECT_CONFIDENCE_HIGH/MEDIUM.
+    reflect_completion_high: float = 0.8  # completion_ratio >= this → HIGH
+    reflect_completion_medium: float = 0.5  # >= this → MEDIUM (also the evolve floor)
+    reflect_completion_replan_floor: float = 0.3  # < this AND errors → replan
+    reflect_confidence_high: float = 0.7  # LLM confidence >= this → HIGH
+    reflect_confidence_medium: float = 0.4  # >= this → MEDIUM
     # Run caps — single source of truth for tool/sub-agent creation limits.
     # Enforcement sites (tool generator, agent_spawn, structure_analysis) read
     # these fields directly; there are NO module-level MAX_*_PER_RUN constants
@@ -1829,11 +1851,8 @@ class SearchSettings(BaseSettings):
     ``http://meilisearch:7700``).
     """
 
-    # Primary live-search service (SearXNG, keyless/self-hosted).
-    search_primary: str = "searxng"  # Env: SEARCH_PRIMARY
     searxng_url: str = "http://localhost:8081"  # Env: SEARXNG_URL
     searxng_timeout: float = 10.0  # Env: SEARXNG_TIMEOUT
-    searxng_max_results_per_query: int = 10  # Env: SEARXNG_MAX_RESULTS_PER_QUERY
 
     # Corpus index service (Meilisearch, BM25 + hybrid).
     meilisearch_url: str = "http://localhost:7701"  # Env: MEILISEARCH_URL
@@ -1868,6 +1887,11 @@ class SearchSettings(BaseSettings):
 
     # Batch/parallel fan-out control (web_search(queries) + corpus_search(queries)).
     search_batch_concurrency: int = 5  # Env: SEARCH_BATCH_CONCURRENCY
+
+    # Reciprocal Rank Fusion constant for corpus_search (keyword ⊕ semantic).
+    # An RRF hit scores 1/(k+rank); k=60 is the canonical RRF default. Read at
+    # the corpus rrf_fuse call site (src/tools/builtin/corpus.py). Env: CORPUS_RRF_K.
+    corpus_rrf_k: int = 60  # Env: CORPUS_RRF_K
 
     # AI-format extraction / chunking (web_scraper -> corpus index).
     chunk_size: int = 1200  # Env: CHUNK_SIZE (target chars per chunk)

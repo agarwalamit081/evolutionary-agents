@@ -40,7 +40,6 @@ class MemoryManager:
         self.warm = WarmMemoryStore(session=db_session, generator=embedding_gen)
         self.cold = ColdMemoryStore(
             session=db_session,
-            embedding_dim=settings.llm.embedding_dim,
             generator=embedding_gen,
         )
         self._settings = settings

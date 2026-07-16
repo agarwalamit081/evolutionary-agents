@@ -61,9 +61,6 @@ h2 { font-size: 1.15em; margin: 28px 0 10px; color: var(--ink); }
 section { margin-bottom: 8px; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-/* Two side-by-side panels on wide screens (runs | mutations, etc.); collapses to
-   one column below ~840px so it stays usable on tablet/mobile. */
-.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; align-items: start; margin-top: 8px; }
 .card {
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
   padding: 16px;
@@ -77,6 +74,10 @@ th { color: var(--muted); font-weight: 600; font-size: 0.82em; text-transform: u
 tbody tr:hover { background: var(--panel-2); }
 td.empty, .empty { color: var(--muted); text-align: center; padding: 24px; }
 .table-scroll { overflow-x: auto; }
+/* Run ids are long (often 30-40 chars, e.g. bench-probe_multi_orchestration-193645);
+   let them wrap inside the cell instead of overflowing the table or being
+   hard-sliced to an indistinguishable shared prefix. */
+.run-id { overflow-wrap: break-word; }
 
 .badge {
   display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.78em;

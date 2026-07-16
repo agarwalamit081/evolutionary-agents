@@ -2,7 +2,7 @@
    (poll.js swaps this into the <tbody>), and {% include %}d by index/runs. #}
 {% for r in runs %}
 <tr>
-  <td><a href="/dashboard/runs/{{ r.run_id }}"><code>{{ r.run_id[:12] }}</code></a></td>
+  <td class="run-id"><a href="/dashboard/runs/{{ r.run_id }}"><code>{{ r.run_id }}</code></a></td>
   <td><span class="badge badge-{{ r.status }}">{{ r.status }}</span></td>
   <td class="num">{{ r.iteration_count if r.iteration_count is not none else "—" }}</td>
   <td>{{ r.started_at[:19] or "—" }}</td>

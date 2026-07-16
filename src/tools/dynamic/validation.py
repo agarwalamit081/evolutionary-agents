@@ -27,6 +27,7 @@ dicts (for telemetry / the API 422 body).
 from __future__ import annotations
 
 import ast
+import asyncio
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -204,7 +205,13 @@ async def validate_tool_code(
     # column-0 import lines are touched (function/class redefinitions — real
     # F811s — are left intact), so this never masks a genuine bug.
     combined = dedupe_imports(f"{handler_code}\n\n{test_code}")
-    lint_result = _lint_code(combined)
+    # Offload the blocking ``ruff`` subprocess off the event loop: ``_lint_code``
+    # shells out (timeout up to 30s) and is reached from this async path on the
+    # worker, where a synchronous ``subprocess.run`` would stall every concurrent
+    # task for the duration of the lint (finding: in-process, not the no-DinD
+    # runner). ``asyncio.to_thread`` runs it in a worker thread with no signature
+    # churn — ``_lint_code`` stays sync and callable from sync contexts.
+    lint_result = await asyncio.to_thread(_lint_code, combined)
     if not lint_result["passed"]:
         return ToolCodeValidation(
             passed=False,

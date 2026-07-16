@@ -2782,6 +2782,38 @@ class Lean4Settings(BaseSettings):
     )
 
 
+class DashboardSettings(BaseSettings):
+    """Operator dashboard (``/dashboard``) auth + display knobs.
+
+    Opt-in, default-OFF: ``DASHBOARD_API_KEY`` is empty by default so the
+    local-dev UI stays open (byte-identical to today's behavior). Set it to lock
+    every ``/dashboard*`` route behind a constant-time ``X-Dashboard-Key`` header
+    check — the gate lives on the router itself
+    (``src/api/routes/dashboard.py:_require_dashboard_key``). The app logs a
+    WARNING at startup when the UI is mounted open (it binds ``0.0.0.0`` /
+    host ``8800``), so an accidentally-exposed dashboard is loud.
+
+    Env-var names are read via explicit per-field validation_alias (no
+    env_prefix), mirroring the other opt-in groups.
+    """
+
+    # Shared secret required as the ``X-Dashboard-Key`` header. Env: DASHBOARD_API_KEY.
+    api_key: str = Field(default="", validation_alias="DASHBOARD_API_KEY")
+    # Defensive cap on the GET /tools operator listing. Governance already bounds
+    # active tools to 25; retired rows accumulate unbounded otherwise. Env:
+    # DASHBOARD_TOOLS_MAX_ROWS.
+    tools_max_rows: int = Field(
+        default=200, validation_alias="DASHBOARD_TOOLS_MAX_ROWS"
+    )
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
 class Settings(BaseSettings):
     """Root settings class that composes all settings groups."""
 
@@ -2824,6 +2856,7 @@ class Settings(BaseSettings):
     neo4j: Neo4jSettings = Neo4jSettings()  # type: ignore[assignment]
     experimental_techniques: ExperimentalTechniqueSettings = ExperimentalTechniqueSettings()  # type: ignore[assignment]
     lean4: Lean4Settings = Lean4Settings()  # type: ignore[assignment]
+    dashboard: DashboardSettings = DashboardSettings()  # type: ignore[assignment]
 
     # Environment metadata
     environment: Literal["development", "staging", "production"] = "development"

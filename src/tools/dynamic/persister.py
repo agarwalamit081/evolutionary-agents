@@ -379,15 +379,23 @@ class ToolPersister:
         try:
             from sqlalchemy import select
 
+            from src.config.settings import get_settings
             from src.db.models import ToolRegistration
             from src.db.session import get_session
 
+            # Defensive cap: governance already bounds active tools to 25, but
+            # retired registrations accumulate unbounded over the project
+            # lifetime. Bound the operator listing (most-recent first) so a
+            # long-lived registry can never yield an unbounded result + N+1 of
+            # ``_latest_version`` calls. Env: DASHBOARD_TOOLS_MAX_ROWS (200).
+            max_rows = get_settings().dashboard.tools_max_rows
             tools: list[dict[str, Any]] = []
             async with get_session() as session:
                 result = await session.execute(
-                    select(ToolRegistration).where(
-                        ToolRegistration.tool_type == "generated"
-                    )
+                    select(ToolRegistration)
+                    .where(ToolRegistration.tool_type == "generated")
+                    .order_by(ToolRegistration.created_at.desc())
+                    .limit(max_rows)
                 )
                 for reg in result.scalars().all():
                     latest = await self._latest_version(session, reg.id)

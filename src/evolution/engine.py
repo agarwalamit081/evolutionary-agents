@@ -5,6 +5,7 @@ Phases: analyze → generate → validate → sandbox_test → ab_test → deplo
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -984,8 +985,18 @@ class SelfEvolutionEngine:
             # must flag.
             live_state = Path(__file__).resolve().parents[1] / "graph" / "state.py"
             baseline = extract_state_keys(live_state) or set()
-            report = verify_graph_invariants(
-                Path(repo_dir), baseline_state_keys=baseline
+            # Offload the invariant pass off the event loop: it shells out to an
+            # import-smoke subprocess (``_check_imports``, timeout up to 30s) plus
+            # several file-read/AST passes, all synchronous. Reached from this
+            # async evolution path on the worker/host, a blocking call here would
+            # stall every concurrent task per CODE mutation. ``asyncio.to_thread``
+            # runs the whole verify in a worker thread; the fails-open contract is
+            # preserved (this call is still inside the try/except below that
+            # reports ``passed`` on any error).
+            report = await asyncio.to_thread(
+                verify_graph_invariants,
+                Path(repo_dir),
+                baseline_state_keys=baseline,
             )
             failed = not report.passed
             return (

@@ -19,11 +19,12 @@ mounts under ``/dashboard`` (no API prefix — it is a UI, not a programmatic AP
 
 from __future__ import annotations
 
+import secrets
 from pathlib import Path
 from typing import Any
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from loguru import logger
@@ -33,7 +34,37 @@ from src.config import get_settings
 from src.db.session import get_session
 from src.worker.status import RunStatusStore
 
-router = APIRouter()
+def _dashboard_api_key() -> str:
+    """Configured dashboard key, exposed as a (test-overridable) dependency.
+
+    Empty by default → the UI is open (today's local-dev behavior).
+    """
+    return getattr(get_settings().dashboard, "api_key", "") or ""
+
+
+async def _require_dashboard_key(
+    configured: str = Depends(_dashboard_api_key),
+    x_dashboard_key: str | None = Header(default=None, alias="X-Dashboard-Key"),
+) -> None:
+    """Opt-in ``X-Dashboard-Key`` gate applied to every ``/dashboard*`` route.
+
+    When ``DASHBOARD_API_KEY`` is unset, the UI stays open (no header required —
+    today's behavior). When set, every dashboard route 401s without a
+    constant-time-matching ``X-Dashboard-Key`` header. Applied via the router's
+    own ``dependencies`` so all five views are covered with one declaration.
+    """
+    if not configured:
+        return
+    if x_dashboard_key is None or not secrets.compare_digest(
+        x_dashboard_key, configured
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="a valid X-Dashboard-Key header is required",
+        )
+
+
+router = APIRouter(dependencies=[Depends(_require_dashboard_key)])
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))

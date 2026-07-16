@@ -109,6 +109,14 @@ def create_app() -> FastAPI:
 
         from src.api.routes.dashboard import router as dashboard_router
         app.include_router(dashboard_router, tags=["dashboard"])
+        # The dashboard binds 0.0.0.0 (host port 8800) and is gated opt-in:
+        # empty DASHBOARD_API_KEY = open. Warn loudly when it ships open so an
+        # accidentally-exposed operator UI is never silent.
+        if not settings.dashboard.api_key:
+            logger.warning(
+                "Dashboard mounted WITHOUT an auth gate (DASHBOARD_API_KEY unset) "
+                "— set DASHBOARD_API_KEY or bind/firewall port 8800 to restrict access."
+            )
         static_dir = Path(__file__).resolve().parent / "static"
         if static_dir.is_dir():
             app.mount(

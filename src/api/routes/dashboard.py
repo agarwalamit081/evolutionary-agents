@@ -2,6 +2,7 @@
 
 Five read-only HTML views over the existing data (no new schema, no writes):
   GET /dashboard              — index: summary cards + recent runs + recent mutations
+  GET /dashboard/tools        — per-tool health: calls, success/empty rates, latency
   GET /dashboard/runs         — run observer (Redis ``turing:run:*``), auto-refreshing
   GET /dashboard/runs/{id}    — run detail: status, cost-by-model, review card, live steps
   GET /dashboard/runs/{id}/steps — polled partial: per-node execution-step rows (poll.js)
@@ -91,10 +92,14 @@ def _is_partial(request: Request) -> bool:
 async def dashboard_index(request: Request) -> HTMLResponse:
     """Index: summary cards + the most recent runs + most recent mutations."""
     store, redis_client = await _open_store()
+    cost_by_model: dict[str, Any] = {"rows": [], "total": 0.0}
+    memory: dict[str, Any] = {"warm": {}, "warm_total": 0, "cold_total": 0, "total": 0}
     try:
         async with get_session() as session:
             runs, summary = await data.runs_with_cost(store, session, limit=10)
             mutations = await data.mutation_timeline(session, limit=5)
+            cost_by_model = await data.cost_by_model(session)
+            memory = await data.memory_summary(session)
     except Exception as e:  # noqa: BLE001 — degrade, never 500
         logger.warning(f"Dashboard index data fetch failed: {e}")
         runs, summary, mutations = [], {"runs_total": 0, "runs_in_flight": 0, "runs_completed": 0, "total_cost_usd": 0.0}, []
@@ -103,7 +108,14 @@ async def dashboard_index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"request": request, "summary": summary, "runs": runs, "mutations": mutations},
+        context={
+            "request": request,
+            "summary": summary,
+            "runs": runs,
+            "mutations": mutations,
+            "cost_by_model": cost_by_model,
+            "memory": memory,
+        },
     )
 
 
@@ -130,6 +142,27 @@ async def dashboard_runs(request: Request) -> HTMLResponse:
     )
 
 
+@router.get("/dashboard/tools", response_class=HTMLResponse)
+async def dashboard_tools(request: Request) -> HTMLResponse:
+    """Per-tool health: calls, success/empty rates, avg latency, active state.
+
+    Surfaces which tools fail or return empty — the highest-value diagnostic
+    surface for the capability layer. Capped at ``settings.dashboard.tools_max_rows``.
+    """
+    max_rows = getattr(get_settings().dashboard, "tools_max_rows", 200) or 200
+    try:
+        async with get_session() as session:
+            tools = await data.tool_health(session, limit=max_rows)
+    except Exception as e:  # noqa: BLE001 — degrade, never 500
+        logger.warning(f"Dashboard tools data fetch failed: {e}")
+        tools = []
+    return templates.TemplateResponse(
+        request=request,
+        name="tools.html",
+        context={"request": request, "tools": tools},
+    )
+
+
 @router.get("/dashboard/runs/{run_id}", response_class=HTMLResponse)
 async def dashboard_run_detail(run_id: str, request: Request) -> HTMLResponse:
     """One run's status + per-model cost + the HITL review (Q100) card."""
@@ -146,6 +179,11 @@ async def dashboard_run_detail(run_id: str, request: Request) -> HTMLResponse:
         if record is not None:
             run_view = data._run_to_view(record)  # noqa: SLF001 — view-shape helper
         async with get_session() as session:
+            if run_view is None:
+                # Redis forgot this run (its status hash TTL-expired): reconstruct
+                # an archived view from cost_ledger so the page renders cost/steps
+                # instead of 404. None when Postgres has no record of it either.
+                run_view = await data._archived_run_view_for(session, run_id)  # noqa: SLF001
             if run_view is not None:
                 cost_breakdown = await data.run_cost_breakdown(session, run_view)
                 steps = await data.execution_steps(session, run_view)
@@ -181,19 +219,27 @@ async def dashboard_run_steps(run_id: str, request: Request) -> HTMLResponse:
     """Polled partial — the per-node execution-step rows for one run.
 
     poll.js fetches this every ``data-poll-interval`` seconds and swaps the
-    response into the run-detail steps ``<tbody>`` (HTMX-equivalent). Re-derives
-    the run view from Redis so the ``run_id`` key candidates (thread_id / bare id)
-    match, exactly as the run-detail route does. Best-effort: a Redis/DB hiccup
-    renders the empty partial (never 500). The run-detail route 404s unknown ids;
-    this partial degrades to "no steps" so a poll never errors mid-page.
+    response into the run-detail steps ``<tbody>`` (HTMX-equivalent). Derives the
+    run view from Redis; on a Redis miss (a status hash that TTL-expired) it
+    reconstructs an archived view from ``cost_ledger`` — exactly as the run-detail
+    route does — so an archived run's steps do not vanish on the first poll.
+    Best-effort: a Redis/DB hiccup renders the empty partial (never 500). The
+    run-detail route 404s unknown ids; this partial degrades to "no steps" so a
+    poll never errors mid-page.
     """
     store, redis_client = await _open_store()
     steps: list[dict[str, Any]] = []
     try:
+        run_view: dict[str, Any] | None = None
         record = await store.get(run_id)
         if record is not None:
             run_view = data._run_to_view(record)  # noqa: SLF001 — view-shape helper
-            async with get_session() as session:
+        async with get_session() as session:
+            if run_view is None:
+                # Redis forgot this run — reconstruct an archived view so the
+                # polled partial still returns its steps (mirrors the detail route).
+                run_view = await data._archived_run_view_for(session, run_id)  # noqa: SLF001
+            if run_view is not None:
                 steps = await data.execution_steps(session, run_view)
     except Exception as e:  # noqa: BLE001 — degrade
         logger.warning(f"Dashboard steps fetch failed for {run_id}: {e}")

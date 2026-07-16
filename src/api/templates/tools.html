@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Tools — Turing Dashboard{% endblock %}
+{% block content %}
+<h1>Tools</h1>
+<p class="muted small">
+  Per-tool health from the live registries: call count, success / empty-output rates,
+  mean latency, and active vs. retired state. Sorted by calls (most-used first).
+  Rates below the dashed thresholds are colored to flag failing or empty-returning tools.
+</p>
+
+<section>
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>tool</th>
+          <th>state</th>
+          <th>type</th>
+          <th class="num">calls</th>
+          <th>success</th>
+          <th>empty out</th>
+          <th class="num">avg latency</th>
+          <th>created</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for t in tools %}
+        {% set sr = t.success_rate %}
+        {% set er = t.empty_output_rate %}
+        {% set sr_pct = (sr * 1000) / 10 if sr is not none else none %}
+        {% set er_pct = (er * 1000) / 10 if er is not none else none %}
+        <tr>
+          <td class="mono">{{ t.tool_name }}</td>
+          <td>
+            {% if t.is_active %}
+              <span class="badge badge-completed">active</span>
+            {% else %}
+              <span class="badge badge-archived">retired</span>
+            {% endif %}
+          </td>
+          <td class="muted">{{ t.tool_type or "—" }}</td>
+          <td class="num">{{ t.calls }}</td>
+          <td>
+            <span class="rate">{% if sr is not none %}{{ "%.0f"|format(sr_pct) }}%{% else %}—{% endif %}</span>
+            <span class="rate-track">
+              <span class="rate-fill{% if sr is not none and sr < 0.5 %} bad{% elif sr is not none and sr < 0.8 %} warn{% endif %}"{% if sr is not none %} style="width: {{ sr_pct }}%"{% endif %}></span>
+            </span>
+          </td>
+          <td>
+            <span class="rate">{% if er is not none %}{{ "%.0f"|format(er_pct) }}%{% else %}—{% endif %}</span>
+            <span class="rate-track">
+              {# empty-output is the inverse signal: a HIGH empty rate is bad. #}
+              <span class="rate-fill{% if er is not none and er >= 0.5 %} bad{% elif er is not none and er >= 0.2 %} warn{% endif %}"{% if er is not none %} style="width: {{ er_pct }}%"{% endif %}></span>
+            </span>
+          </td>
+          <td class="num">{{ "%.0f ms"|format(t.avg_latency_ms) if t.avg_latency_ms is not none else "—" }}</td>
+          <td class="muted">{{ t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "—" }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" class="empty">No tools registered yet. Tools are created at runtime when the agent detects a capability gap.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

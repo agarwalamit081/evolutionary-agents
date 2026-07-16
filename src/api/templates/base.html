@@ -4,20 +4,38 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Turing Dashboard{% endblock %}</title>
+  <script>
+    // Paint-blocking: apply the saved/OS theme BEFORE the stylesheet renders so
+    // there is no flash of the wrong theme. Manual override wins; else follow the
+    // OS prefers-color-scheme; else dark (the historic default).
+    (function () {
+      try {
+        var saved = localStorage.getItem("theme");
+        var osLight = window.matchMedia &&
+          window.matchMedia("(prefers-color-scheme: light)").matches;
+        document.documentElement.dataset.theme = saved || (osLight ? "light" : "dark");
+      } catch (e) {
+        document.documentElement.dataset.theme = "dark";
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="/dashboard-static/app.css">
 </head>
 <body>
   <nav class="topnav">
     <a href="/dashboard" class="brand">◐ Turing Agent</a>
     <a href="/dashboard">Overview</a>
+    <a href="/dashboard/tools">Tools</a>
     <a href="/dashboard/runs">Runs</a>
     <a href="/dashboard/curve">Curve</a>
     <a href="/dashboard/mutations">Mutations</a>
     <a href="/api/v1/tools" class="right">Tools API</a>
+    <button class="theme-toggle" id="theme-toggle" aria-label="Toggle light or dark theme" title="Toggle theme">🌗</button>
   </nav>
   <main>
     {% block content %}{% endblock %}
   </main>
   <script src="/dashboard-static/poll.js"></script>
+  <script src="/dashboard-static/theme.js" defer></script>
 </body>
 </html>

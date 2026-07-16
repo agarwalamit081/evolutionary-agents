@@ -855,7 +855,10 @@ class TestRunDetailRoute:
     ) -> None:
         store, _ = patch_infra
         store.get = AsyncMock(return_value=None)  # unknown / expired run
-        resp = client.get("/dashboard/runs/does-not-exist")
+        # 404 now requires BOTH sources to miss: a Redis miss alone falls through
+        # to the archived reconstruction from cost_ledger (see test_dashboard_historical_runs).
+        with patch.object(data, "_archived_run_view_for", new=AsyncMock(return_value=None)):
+            resp = client.get("/dashboard/runs/does-not-exist")
         assert resp.status_code == 404
 
     def test_detail_renders_live_steps_section(
@@ -930,15 +933,84 @@ class TestRunStepsRoute:
     def test_unknown_run_degrades_to_empty_partial_not_404(
         self, client: TestClient, patch_infra: Any
     ) -> None:
-        # A polled partial must never 500/404 mid-page: an expired run renders the
-        # empty placeholder so the run-detail page keeps polling cleanly.
+        # A polled partial must never 500/404 mid-page: a run unknown to BOTH
+        # Redis and Postgres renders the empty placeholder so the run-detail page
+        # keeps polling cleanly.
         store, _ = patch_infra
         store.get = AsyncMock(return_value=None)
-        with patch.object(data, "execution_steps", new=AsyncMock(return_value=[])) as es:
+        with patch.object(data, "_archived_run_view_for", new=AsyncMock(return_value=None)), \
+             patch.object(data, "execution_steps", new=AsyncMock(return_value=[])) as es:
             resp = client.get("/dashboard/runs/expired/steps?partial=1")
         assert resp.status_code == 200
         assert "No execution steps recorded" in resp.text
-        es.assert_not_awaited()  # no run view → no DB hit
+        es.assert_not_awaited()  # no run view (Redis + Postgres miss) → no DB hit
+
+    def test_archived_run_steps_partial_returns_rows_not_empty(
+        self, client: TestClient, patch_infra: Any
+    ) -> None:
+        # Regression: the polled steps partial used to derive the run view from
+        # Redis only, so an archived run's steps vanished ~3s after load (poll.js
+        # cleared the tbody). It must now reconstruct the archived view — mirroring
+        # the detail route — so an archived run's steps survive the first poll.
+        store, _ = patch_infra
+        store.get = AsyncMock(return_value=None)  # Redis forgot this run
+        archived = {
+            "run_id": "old1", "thread_id": "api-old1", "status": "archived",
+            "final_output": None, "is_complete": None, "iteration_count": None,
+            "error": None, "started_at": "2026-07-01T00:00:00",
+            "finished_at": "2026-07-01T01:00:00", "results_dir": None,
+        }
+        steps = [{"seq": 1, "phase": "execute_node", "status": "completed",
+                  "duration_ms": 22500, "duration_s": 22.5,
+                  "created_at": "2026-07-01T00:05:00+00:00"}]
+        with patch.object(data, "_archived_run_view_for", new=AsyncMock(return_value=archived)), \
+             patch.object(data, "execution_steps", new=AsyncMock(return_value=steps)):
+            resp = client.get("/dashboard/runs/old1/steps?partial=1")
+        assert resp.status_code == 200, resp.text
+        body = resp.text
+        assert "execute_node" in body               # rows present (not the empty placeholder)
+        assert "22.5s" in body                       # the formatted duration cell
+        assert "No execution steps recorded" not in body
+
+
+class TestToolsRoute:
+    def test_renders_tool_health_table(
+        self, client: TestClient, patch_infra: Any
+    ) -> None:
+        # Regression (the /dashboard/tools 500): tool_health returns a RAW
+        # datetime for created_at (not an iso string like the run views) and None
+        # rates for never-called tools. Both must render, not crash the template.
+        tools = [
+            {
+                "tool_name": "web_search", "tool_type": "builtin", "is_active": True,
+                "calls": 10, "success_rate": 0.9, "empty_output_rate": 0.1,
+                "avg_latency_ms": 120.0,
+                "created_at": datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc),
+            },
+            {
+                "tool_name": "unused_tool", "tool_type": "dynamic", "is_active": False,
+                "calls": 0, "success_rate": None, "empty_output_rate": None,
+                "avg_latency_ms": None, "created_at": None,
+            },
+        ]
+        with patch.object(data, "tool_health", new=AsyncMock(return_value=tools)):
+            resp = client.get("/dashboard/tools")
+        assert resp.status_code == 200, resp.text
+        body = resp.text
+        assert "web_search" in body
+        assert "90%" in body                  # success rate formatted (not the 500)
+        assert "2026-07-01 09:00" in body     # created_at is a datetime → strftime
+        assert "unused_tool" in body
+        assert "—" in body                    # None rate renders the em dash
+        assert "retired" in body             # is_active=False badge
+
+    def test_empty_renders_placeholder(
+        self, client: TestClient, patch_infra: Any
+    ) -> None:
+        with patch.object(data, "tool_health", new=AsyncMock(return_value=[])):
+            resp = client.get("/dashboard/tools")
+        assert resp.status_code == 200
+        assert "No tools registered" in resp.text
 
 
 class TestCurveRoute:

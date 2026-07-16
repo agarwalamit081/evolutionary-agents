@@ -6,10 +6,19 @@
 
 <section class="cards">
   <div class="card"><div class="num"><span class="badge badge-{{ run.status }}">{{ run.status }}</span></div><div class="lbl">status</div></div>
-  <div class="card"><div class="num">{{ run.iteration_count }}</div><div class="lbl">iterations</div></div>
-  <div class="card"><div class="num">{{ "complete" if run.is_complete else "incomplete" }}</div><div class="lbl">completion</div></div>
+  <div class="card"><div class="num">{{ run.iteration_count if run.iteration_count is not none else "—" }}</div><div class="lbl">iterations</div></div>
+  <div class="card"><div class="num">{% if run.is_complete is none %}—{% else %}{{ "complete" if run.is_complete else "incomplete" }}{% endif %}</div><div class="lbl">completion</div></div>
   <div class="card"><div class="num">${{ "%.4f"|format(total_cost) }}</div><div class="lbl">spend</div></div>
 </section>
+
+{% if run.status == "archived" %}
+<div class="callout">
+  <strong>Archived run.</strong> Live status expired from Redis (its 24h status-hash TTL elapsed);
+  the status, iterations, and completion above are unknown. The cost breakdown, token mix, and
+  execution steps below are reconstructed from Postgres (<code>cost_ledger</code> /
+  <code>execution_steps</code>), so they remain accurate.
+</div>
+{% endif %}
 
 <section>
   <h2>Detail</h2>

@@ -30,12 +30,14 @@ from loguru import logger
 from src.db.models import (
     ABTestResult,
     AgentConfigVersion,
+    ColdMemory,
     CostLedger,
     ExecutionStep,
     Mutation,
     SubAgentModel,
     ToolCallMetric,
     ToolRegistration,
+    WarmMemory,
 )
 from src.graph.enums import MutationType
 from src.worker.schema import RunStatus
@@ -52,6 +54,9 @@ _RUN_KEY_PREFIX = "turing:run:"
 # Cap the run list + mutation timeline so a large history never renders a huge
 # page (pagination is a fast-follow; the dashboard is a recent-activity view).
 _DEFAULT_LIMIT = 100
+# Prefixes on a graph ``thread_id`` (``cost_ledger.run_id``). Strip one to recover
+# the bare ``run_id`` the UI keys on; used to reconstruct archived runs.
+_HISTORICAL_PREFIXES = ("api-", "cli-")
 
 # The web-search builtin's registered name (``src/tools/builtin/web_search.py``).
 # ``tool_call_metrics`` — NOT ``execution_steps`` — is the per-invocation audit
@@ -177,19 +182,257 @@ def _cost_for_run(
 async def runs_with_cost(
     status_store: RunStatusStore, session: AsyncSession, *, limit: int = _DEFAULT_LIMIT
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Recent runs with per-run spend + the index-page summary cards.
+    """Recent runs (live + archived) with per-run spend + the summary cards.
 
-    One Redis SCAN + one grouped cost query + the in-memory join — no N+1.
-    Returns ``(runs, summary)`` where each run dict carries its ``cost`` block.
-    Best-effort throughout: a Redis OR DB failure degrades to an empty list with
-    zeroed summary rather than raising.
+    Live runs come from Redis (newest-started first); runs Redis has forgotten
+    (their status hash TTL-expired) are reconstructed from ``cost_ledger`` so an
+    operator still sees history. The two sources are de-duplicated by their
+    ``cost_ledger`` key (thread_id / bare run_id): a live run always wins (its
+    status is known), historical rows are appended only for run_ids not already
+    present, until the display reaches ``limit``.
+
+    One Redis SCAN + two grouped cost-ledger queries + the in-memory join — no
+    N+1. Returns ``(runs, summary)`` where each run dict carries its ``cost``
+    block and ``summary`` adds ``runs_total_all`` — the true all-time run count
+    from the unbounded cost index (vs. ``runs_total``, the display-window count).
+    Best-effort: a Redis OR DB failure degrades to empty/zeroed rather than raising.
     """
-    runs = await list_runs(status_store, limit=limit)
+    redis_runs = await list_runs(status_store, limit=limit)
     cost_index = await runs_cost_index(session)
-    for r in runs:
+    historical = await _historical_run_ids(session, limit=limit)
+
+    seen: set[str] = set()
+    for r in redis_runs:
+        seen.update(_run_cost_keys(r))
+    merged: list[dict[str, Any]] = list(redis_runs)
+    for h in historical:
+        if len(merged) >= limit:
+            break
+        key = h["run_id"]
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(_archived_run_view(h))
+
+    for r in merged:
         r["cost"] = _cost_for_run(r, cost_index)
-    summary = await summary_cards(runs, cost_index)
-    return runs, summary
+    summary = await summary_cards(merged, cost_index)
+    summary["runs_total_all"] = len(cost_index)
+    return merged, summary
+
+
+async def _historical_run_ids(session: AsyncSession, *, limit: int) -> list[dict[str, Any]]:
+    """``cost_ledger`` run_ids Redis forgot, newest-activity first (empty on error).
+
+    Each run_id (a graph thread_id) is paired with its first/last ledger row
+    timestamps — approximate bookends for an archived run whose real
+    ``started_at``/``finished_at`` expired with the status hash. ``run_id IS NOT
+    NULL`` skips attribution-less rows (same filter as ``runs_cost_index``).
+    """
+    try:
+        result = await session.execute(
+            sa.select(
+                CostLedger.run_id,
+                sa.func.min(CostLedger.created_at).label("first_at"),
+                sa.func.max(CostLedger.created_at).label("last_at"),
+            )
+            .where(CostLedger.run_id.is_not(None))
+            .group_by(CostLedger.run_id)
+            .order_by(sa.func.max(CostLedger.created_at).desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "run_id": str(row.run_id),
+                "first_at": row.first_at,
+                "last_at": row.last_at,
+            }
+            for row in result.all()
+        ]
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: historical run ids failed: {e}")
+        return []
+
+
+def _bare_run_id(thread_id: str) -> str:
+    """Strip a leading ``api-``/``cli-`` thread-id prefix to the bare run_id."""
+    for prefix in _HISTORICAL_PREFIXES:
+        if thread_id.startswith(prefix):
+            return thread_id[len(prefix):]
+    return thread_id
+
+
+def _archived_run_view(row: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct a RunView-shaped dict for a Redis-forgotten run.
+
+    Same shape as ``_run_to_view``: ``thread_id`` = the cost key (what
+    ``_run_cost_keys`` matches), ``run_id`` = the bare id, ``status="archived"``.
+    Live status / iteration / final output are genuinely unknown for an expired
+    run and left ``None`` (rendered as "—" with an "archived" badge); the
+    timestamps are the first/last ledger rows (approximate bookends).
+    """
+    first_at = row.get("first_at")
+    last_at = row.get("last_at")
+    return {
+        "run_id": _bare_run_id(row["run_id"]),
+        "thread_id": str(row["run_id"]),
+        "status": "archived",
+        "final_output": None,
+        "is_complete": None,
+        "iteration_count": None,
+        "error": None,
+        "started_at": first_at.isoformat() if first_at else "",
+        "finished_at": last_at.isoformat() if last_at else "",
+        "results_dir": None,
+    }
+
+
+async def _archived_run_view_for(session: AsyncSession, run_id: str) -> dict[str, Any] | None:
+    """Reconstruct a single archived run's view (None when unknown to Postgres).
+
+    Looks the run up by every candidate key the UI might pass (the bare id and
+    its ``api-``/``cli-`` thread-id forms); if any has ledger rows, builds the
+    archived view so run-detail renders 200 instead of 404 when a status hash
+    has TTL-expired. Used only on the Redis-miss path in ``dashboard_run_detail``.
+    """
+    candidates = {run_id, f"api-{run_id}", f"cli-{run_id}"}
+    try:
+        result = await session.execute(
+            sa.select(
+                CostLedger.run_id,
+                sa.func.min(CostLedger.created_at).label("first_at"),
+                sa.func.max(CostLedger.created_at).label("last_at"),
+            )
+            .where(CostLedger.run_id.in_(candidates))
+            .group_by(CostLedger.run_id)
+        )
+        row = result.first()
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: archived run lookup failed: {e}")
+        return None
+    if row is None or row.run_id is None:
+        return None
+    return _archived_run_view(
+        {"run_id": str(row.run_id), "first_at": row.first_at, "last_at": row.last_at}
+    )
+
+
+async def cost_by_model(session: AsyncSession, *, limit: int = 8) -> dict[str, Any]:
+    """All-time spend grouped by model (top-N by cost) + the grand total.
+
+    Distinct from ``run_cost_breakdown`` (which is per-run): this is the global
+    cost distribution, for an Overview card. ``total`` is over ALL models (not
+    just the top-N), so a percentage-of-total stays honest. Empty on any failure.
+    """
+    try:
+        result = await session.execute(
+            sa.select(
+                CostLedger.model,
+                sa.func.coalesce(sa.func.sum(CostLedger.cost_usd), 0.0).label("cost_usd"),
+                sa.func.count(CostLedger.id).label("calls"),
+            )
+            .where(CostLedger.model.is_not(None))
+            .group_by(CostLedger.model)
+            .order_by(sa.func.sum(CostLedger.cost_usd).desc())
+        )
+        rows = [
+            {"model": str(r.model), "cost_usd": float(r.cost_usd), "calls": int(r.calls)}
+            for r in result.all()
+        ]
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: cost by model failed: {e}")
+        rows = []
+    total = round(sum(r["cost_usd"] for r in rows), 4)
+    return {"rows": rows[:limit], "total": total}
+
+
+async def memory_summary(session: AsyncSession) -> dict[str, Any]:
+    """Counts across the 3-tier memory (warm by ``memory_type`` + cold total).
+
+    Warm (skills/procedures/workflows/facts/folded) groups by ``memory_type``;
+    cold (episodic, pgvector) is a single total. For an Overview "memories" card.
+    Each sub-total degrades independently on failure.
+    """
+    warm: dict[str, int] = {}
+    try:
+        result = await session.execute(
+            sa.select(WarmMemory.memory_type, sa.func.count(WarmMemory.id)).group_by(
+                WarmMemory.memory_type
+            )
+        )
+        warm = {str(t): int(c) for t, c in result.all() if t is not None}
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: warm memory summary failed: {e}")
+    cold_total = 0
+    try:
+        cold_total = int(
+            (await session.execute(sa.select(sa.func.count(ColdMemory.id)))).scalar() or 0
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: cold memory summary failed: {e}")
+    warm_total = sum(warm.values())
+    return {
+        "warm": warm,
+        "warm_total": warm_total,
+        "cold_total": cold_total,
+        "total": warm_total + cold_total,
+    }
+
+
+async def tool_health(session: AsyncSession, *, limit: int = _DEFAULT_LIMIT) -> list[dict[str, Any]]:
+    """Per-tool health: calls, success/empty rates, avg latency, active state.
+
+    Merges the running aggregates on ``tool_registrations`` (calls /
+    success_rate / empty_output_rate, maintained by ``src/tools/metrics.py``)
+    with the mean latency from ``tool_call_metrics`` (the per-invocation audit
+    trail). Sorted by calls desc so the most-used tools surface first; capped at
+    ``limit``. Empty list on any failure.
+    """
+    latency: dict[str, float] = {}
+    try:
+        result = await session.execute(
+            sa.select(
+                ToolCallMetric.tool_name,
+                sa.func.avg(ToolCallMetric.latency_ms).label("avg_latency_ms"),
+            )
+            .where(ToolCallMetric.latency_ms.is_not(None))
+            .group_by(ToolCallMetric.tool_name)
+        )
+        latency = {str(name): float(avg) for name, avg in result.all() if avg is not None}
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: tool latency failed: {e}")
+    try:
+        result = await session.execute(
+            sa.select(
+                ToolRegistration.tool_name,
+                ToolRegistration.tool_type,
+                ToolRegistration.is_active,
+                ToolRegistration.calls,
+                ToolRegistration.success_rate,
+                ToolRegistration.empty_output_rate,
+                ToolRegistration.created_at,
+            )
+            .order_by(ToolRegistration.calls.desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "tool_name": str(r.tool_name),
+                "tool_type": r.tool_type,
+                "is_active": bool(r.is_active),
+                "calls": int(r.calls or 0),
+                "success_rate": float(r.success_rate) if r.success_rate is not None else None,
+                "empty_output_rate": (
+                    float(r.empty_output_rate) if r.empty_output_rate is not None else None
+                ),
+                "avg_latency_ms": latency.get(str(r.tool_name)),
+                "created_at": r.created_at,
+            }
+            for r in result.all()
+        ]
+    except Exception as e:  # noqa: BLE001 — best-effort
+        logger.warning(f"Dashboard: tool health failed: {e}")
+        return []
 
 
 async def run_cost_breakdown(session: AsyncSession, run_view: dict[str, Any]) -> list[dict[str, Any]]:

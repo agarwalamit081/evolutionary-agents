@@ -24,7 +24,7 @@
   <section>
     <h2>Recent runs <a class="muted small" href="/dashboard/runs">view all →</a></h2>
     <table>
-      <thead><tr><th>run</th><th>status</th><th>iter</th><th>started</th><th>finished</th><th>cost</th><th>calls</th><th>note</th></tr></thead>
+      <thead><tr><th>run</th><th>status</th><th class="num">iter</th><th>started</th><th>finished</th><th class="num">cost</th><th class="num">calls</th><th>note</th></tr></thead>
       <tbody>
         {% include "_runs_rows.html" %}
       </tbody>
@@ -34,7 +34,7 @@
   <section>
     <h2>Recent mutations <a class="muted small" href="/dashboard/mutations">view all →</a></h2>
     <table>
-      <thead><tr><th>type</th><th>target</th><th>status</th><th>A/B</th><th>diff</th><th>when</th></tr></thead>
+      <thead><tr><th>type</th><th>target</th><th>status</th><th class="num">A/B</th><th>diff</th><th>when</th></tr></thead>
       <tbody>
       {% for m in mutations %}
         <tr>

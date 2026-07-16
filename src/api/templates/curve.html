@@ -40,8 +40,8 @@
     <thead>
       <tr>
         <th>goal</th>
-        {% for rid in curve.runs %}<th title="{{ rid }}">{{ rid[:10] }}</th>{% endfor %}
-        <th>avg</th>
+        {% for rid in curve.runs %}<th class="num" title="{{ rid }}">{{ rid[:10] }}</th>{% endfor %}
+        <th class="num">avg</th>
       </tr>
     </thead>
     <tbody>

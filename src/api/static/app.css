@@ -42,6 +42,7 @@ code, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo,
 .muted { color: var(--muted); }
 .small { font-size: 0.82em; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
+.center { text-align: center; }
 .strong { font-weight: 600; }
 
 .topnav {

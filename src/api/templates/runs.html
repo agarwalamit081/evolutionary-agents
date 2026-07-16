@@ -11,7 +11,7 @@
 
 <section>
   <table>
-    <thead><tr><th>run</th><th>status</th><th>iter</th><th>started</th><th>finished</th><th>cost</th><th>calls</th><th>note</th></tr></thead>
+    <thead><tr><th>run</th><th>status</th><th class="num">iter</th><th>started</th><th>finished</th><th class="num">cost</th><th class="num">calls</th><th>note</th></tr></thead>
     {# data-poll: poll.js fetches /dashboard/runs?partial=1 every 5s and swaps
        this tbody's innerHTML with the fresh <tr> rows (HTMX-equivalent). #}
     <tbody data-poll="/dashboard/runs?partial=1" data-poll-interval="5">

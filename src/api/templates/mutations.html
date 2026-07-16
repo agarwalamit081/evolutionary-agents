@@ -18,7 +18,7 @@
   <h2>Evolution &amp; promotion status</h2>
   {% if evolution.live_prompt_promotions %}
   <table>
-    <thead><tr><th>node</th><th>active version</th><th>canary</th><th>promoted at</th></tr></thead>
+    <thead><tr><th>node</th><th>active version</th><th class="num">canary</th><th>promoted at</th></tr></thead>
     <tbody>
       {% for p in evolution.live_prompt_promotions %}
       <tr>
@@ -40,7 +40,7 @@
   <h2>Mutations</h2>
   <table>
     <thead>
-      <tr><th>when</th><th>type</th><th>target</th><th>status</th><th>model</th><th>web</th><th>A/B (n)</th><th>p-value</th><th>significant</th></tr>
+      <tr><th>when</th><th>type</th><th>target</th><th>status</th><th>model</th><th class="center">web</th><th class="num">A/B (n)</th><th class="num">p-value</th><th class="center">significant</th></tr>
     </thead>
     <tbody>
     {% for m in mutations %}
@@ -50,10 +50,10 @@
         <td class="mono" title="{{ m.description }}">{{ (m.target_path or m.description[:40])[:48] }}</td>
         <td><span class="badge badge-{{ m.status }}">{{ m.status }}</span></td>
         <td class="muted mono">{{ m.model_used or "—" }}</td>
-        <td>{% if m.id in mut_web_search %}{{ "✓" if mut_web_search[m.id] else "—" }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="center">{% if m.id in mut_web_search %}{{ "✓" if mut_web_search[m.id] else "—" }}{% else %}<span class="muted">—</span>{% endif %}</td>
         <td class="num">{{ m.sample_size if m.sample_size is not none else "—" }}</td>
         <td class="num">{{ "%.3f"|format(m.p_value) if m.p_value is not none else "—" }}</td>
-        <td>{% if m.is_significant is not none %}{{ "✓" if m.is_significant else "✗" }}{% else %}—{% endif %}</td>
+        <td class="center">{% if m.is_significant is not none %}{{ "✓" if m.is_significant else "✗" }}{% else %}—{% endif %}</td>
       </tr>
       {% if m.has_diff %}
       <tr class="diff-row">
@@ -76,17 +76,17 @@
 <section>
   <h2>Sub-agents spawned</h2>
   <table>
-    <thead><tr><th>name</th><th>tier</th><th>live</th><th>runs</th><th>success</th><th>quality</th><th>web</th><th>owner run</th><th>created</th></tr></thead>
+    <thead><tr><th>name</th><th>tier</th><th class="center">live</th><th class="num">runs</th><th class="num">success</th><th class="num">quality</th><th class="center">web</th><th>owner run</th><th>created</th></tr></thead>
     <tbody>
     {% for s in subagents %}
       <tr>
         <td class="mono" title="{{ s.description }}">{{ s.name }}</td>
         <td><span class="badge badge-type">{{ s.model_tier }}</span></td>
-        <td>{{ "✓" if s.is_active else "✗" }}</td>
+        <td class="center">{{ "✓" if s.is_active else "✗" }}</td>
         <td class="num">{{ s.total_runs }}</td>
         <td class="num">{{ "%.2f"|format(s.success_rate) if s.success_rate is not none else "—" }}</td>
         <td class="num">{{ "%.2f"|format(s.quality_score) if s.quality_score is not none else "—" }}</td>
-        <td>{% if s.owner_run_id %}{{ "✓" if s.owner_run_id in sub_web_search else "—" }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="center">{% if s.owner_run_id %}{{ "✓" if s.owner_run_id in sub_web_search else "—" }}{% else %}<span class="muted">—</span>{% endif %}</td>
         <td class="muted mono">{{ s.owner_run_id or "—" }}</td>
         <td class="muted">{{ s.created_at[:19] }}</td>
       </tr>

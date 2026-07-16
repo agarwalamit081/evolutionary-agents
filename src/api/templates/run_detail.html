@@ -48,7 +48,7 @@
 <section>
   <h2>Cost by model</h2>
   <table>
-    <thead><tr><th>model</th><th>calls</th><th>tokens</th><th>cost</th></tr></thead>
+    <thead><tr><th>model</th><th class="num">calls</th><th class="num">tokens</th><th class="num">cost</th></tr></thead>
     <tbody>
     {% for c in cost_breakdown %}
       <tr>
@@ -84,7 +84,7 @@
 <section>
   <h2>Execution steps <span class="muted small">(auto-refresh 3s)</span></h2>
   <table>
-    <thead><tr><th>#</th><th>phase</th><th>status</th><th>duration</th><th>time</th></tr></thead>
+    <thead><tr><th class="num">#</th><th>phase</th><th>status</th><th class="num">duration</th><th>time</th></tr></thead>
     <tbody data-poll="/dashboard/runs/{{ run.run_id }}/steps?partial=1" data-poll-interval="3">
       {% include "_steps_rows.html" %}
     </tbody>

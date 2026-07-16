@@ -121,6 +121,14 @@ class TestRunVerifyModels:
     def test_default_models_when_none_named(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The default set is derived from the live tier maps, not a hardcoded
+        # tuple, so it tracks primary swaps automatically. Assert the real
+        # routing primaries + the #783 cross-provider fallback are all smoked.
+        defaults = main_mod._default_smoke_models()
+        assert "glm-5.2" in defaults  # COMPLEX/CRITICAL + plan/execute primary
+        assert "openrouter-glm-5-2" in defaults  # #783 cross-provider fallback
+        assert len(defaults) >= 4  # ≥ one primary per tier + default + fallback
+
         seen: list[str] = []
 
         def record(model: str) -> object:
@@ -130,22 +138,27 @@ class TestRunVerifyModels:
         _patch_gateway(monkeypatch, record)
         result = click.testing.CliRunner().invoke(main_mod.main, ["--verify-models"])
         assert result.exit_code == 0
-        assert "qwen3.5-flash" in seen
-        assert "qwen3.7-plus" in seen
-        assert "2/2 healthy" in result.output
+        assert set(seen) == set(defaults)
+        assert f"{len(defaults)}/{len(defaults)} healthy" in result.output
 
     def test_mixed_pass_fail_returns_1(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        defaults = main_mod._default_smoke_models()
+        # Fail exactly one model guaranteed to be in the derived default set.
+        fail_model = "glm-5.2"
+        assert fail_model in defaults  # guards the test premise
+
         def mixed(model: str) -> object:
-            if model == "qwen3.7-plus":
+            if model == fail_model:
                 raise RuntimeError("timeout")
             return _ok_resp(model)
 
         _patch_gateway(monkeypatch, mixed)
         result = click.testing.CliRunner().invoke(main_mod.main, ["--verify-models"])
         assert result.exit_code == 1
-        assert "1/2 healthy" in result.output
+        expected_ok = len(defaults) - 1
+        assert f"{expected_ok}/{len(defaults)} healthy" in result.output
 
     def test_failure_output_scrubs_secrets(
         self, monkeypatch: pytest.MonkeyPatch

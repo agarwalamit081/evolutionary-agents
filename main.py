@@ -565,8 +565,47 @@ async def _run_score_spec(spec_id: str, deliverables: list[str]) -> int:
     return 0 if result.passed else 1
 
 
-_VERIFY_DEFAULT_MODELS: tuple[str, ...] = ("qwen3.5-flash", "qwen3.7-plus")
 _VERIFY_PROMPT = "Reply with exactly one word: pong"
+
+
+def _default_smoke_models() -> tuple[str, ...]:
+    """Drift-proof default model set for ``--verify-models``.
+
+    Derived from the live routing tier maps — NOT a hardcoded tuple — so a
+    primary swap (e.g. glm-5.1 → glm-5.2, qwen3.5-flash → qwen3.6-flash) is
+    reflected automatically. The prior static list silently covered only 2 of
+    ~10 live models and went stale the moment the COMPLEX/CRITICAL primary
+    moved to glm-5.2.
+
+    Covers, deduped: every configured routing primary (``COMPLEXITY_TIER_MAP``
+    + per-node ``NODE_TIER_MAP``), the defensive ``DEFAULT_COMPLEXITY_TIER``
+    (covers the re-enabled Anthropic path for an unmapped complexity), and the
+    first cross-provider fallback of the COMPLEX primary (the #783 provider-
+    diversity / storm-resilience chain — the one path the bare primaries never
+    exercise).
+
+    Map-derived rather than key-aware ``route()`` on purpose: a configured
+    primary whose provider key is missing/broken must be EXPOSED by a failed
+    ping, not silently skipped to its fallback. Catching a dead chain entry
+    before it burns retry slots in real runs is the whole point of the smoke.
+    """
+    from src.config.model_registry import FALLBACK_CHAINS
+    from src.graph.enums import TaskComplexity
+    from src.llm.model_router import (
+        COMPLEXITY_TIER_MAP,
+        DEFAULT_COMPLEXITY_TIER,
+        NODE_TIER_MAP,
+    )
+
+    keys: dict[str, None] = {}
+    for _, chain_key in (*COMPLEXITY_TIER_MAP.values(), *NODE_TIER_MAP.values()):
+        keys.setdefault(chain_key, None)
+    keys.setdefault(DEFAULT_COMPLEXITY_TIER[1], None)
+    complex_primary = COMPLEXITY_TIER_MAP.get(TaskComplexity.COMPLEX, (None, ""))[1]
+    chain = FALLBACK_CHAINS.get(complex_primary, [])
+    if chain:
+        keys.setdefault(chain[0], None)
+    return tuple(keys)
 
 
 def _scrub_secrets(msg: str, *keys: str) -> str:
@@ -600,7 +639,7 @@ async def _run_verify_models(names: list[str]) -> int:
 
     settings = get_settings()
     gateway = LLMGateway(settings)
-    models = tuple(names) or _VERIFY_DEFAULT_MODELS
+    models = tuple(names) or _default_smoke_models()
 
     click.echo("=" * 60)
     click.echo(f"🔌 Model smoke — {len(models)} model(s) via gateway routing")

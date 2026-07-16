@@ -519,6 +519,108 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         input_cost_per_1k=0.0,
         output_cost_per_1k=0.0,
     ),
+    # ── OpenRouter (same-model cross-provider fallbacks) ──────────
+    # PAID OpenRouter copies of the storm-relevant primaries (zai glm, anthropic
+    # claude, deepseek), so a single-provider outage — the ZAI quota/rate-limit
+    # storm that burned battery-04 q08 — is survived by serving the SAME model
+    # via a DIFFERENT provider + API key. litellm routes the ``openrouter/``
+    # prefix natively (no shim, unlike NVIDIA); every slug + the funded
+    # OPENROUTER_API_KEY verified live 2026-07-16. OpenRouter charges ~the
+    # upstream rate (small markup), so cost fields mirror the native model
+    # (cost-estimate only). These are the FIRST cross-provider hop in each
+    # same-model-first chain — see FALLBACK_CHAINS (glm-5.2 → openrouter-glm-5-2
+    # → nvidia-glm-5-2 → glm-5.1 → claude-sonnet-4-6 → deepseek-v4-pro).
+    "openrouter-glm-5-2": ModelSpec(
+        model_id="openrouter/z-ai/glm-5.2",
+        provider="openrouter",
+        tier=ModelTier.MODERATE,
+        max_context=1_000_000,
+        max_output=128_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=False,  # mirrors zai/glm-5.2 (text INPUT only)
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.003,
+    ),
+    "openrouter-glm-5-1": ModelSpec(
+        model_id="openrouter/z-ai/glm-5.1",
+        provider="openrouter",
+        tier=ModelTier.MODERATE,
+        max_context=200_000,
+        max_output=131_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=False,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.003,
+    ),
+    "openrouter-glm-4-7": ModelSpec(
+        model_id="openrouter/z-ai/glm-4.7",
+        provider="openrouter",
+        tier=ModelTier.MODERATE,
+        max_context=128_000,
+        max_output=128_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=True,  # mirrors zai/glm-4.7
+        input_cost_per_1k=0.0005,
+        output_cost_per_1k=0.001,
+    ),
+    "openrouter-claude-sonnet-4-6": ModelSpec(
+        model_id="openrouter/anthropic/claude-sonnet-4.6",
+        provider="openrouter",
+        tier=ModelTier.MODERATE,
+        max_context=1_000_000,
+        max_output=128_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=True,  # mirrors claude-sonnet-4-6
+        input_cost_per_1k=0.003,
+        output_cost_per_1k=0.015,
+    ),
+    "openrouter-claude-haiku-4-5": ModelSpec(
+        model_id="openrouter/anthropic/claude-haiku-4.5",
+        provider="openrouter",
+        tier=ModelTier.CHEAP,
+        max_context=200_000,
+        max_output=64_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=True,  # mirrors claude-haiku-4-5-20251001
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.005,
+    ),
+    "openrouter-deepseek-v4-flash": ModelSpec(
+        model_id="openrouter/deepseek/deepseek-v4-flash",
+        provider="openrouter",
+        tier=ModelTier.CHEAP,
+        max_context=128_000,
+        max_output=384_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=False,  # mirrors deepseek-v4-flash (text only)
+        input_cost_per_1k=0.0001,
+        output_cost_per_1k=0.0004,
+    ),
+    "openrouter-deepseek-v4-pro": ModelSpec(
+        model_id="openrouter/deepseek/deepseek-v4-pro",
+        provider="openrouter",
+        tier=ModelTier.MODERATE,
+        max_context=128_000,
+        max_output=384_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=False,
+        input_cost_per_1k=0.0005,
+        output_cost_per_1k=0.002,
+    ),
     # ── Ollama (Local) ────────────────────────────────────────────
     "ollama/qwen3.5:latest": ModelSpec(
         model_id="ollama/qwen3.5:latest",
@@ -631,8 +733,28 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
     # NVIDIA free tier — models from other providers hosted on NVIDIA API
     # EXPENSIVE_MODEL: explicitly requested — free via NVIDIA API, not paid provider
+    # NOTE: nvidia/z-ai/glm-5.1 returns 410 Gone (NVIDIA de-listed it; live-probed
+    # 2026-07-16) — it is a DEAD primary now, kept only because
+    # tests/test_llm/test_model_registry_routing.py asserts its presence. The
+    # glm-5.1 native (zai) entry is unaffected. Remove this spec + that test
+    # assertion in a follow-up cleanup.
     "nvidia-glm-5-1": ModelSpec(
         model_id="nvidia/z-ai/glm-5.1",
+        provider="nvidia",
+        tier=ModelTier.VERY_CHEAP,
+        max_context=128_000,
+        max_output=65_000,
+        supports_tool_calling=True,
+        supports_json_mode=True,
+        supports_streaming=True,
+        supports_images=False,
+    ),
+    # NVIDIA-hosted FREE copy of glm-5.2 — the same-model second cross-provider
+    # hop in the glm-5.2 chain (after the paid openrouter-glm-5-2). Verified live
+    # 2026-07-16 via the app path (gateway → nvidia_shim_model_id → openai/<id>
+    # @ NVIDIA_API_BASE). FREE on the NVIDIA API, so cost defaults to 0.0.
+    "nvidia-glm-5-2": ModelSpec(
+        model_id="nvidia/z-ai/glm-5.2",
         provider="nvidia",
         tier=ModelTier.VERY_CHEAP,
         max_context=128_000,
@@ -884,9 +1006,16 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
     # 1M-context planner peer; falls to its same-family successor first, then the
     # same cross-provider net as glm-5.1.
     "glm-5.2": [
+        # Same-model cross-provider FIRST (storm-resilience): if zai/glm-5.2 quota
+        # or rate-limits (the battery-04 q08 killer), serve the SAME model via
+        # OpenRouter (paid, funded OPENROUTER_API_KEY) then NVIDIA (free), so a
+        # single-provider outage degrades to an equivalent model instead of
+        # burning straight to the expensive Anthropic hop. Then the same-family
+        # successor + cross-provider net. All entries verified live 2026-07-16.
+        "openrouter-glm-5-2",
+        "nvidia-glm-5-2",
         "glm-5.1",
         "claude-sonnet-4-6",
-        "glm-4.7",
         "deepseek-v4-pro",
     ],
     "mistral-medium-3-5": [
@@ -991,6 +1120,60 @@ FALLBACK_CHAINS: dict[str, list[str]] = {
         "nvidia-qwen3-next-80b",
         "nvidia-llama-3.3-70b",
         "qwen3.5-flash",
+    ],
+    # ── OpenRouter same-model fallback chains ─────────────────────
+    # Each OpenRouter copy reaches the NATIVE provider's same model first (a
+    # quota block on OpenRouter is independent of the native provider's quota),
+    # then the cross-provider peers it mirrors. Mirrors the same-model-first
+    # intent of the glm-5.2 chain above.
+    "openrouter-glm-5-2": [
+        "glm-5.2",
+        "nvidia-glm-5-2",
+        "glm-5.1",
+        "claude-sonnet-4-6",
+    ],
+    "openrouter-glm-5-1": [
+        "glm-5.1",
+        "openrouter-glm-5-2",
+        "glm-4.7",
+        "deepseek-v4-pro",
+    ],
+    "openrouter-glm-4-7": [
+        "glm-4.7",
+        "openrouter-glm-5-2",
+        "deepseek-v4-pro",
+        "glm-5-turbo",
+    ],
+    "openrouter-claude-sonnet-4-6": [
+        "claude-sonnet-4-6",
+        "deepseek-v4-pro",
+        "glm-5-turbo",
+        "kimi-k2.6",
+    ],
+    "openrouter-claude-haiku-4-5": [
+        "claude-haiku-4-5-20251001",
+        "deepseek-v4-flash",
+        "qwen3.7-plus",
+        "glm-4.5-air",
+    ],
+    "openrouter-deepseek-v4-flash": [
+        "deepseek-v4-flash",
+        "alibaba-deepseek-v4-flash",
+        "nvidia-deepseek-v4-flash",
+        "claude-haiku-4-5-20251001",
+    ],
+    "openrouter-deepseek-v4-pro": [
+        "deepseek-v4-pro",
+        "claude-sonnet-4-6",
+        "glm-5-turbo",
+        "kimi-k2.6",
+    ],
+    # NVIDIA-hosted glm-5.2: free same-model hop, then the native paid peers.
+    "nvidia-glm-5-2": [
+        "openrouter-glm-5-2",
+        "glm-5.2",
+        "glm-5.1",
+        "nvidia-deepseek-v4-pro",
     ],
 }
 

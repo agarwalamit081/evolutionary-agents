@@ -182,6 +182,21 @@ are **off by default**; the few on-by-default are marked. Set them in `.env`.
 | `VISION_ENABLED` | `false` | **Phase 5c** — image/vision extraction. A goal carrying `images=[...]` (e.g. the `vision_extract` golden goal over `tests/fixtures/vision_sample.png`, which is *not* in the nightly battery) routes through a vision-capable model: the gateway restricts the fallback chain to `ModelSpec.supports_images` and builds text+image content blocks. Accepts `http(s)://` URLs or `data:image/...;base64,` data-URIs (local paths are best-effort converted). |
 | `GRAPH_ENABLED` + `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` | `false` | **Phase 5b** — Neo4j entity/relation graph mirror (`src/memory/graph.py`, lazy driver, never raises). `MemoryManager` write hooks mirror structured records (skills/procedures/workflows, facts, sub-agent defs) as nodes/edges (`DEPENDS_ON`, etc.) so relationship queries ("which skills depend on X?") the relational + pgvector stores can't express become a Cypher `MATCH`. Compose service `neo4j` lives under the `graph` profile. Apache AGE (Cypher-over-Postgres, no extra service) is deferred — Neo4j satisfies the graph tier. |
 
+> **Implementation status (experimental techniques + Lean 4).** The five experimental
+> prompting techniques (Self-Debugging, Gödel-Agent, WebDreamer, Absolute-Zero,
+> Adversarial-Debate) and the `lean4_runner` tool listed above are **implemented but
+> opt-in/default-off**. The technique prompting bodies live in `src/graph/techniques/` (a
+> top-level package under `graph/`, wired into `TechniqueSelector` behind
+> `EXPERIMENTAL_TECHNIQUES_ENABLED` + one flag per technique); flags-off ⇒ the technique
+> registry is byte-identical to the curated base, and each technique's full multi-turn
+> controller is **deferred** (`apply()` raises `TechniqueDeferredError`). `lean4_runner` is
+> a real opt-in tool, not a wired verify-node verification backbone. **None has been enabled
+> in any experiment**, so their benefit is currently untested — turn either on to measure
+> it. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) +
+> [`docs/design-docs/09-llm-integration.md`](docs/design-docs/09-llm-integration.md) /
+> [`14-tool-system.md`](docs/design-docs/14-tool-system.md) /
+> [`20-evaluation-benchmark.md`](docs/design-docs/20-evaluation-benchmark.md).
+
 Operational scripts added this sweep: `scripts/cve_sweep.py` (non-fatal `pip-audit` CVE sweep
 over `requirements*.txt`, JSON to `logs/`, #19) and `scripts/analyze_vector_queries.py`
 (read-only `EXPLAIN ANALYZE` over the HNSW-backed tables, #20).

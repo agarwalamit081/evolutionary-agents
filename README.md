@@ -5,9 +5,8 @@ improves its reasoning, tooling, memory, and workflow through autonomous mutatio
 A/B testing, and skill crystallization. All LLM calls flow through **litellm** (10+
 providers) with cost-aware, complexity-based routing; **PostgreSQL + pgvector** is the
 sole database; **Redis** holds hot memory and caches; and every knob is a
-**pydantic-settings** env var. For the full architectural narrative, see
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); per-subsystem depth lives in
-[`docs/design-docs/`](docs/design-docs/).
+**pydantic-settings** env var. For the full architectural narrative and per-subsystem
+depth, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -51,8 +50,8 @@ cp .env.example .env
 ### 3. Run (host alternative to the container stack)
 
 ```bash
-# Activate the project virtualenv. Do NOT use `uv run` (blocked by an upstream vllm dep).
-source /home/amiagarw/aiml01/bin/activate
+# Activate a project virtualenv (do NOT use `uv run` — blocked by an upstream vllm dep).
+source .venv/bin/activate   # adjust to wherever your project virtualenv lives
 
 python main.py --goal "Research the latest developments in LangGraph"
 ```
@@ -106,27 +105,24 @@ START → classify → plan → retrieve_memory → [disambiguate? → structure
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for Mermaid diagrams and the design
 rationale.
 
-### Subsystems (design-doc deep-dives)
+### Subsystems
 
-| Subsystem | Design doc |
-|-----------|------------|
-| Model selection & cost tiers | [`02-model-selection.md`](docs/design-docs/02-model-selection.md) |
-| LLM gateway (litellm, circuit breaker, rate limiter) | [`13-llm-gateway.md`](docs/design-docs/13-llm-gateway.md) |
-| Workflow / StateGraph nodes | [`06-workflow-design.md`](docs/design-docs/06-workflow-design.md) |
-| 3-tier memory (Hot/Warm/Cold + folding) | [`08-memory-system.md`](docs/design-docs/08-memory-system.md) |
-| Tools (23 built-ins + runtime generation) | [`14-tool-system.md`](docs/design-docs/14-tool-system.md) |
-| Sub-agent delegation | [`18-sub-agent-system.md`](docs/design-docs/18-sub-agent-system.md) |
-| Self-evolution engine | [`07-self-evolution-engine.md`](docs/design-docs/07-self-evolution-engine.md) |
-| Safety guardrails (7-layer) | [`10-safety-guardrails.md`](docs/design-docs/10-safety-guardrails.md) |
-| Evaluation & benchmark | [`20-evaluation-benchmark.md`](docs/design-docs/20-evaluation-benchmark.md) |
-| Deployment (role-split containers) | [`11-deployment.md`](docs/design-docs/11-deployment.md) |
-| Configuration reference | [`03-environment-config.md`](docs/design-docs/03-environment-config.md) |
-| State schema | [`12-state-schema.md`](docs/design-docs/12-state-schema.md) |
-| Database schema (PostgreSQL + pgvector) | [`04-database-schema.md`](docs/design-docs/04-database-schema.md) |
-| Error handling & resilience | [`16-error-handling.md`](docs/design-docs/16-error-handling.md) |
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the authoritative specification for the
+project — when code and docs conflict, the docs are correct. At a glance:
 
-> The 20 docs in `docs/design-docs/` are the **authoritative specification** for this
-> project. When code and docs conflict, the docs are correct.
+- **Model selection & cost tiers** — complexity-tiered routing across 10+ providers
+- **LLM gateway** — litellm wrapper, circuit breaker, rate limiter, fallback chains
+- **Workflow** — LangGraph StateGraph (classify → plan → execute → verify → evolve)
+- **3-tier memory** — Hot (Redis) / Warm (Postgres) / Cold (pgvector) with folding
+- **Tools** — 23 built-ins + runtime tool generation
+- **Sub-agent delegation** — spawn/delegate specialized sub-agents
+- **Self-evolution engine** — A/B-tested prompt/tool/skill mutation + promotion
+- **Safety guardrails** — 7-layer behavioral safety gate
+- **Evaluation & benchmark** — Battery-04 golden suite + capability-curve regression
+- **Deployment** — role-split containers (api / worker / runner)
+- **Configuration** — pydantic-settings; every knob in `.env` (template: `.env.example`)
+- **State schema** + **PostgreSQL + pgvector database schema**
+- **Error handling & resilience** — tenacity retry, circuit breakers, budget caps
 
 ---
 
@@ -141,8 +137,8 @@ OPENAI_API_KEY=sk-... python -m pytest tests/ -v
 ```
 
 Tests mirror `src/`; LLM calls are mocked via `litellm.acompletion` for determinism. E2E
-tests (`@pytest.mark.e2e`) make real provider calls. Use the `aiml01` virtualenv, not
-`uv run`.
+tests (`@pytest.mark.e2e`) make real provider calls. Use a plain virtualenv (not `uv run`,
+which is blocked by an upstream vllm dep).
 
 ### Local quality gate
 
@@ -163,7 +159,7 @@ gate flaky). Bypass with `git commit --no-verify` for WIP.
 All configuration is loaded via **pydantic-settings** `BaseSettings` classes from `.env`
 (or environment variables) — no `os.environ` in application code. The complete template is
 in [`.env.example`](.env.example); every settings class and validator is documented in
-[`docs/design-docs/03-environment-config.md`](docs/design-docs/03-environment-config.md).
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and annotated inline in `.env.example`.
 
 ### Opt-in capability flags
 
@@ -192,10 +188,7 @@ are **off by default**; the few on-by-default are marked. Set them in `.env`.
 > controller is **deferred** (`apply()` raises `TechniqueDeferredError`). `lean4_runner` is
 > a real opt-in tool, not a wired verify-node verification backbone. **None has been enabled
 > in any experiment**, so their benefit is currently untested — turn either on to measure
-> it. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) +
-> [`docs/design-docs/09-llm-integration.md`](docs/design-docs/09-llm-integration.md) /
-> [`14-tool-system.md`](docs/design-docs/14-tool-system.md) /
-> [`20-evaluation-benchmark.md`](docs/design-docs/20-evaluation-benchmark.md).
+> it. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Operational scripts added this sweep: `scripts/cve_sweep.py` (non-fatal `pip-audit` CVE sweep
 over `requirements*.txt`, JSON to `logs/`, #19) and `scripts/analyze_vector_queries.py`
@@ -219,7 +212,8 @@ defaults; production behavior is unchanged until set in `.env`.
 
 The battery-04 suite (9 goals, suffix-isolated run_ids) is scored by the eval harness
 (`python main.py --eval`) and trended via `src/eval/curve.py`. Score = mean of all eval rows
-in each goal's latest attempt, then mean-of-per-goal-means. Results live in `logs/curve_*.json`:
+in each goal's latest attempt, then mean-of-per-goal-means. Results are written to `logs/curve_*.json` at run time
+(local only — not tracked in this public repo):
 
 | Curve | Suffix | Battery mean | Ex-q06 | Change |
 |-------|--------|--------------|--------|--------|
@@ -297,7 +291,7 @@ seed-3) — non-informative in both directions. The verdict rule requires seed-1
 → NOT clean/unanimous PROVEN**. The multi-seed test therefore **confirms** the single-seed
 Phase-2 verdict (RECOVERY + qualified-yes) rather than upgrading it: self-improvement is
 weakly-positive-qualified across seeds, not cleanly proven. (Per-run `$1.2` / `1.5M`-token
-caps held fixed; see `logs/n3_baseline_seed2_seed3.md`.)
+caps held fixed.)
 
 #### Phase F — 3-seed self-improvement test on the cleaned image (2026-07-17/19)
 
@@ -351,8 +345,7 @@ fitness-improving prompts adopt (the highest-leverage fix). (3) Verify-loop chur
 (re-verify without a score-improvement gate) burns budget and sometimes degrades — this is
 #600 (eval-score-gated verify convergence), still deferred. (4) High variance + low n — more
 seeds (n≥5–10) and harder, non-ceiling battery goals would give headroom to show gains.
-Full analysis: `docs/findings-001.md` §C3 + the `phasef-3seed-verdict` memory; per-seed
-detail in `logs/`. Spend ~$54 of a `$60` pool.
+Spend ~$54 of a `$60` pool.
 
 ---
 

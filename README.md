@@ -284,6 +284,61 @@ Phase-2 verdict (RECOVERY + qualified-yes) rather than upgrading it: self-improv
 weakly-positive-qualified across seeds, not cleanly proven. (Per-run `$1.2` / `1.5M`-token
 caps held fixed; see `logs/n3_baseline_seed2_seed3.md`.)
 
+#### Phase F — 3-seed self-improvement test on the cleaned image (2026-07-17/19)
+
+The decisive test of the thesis on the **cleaned image** `fef50596860f` (post dead-code /
+config-drift sweep, Phases A–E): 3 independent seeds × a full G0→G1→G2 curve, `glm-5.2`
+primary + Anthropic-on stack, channel-B OFF→ON→ON, no `clean_state` between gens (each
+inherits the prior's tools/skills/facts/cold + evolved prompts), clean only at seed
+boundaries. Scored terminal-state, suffix-scoped (`scripts/run_metrics.py` +
+`scripts/generation_compare.py`). **Thesis: does G2 ≥ G0?**
+
+| Seed | G0 | G1 | G2 | Δ G0→G2 | read |
+|------|--------|--------|--------|---------|------|
+| seed-1 | 0.8398 | 0.8398 | 0.8389 | −0.0009 | flat (PASS, within noise) |
+| seed-2 | 0.9554 | 0.8344 | 0.8669 | −0.0885 | G1 collapsed, G2 only partly recovered (FAIL) |
+| seed-3 | 0.8477 | 0.8775 | 0.9574 | **+0.1097** | monotonic up, zero regressions (PASS — strongest) |
+| **mean Δ** | | | | **+0.007** | **2/3 pass** |
+
+**Verdict — qualified-positive, not clean-proven.** 2/3 seeds recover G2≥G0; the tiebreaker
+(seed-3) shifted the picture from lean-negative to lean-positive, but seed-2 fails and the
+cross-seed variance is high (+0.110 vs −0.089 from the same protocol and frozen image). At
+n=3 the paired Wilcoxon is underpowered (p-floor, CI straddling zero) → descriptive, not
+confirmatory; n≥5–10 seeds would be needed to call it statistically.
+
+**The robust signal is efficiency, not quality.** Every seed's G2 was cheaper/faster than
+its G0 — seed-3: −23% cost, −20% tokens, −166 LLM calls, −26% wall-time; seed-2: −103
+calls; seed-1: −9% cost. Crucially this is *not* a cache artifact: the hit-rate *fell* in
+seed-2/3 yet cost still dropped, so G2 makes fewer, more effective calls (accumulated
+tools/skills doing less redundant work). This self-improvement fires reliably **3/3**.
+
+**The quality signal is dominated by two budget-lottery goals.** 6 of 9 goals (q02/q03/
+q05/q07/q09, sometimes q04) are pinned at the 1.0 ceiling and cannot improve; only q01/q06/
+q08 have headroom, and they are the three most budget-cap-prone goals. The standout: **q06
+is a mirror image** — seed-2's q06 went 0.867→0.356 (−0.511) while seed-3's went
+0.356→0.867 (+0.511), the *same two outcomes in opposite generations*. q06 is bimodal
+(≈0.87 when it converges before the `$1.2`/attempt cap, ≈0.36 when it doesn't), so seed-3's
+"win" and seed-2's "loss" are substantially the same q06 coin-flip read in opposite
+directions. Stripping q06 (score the 8 feasible goals) keeps the 2/3 pattern but roughly
+halves the magnitude (seed-3 +0.060, seed-2 −0.036, seed-1 −0.001).
+
+**Channel-B (prompt promotion) fires without a quality gradient.** It promoted on every
+seed (seed-1: 5→11 execute promotions) and every promotion passed the canary — yet produced
+no consistent quality lift. The canary gates on "converges on a proxy goal," never "scores
+higher on the real battery," so evolved prompts accumulate without a fitness→quality link.
+The evolution machinery is sound; the *fitness function* is the weak link.
+
+**Bottlenecks & resolutions.** (1) The `$1.2`/attempt cap terminates hard goals (q06
+especially) before convergence → bimodal, dominates the mean — *do not raise the cap to
+rescue q06* (it would confound cost); instead report q06 separately as an apparatus limit
+and score the 8 feasible goals. (2) Channel-B needs a task-quality A/B gate so only
+fitness-improving prompts adopt (the highest-leverage fix). (3) Verify-loop churn on q01/q08
+(re-verify without a score-improvement gate) burns budget and sometimes degrades — this is
+#600 (eval-score-gated verify convergence), still deferred. (4) High variance + low n — more
+seeds (n≥5–10) and harder, non-ceiling battery goals would give headroom to show gains.
+Full analysis: `docs/findings-001.md` §C3 + the `phasef-3seed-verdict` memory; per-seed
+detail in `logs/`. Spend ~$54 of a `$60` pool.
+
 ---
 
 ## License

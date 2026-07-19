@@ -127,9 +127,9 @@ flowchart TD
     class exec_router,reflect_router,tc_router,v_router decision
 ```
 
-### Built-in Tools (22)
+### Built-in Tools (23)
 
-The agent starts with 22 built-in tools (`ALL_TOOL_DEFINITIONS` in `src/tools/builtin/__init__.py`), spread across 20 module files — `corpus.py` exports both `index_corpus` + `corpus_search`, and `git_clone.py` exports both `git_clone` + `code_search`. Each carries coarse capability `tags` plus MCP-style hints (`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`):
+The agent starts with 23 built-in tools (`ALL_TOOL_DEFINITIONS` in `src/tools/builtin/__init__.py`), spread across 21 module files — `corpus.py` exports both `index_corpus` + `corpus_search`, and `git_clone.py` exports both `git_clone` + `code_search` (the two double-export modules). Each carries coarse capability `tags` plus MCP-style hints (`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`):
 
 | Tool | Purpose |
 |---|---|
@@ -145,6 +145,7 @@ The agent starts with 22 built-in tools (`ALL_TOOL_DEFINITIONS` in `src/tools/bu
 | `arxiv_search` | Search arXiv (so it isn't re-created every run) |
 | `git_clone` / `code_search` | SSRF-guarded clone + AST chunking → pgvector → semantic code search |
 | `index_corpus` / `corpus_search` | Index + semantically search an arbitrary text corpus |
+| `lean4_runner` | Execute / type-check Lean 4 proofs in an isolated runner |
 | `environment_inspect` / `get_current_time` / `self_inspect` | Runtime/time/source introspection |
 | `memory_search` | Query 3-tier memory (Redis, PostgreSQL, pgvector) |
 | `create_scheduled_task` | Set an agent-owned durable cron task (Phase 5 I1) |
@@ -226,7 +227,10 @@ flowchart TD
     disamb -- "No" --> plan["plan"]:::blue
     dis --> plan
     plan --> retrieve["retrieve_memory"]:::blue
-    retrieve --> struct["structure_analysis<br/><i>Proactive gap seeding</i>"]:::blue
+    retrieve --> res_r{{"Research loop?<br/>(opt-in)"}}
+    res_r -- "Yes" --> res["research<br/>(multi-hop)"]:::blue
+    res --> struct["structure_analysis<br/><i>Proactive gap seeding</i>"]:::blue
+    res_r -- "No" --> struct
     struct --> struct_r{{"Proactive gaps?"}}
     struct_r -- "Agent intent" --> spawn["agent_spawn"]:::green
     struct_r -- "Tool intent" --> tc["tool_create"]:::orange
@@ -287,7 +291,7 @@ flowchart TD
     classDef purple fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000
     classDef gray fill:#f5f5f5,stroke:#616161,stroke-width:2px,color:#000
     classDef decision fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000
-    class disamb,struct_r,exec_r,reflect_r,spawn_r,tc_r,del_r,verify_r,evolve_r,store_r,hitl_r,error_r decision
+    class disamb,res_r,struct_r,exec_r,reflect_r,spawn_r,tc_r,del_r,verify_r,evolve_r,store_r,hitl_r,error_r decision
 ```
 
 ### Sub-Agent Spawning Pipeline
@@ -418,7 +422,7 @@ Observations and lessons from each run are stored in warm + cold memory tiers an
 
 ### 4. Graph Cycles Correctly
 
-The graph correctly handles multiple `plan -> execute -> reflect -> spawn -> delegate` cycles within a single invocation. The `Annotated[list, operator.add]` reducer accumulates state across cycles, and conditional edges route correctly across the 16 registered nodes (including the opt-in `disambiguate` gate and `lats_search`).
+The graph correctly handles multiple `plan -> execute -> reflect -> spawn -> delegate` cycles within a single invocation. The `Annotated[list, operator.add]` reducer accumulates state across cycles, and conditional edges route correctly across the 17 registered nodes (`classify`, `disambiguate`, `plan`, `retrieve_memory`, `research`, `structure_analysis`, `execute`, `reflect`, `lats_search`, `verify`, `evolve`, `store_memory`, `tool_create`, `agent_spawn`, `delegate`, `hitl_gate`, `error_handler`).
 
 ### 5. Sub-Agent Delegation Is Reliable
 
@@ -692,7 +696,7 @@ if the stream is empty.
 
 ### Battery-04 Production Hardening
 
-The production-robustness pass (see [`docs/validation-battery-04.md`](validation-battery-04.md))
+The production-robustness pass (see [`docs/findings-001.md`](findings-001.md))
 added a correctness + robustness layer over the existing process metrics:
 
 - **Typed correctness eval harness** (`src/eval/{checks,golden,store}.py`) — six check families:
@@ -723,6 +727,61 @@ added a correctness + robustness layer over the existing process metrics:
   via `EVOLUTION_PROMOTE_TO_LIVE`.
 - **Centralized config** — every resilience/circuit-breaker/rate-limiter/tool-limit/concurrency value is a
   `pydantic-settings` env var (no hardcoded timeouts/caps in source).
+
+### What's New (2026-07)
+
+- **Operator Dashboard** — a FastAPI + Jinja2 + HTMX UI is served at `/dashboard` (host port **8800**) by
+  `src/api/routes/dashboard.py` (+ data-access layer `src/api/routes/dashboard_data.py`). The runs list merges
+  live Redis runs with archived runs reconstructed from `cost_ledger` (deduped by cost key, since status hashes
+  TTL-expire while cost/steps/eval persist); the summary exposes an all-time `runs_total_all` + true total spend,
+  and run-detail (and the polled `…/steps?partial=1`) reconstructs an archived view from Postgres on a Redis miss
+  (200, not 404). A `/dashboard/tools` page surfaces tool health. **Opt-in auth gate** (`DashboardSettings` in
+  `src/config/settings.py`): `DASHBOARD_API_KEY` empty/unset = open (byte-identical to the prior local-dev
+  behavior); set it to require a constant-time `X-Dashboard-Key` header on every `/dashboard*` route (router-level
+  dependency `_require_dashboard_key`), and `create_app` logs a WARNING at boot when open so an exposed dashboard is
+  never silent. `ToolPersister.list_tools` is bounded by `DASHBOARD_TOOLS_MAX_ROWS` (200).
+- **Memory consolidation (Q81–84)** — `MemorySettings` (env `memory_*`) adds four opt-in consolidation levers in
+  `src/memory/`: reciprocal-rank-fusion across retrieval sources (`fusion.py`), a similarity threshold for
+  near-duplicate rejection, store-time dedup, and a scheduled consolidation job (`consolidate_job.py`) that the
+  scheduler can run off the hot path. Together with the existing folding/facts tiers this keeps warm memory curated
+  across runs without manual pruning.
+- **Phase-5 capability features (all opt-in / default-off)** — (a) **multi-hop research loop**
+  `src/graph/nodes/research.py` + the conditional edge `retrieve_memory → research? → structure_analysis`, gated on
+  `AgentSettings.research_loop_enabled` (env `RESEARCH_LOOP_ENABLED`, default off); loops ≤ `research_max_hops`,
+  accumulating `web_search`/`corpus`/`arxiv_search` findings into `state.research_context`. (b) **vision**
+  `require_vision` path in `src/llm/gateway.py` (`acompletion(images=…)` → `build_content_blocks`; the fallback chain
+  is restricted to `ModelSpec.supports_images`), gated on `VISION_ENABLED`. (c) **Neo4j graph store**
+  `src/memory/graph.py` (`Neo4jGraph`, lazy driver, never-raises), built only when `settings.neo4j.enabled`
+  (env `GRAPH_ENABLED`); `sync_skill`/`sync_fact`/`sync_subagent` mirror capabilities to nodes/edges on write.
+- **Layer-8 safety-preservation gate** (`src/safety/pipeline.py`) — the safety pipeline is now **7 behavioral layers
+  + 1 preservation gate**: Layer 8 (Q93 taxonomy) rejects any mutation that disables the safety apparatus itself
+  (e.g. neutering an AST check, widening the import allowlist), applying to ALL mutation types, so an evolved
+  mutation can never turn off the guards that validate it.
+- **Statistical A/B + reproducible mutation diffs + atomic config versioning** — the experiment-design scorer
+  (`scripts/` A/B tooling) uses a paired **Wilcoxon** signed-rank test and returns a typed `ABTestResult`; mutation
+  diffs are reproducible (deterministic serialization); and live configuration changes are recorded atomically in
+  the `agent_config_versions` table (with `is_active`), so a flip is a queryable, revertible event rather than an
+  in-place overwrite.
+- **Provider-diversity fallback chains + glm-5.2** — every primary now has same-model-first fallback across
+  providers (e.g. `glm-5.2` → OpenRouter → NVIDIA) so a single-provider storm cannot sink a run; the COMPLEX/CRITICAL
+  primary was swapped **glm-5.1 → glm-5.2** (`COMPLEXITY_TIER_MAP` + `NODE_TIER_MAP` in `src/llm/model_router.py`),
+  and `DEFAULT_COMPLEXITY_TIER` is `claude-haiku-4-5-20251001` (Anthropic re-enabled; runtime disable is env-only via
+  `DISABLED_PROVIDERS`). See commit `c0d2e14`.
+- **Checkpoint TTL/GC** — `src/scheduler/checkpoint_gc.py` reclaims old `AsyncPostgresSaver` checkpoints under the
+  `CHECKPOINT_GC_*` knobs (opt-in, dry-run by default, wired into the scheduler profile), preventing unbounded state
+  growth across runs.
+- **Recomputation / anti-fabrication eval backbone** — the q07/q08 golden specs (`src/eval/golden.py`) Execution
+  probes don't trust claimed aggregates: they **recompute** every constraint/objective (q07) and every handoff
+  `input_sha256` + `derived_value` from the on-disk upstream *content* (q08), so a fabricated report or a downstream
+  that ignored its upstream is caught. Upstreams resolve strictly under the injected results root (hermetic to the
+  subprocess CWD).
+- **Phase F 3-seed self-improvement verdict (2026-07-17/19)** — 3 seeds × G0→G1→G2 on frozen image `fef50596860f`
+  (glm-5.2 + Anthropic-on) testing whether G2 ≥ G0. **2/3 recover:** seed-1 Δ−0.0009 (flat PASS), seed-2 Δ−0.0885
+  (FAIL), seed-3 Δ+0.1097 (PASS, strongest); mean Δ+0.007. **Efficiency robust 3/3** — every G2 cheaper/faster than
+  its G0 (NOT a cache artifact). **Quality noisy 2/3** — 6/9 goals pinned at the 1.0 ceiling; only the budget-cap-
+  prone goals move (q06 is a bimodal converges-before-`$1.2`-cap coin-flip). Channel-B fires without a quality
+  gradient. n=3 is underpowered (Wilcoxon p-floor) ⇒ **qualified-positive, NOT clean-proven**; needs n≥5–10. Spend
+  ~$54 of a $60 pool. See `docs/findings-001.md` §C3 + README §Phase F.
 
 ### Deployment & Operations
 
@@ -768,9 +827,10 @@ A run's lifecycle status (`queued → running → completed/failed/timeout/budge
 
 | Component | Technology | Purpose |
 |---|---|---|
-| Orchestration | LangGraph | StateGraph with conditional edges + `AsyncPostgresSaver` checkpointing |
-| LLM Gateway | litellm (via `LLMGateway`) | Unified API to 10+ providers; complexity-aware routing, circuit breaker, cost ledger |
+| Orchestration | LangGraph | StateGraph with conditional edges + `AsyncPostgresSaver` checkpointing (TTL/GC via `src/scheduler/checkpoint_gc.py`) |
+| LLM Gateway | litellm (via `LLMGateway`) | Unified API to 10+ providers; complexity-aware routing, per-provider circuit breaker (`src/llm/circuit_breaker.py`), rate limiter (`src/llm/rate_limiter.py`), Redis prompt cache (`src/llm/cache.py`), cost ledger |
 | Compute roles | stateless `api` / `worker` / no-DinD `runner` | Container-first, role-split deployment |
+| Dashboard | FastAPI + Jinja2 + HTMX | `/dashboard` (host :8800) — runs/tools/mutations, historical runs from `cost_ledger`, opt-in `DASHBOARD_API_KEY` |
 | Database | PostgreSQL 18 + pgvector | Sole persistent store (warm/cold memory, tools, sub-agents, cost_ledger, eval_results) |
 | Cache / queue | Redis | Hot memory, rate limiting, Redis Streams work queue, run-status + cancel flags |
 | Structured mirror | Neo4j (opt-in) | Skills/facts/sub-agents → graph nodes/edges |

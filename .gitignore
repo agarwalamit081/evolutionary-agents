@@ -59,9 +59,12 @@ results/
 CLAUDE.md
 
 # Internal/local-only docs — public repo carries only docs/ARCHITECTURE.md
+# and docs/slide-deck/turing-agent-v2.pptx
 docs/design-docs/
 docs/*.md
 !docs/ARCHITECTURE.md
+docs/slide-deck/*
+!docs/slide-deck/turing-agent-v2.pptx
 
 # Local-only runtime/validation artifacts (battery fixtures, monitoring snapshots, ad-hoc probes)
 data/
@@ -69,3 +72,14 @@ input/
 monitor/
 scripts/battery*.sh
 /test_*.py
+
+# Public-release hardening (local-only files; never publish)
+AGENTS.md
+backups/
+graphify-out/
+src/graphify-out/
+ephemeral.txt
+skills/
+docs/hermes-recommendations/
+docker-compose.override.yml
+scripts/_*.*

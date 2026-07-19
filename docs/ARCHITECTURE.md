@@ -145,7 +145,7 @@ The agent starts with 23 built-in tools (`ALL_TOOL_DEFINITIONS` in `src/tools/bu
 | `arxiv_search` | Search arXiv (so it isn't re-created every run) |
 | `git_clone` / `code_search` | SSRF-guarded clone + AST chunking → pgvector → semantic code search |
 | `index_corpus` / `corpus_search` | Index + semantically search an arbitrary text corpus |
-| `lean4_runner` | Execute / type-check Lean 4 proofs in an isolated runner |
+| `lean4_runner` | Execute / type-check Lean 4 proofs in an isolated runner (opt-in, `LEAN4_ENABLED`, needs the `lean` binary; an available tool, not a wired verify-node backbone) |
 | `environment_inspect` / `get_current_time` / `self_inspect` | Runtime/time/source introspection |
 | `memory_search` | Query 3-tier memory (Redis, PostgreSQL, pgvector) |
 | `create_scheduled_task` | Set an agent-owned durable cron task (Phase 5 I1) |
@@ -610,6 +610,16 @@ reflect, and verify prompts. The helper `select_techniques_for_node()`
 returns `[]` on a `None` complexity (the heuristic-fallback path applies no
 techniques). Techniques render from versioned Jinja2 templates under
 `src/graph/prompts/techniques/`.
+
+> **Experimental techniques (opt-in).** A separate top-level package
+> `src/graph/techniques/` scaffolds five experimental prompting techniques —
+> Self-Debugging, Gödel-Agent, WebDreamer, Absolute-Zero, Adversarial-Debate — wired into
+> the same selector via `TechniqueSelector._experimental_techniques()`, gated behind a
+> master `EXPERIMENTAL_TECHNIQUES_ENABLED` flag plus one per-technique flag (all default
+> OFF). With the flags off the registry is byte-identical to the curated base, so every
+> shipped experiment runs unaffected. Their full multi-turn controllers are deferred
+> (`apply()` raises `TechniqueDeferredError`), and none have been enabled in any
+> experiment — so their benefit is untested.
 
 ### Cost-Ledger Resilience
 

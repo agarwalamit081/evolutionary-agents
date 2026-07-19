@@ -150,7 +150,7 @@ The agent starts with 23 built-in tools (`ALL_TOOL_DEFINITIONS` in `src/tools/bu
 | `memory_search` | Query 3-tier memory (Redis, PostgreSQL, pgvector) |
 | `create_scheduled_task` | Set an agent-owned durable cron task (Phase 5 I1) |
 
-> Tools tagged `destructiveHint=True` are routed through an opt-in HITL gate (`DESTRUCTIVE_TOOL_HITL_ENABLED`, default off) by the execute node. See [`docs/design-docs/14-tool-system.md`](design-docs/14-tool-system.md).
+> Tools tagged `destructiveHint=True` are routed through an opt-in HITL gate (`DESTRUCTIVE_TOOL_HITL_ENABLED`, default off) by the execute node.
 
 ### Tool Creation Pipeline
 
@@ -215,7 +215,7 @@ This motivated **Generation 3**.
 
 The current generation adds **sub-agent spawning** -- the agent can now detect when a task would benefit from parallel specialized processing, spawn sub-agents as isolated LangGraph subgraphs, delegate subtasks to them, and track their performance over time.
 
-> **This doc is the conceptual overview.** Each subsystem below points into the authoritative `docs/design-docs/` depth: workflow → [`06`](design-docs/06-workflow-design.md), model selection → [`02`](design-docs/02-model-selection.md), LLM gateway → [`13`](design-docs/13-llm-gateway.md)/[`09`](design-docs/09-llm-integration.md), memory → [`08`](design-docs/08-memory-system.md), tools → [`14`](design-docs/14-tool-system.md), sub-agents → [`18`](design-docs/18-sub-agent-system.md), evolution → [`07`](design-docs/07-self-evolution-engine.md), safety → [`10`](design-docs/10-safety-guardrails.md), eval → [`20`](design-docs/20-evaluation-benchmark.md), deployment → [`11`](design-docs/11-deployment.md), error handling → [`16`](design-docs/16-error-handling.md).
+> **This document is both the conceptual overview and the authoritative specification.** Each subsystem is covered in its own section below; this public repo carries no separate design-doc set.
 
 ### Full Architecture
 
@@ -463,7 +463,7 @@ Sub-agents select their tooling via `tool_scope`:
 - **`inherit_subset`** — receives a curated subset (no creation)
 - **`self_create`** — starts with an empty registry and gets its own `tool_create` node + `_route_after_reflect_sub` router, so it can bridge capability gaps itself
 
-This was added because specialized sub-agents sometimes need tools the parent lacks (e.g., a chart-rendering tool), and **safety is preserved** — every sub-agent tool goes through the same shared `validate_tool_code` gate + 7-layer safety pipeline + the same dynamic-allowlist that governs parent tool creation. See [`docs/design-docs/18-sub-agent-system.md`](design-docs/18-sub-agent-system.md).
+This was added because specialized sub-agents sometimes need tools the parent lacks (e.g., a chart-rendering tool), and **safety is preserved** — every sub-agent tool goes through the same shared `validate_tool_code` gate + 7-layer safety pipeline + the same dynamic-allowlist that governs parent tool creation.
 
 ### Why Each Sub-Agent Has Isolated Memory
 
@@ -706,8 +706,7 @@ if the stream is empty.
 
 ### Battery-04 Production Hardening
 
-The production-robustness pass (see [`docs/findings-001.md`](findings-001.md))
-added a correctness + robustness layer over the existing process metrics:
+The production-robustness pass added a correctness + robustness layer over the existing process metrics:
 
 - **Typed correctness eval harness** (`src/eval/{checks,golden,store}.py`) — six check families:
   Structural (schema/keys/row-count/required-fields), Execution (sandbox probe asserting invariants
@@ -791,11 +790,11 @@ added a correctness + robustness layer over the existing process metrics:
   its G0 (NOT a cache artifact). **Quality noisy 2/3** — 6/9 goals pinned at the 1.0 ceiling; only the budget-cap-
   prone goals move (q06 is a bimodal converges-before-`$1.2`-cap coin-flip). Channel-B fires without a quality
   gradient. n=3 is underpowered (Wilcoxon p-floor) ⇒ **qualified-positive, NOT clean-proven**; needs n≥5–10. Spend
-  ~$54 of a $60 pool. See `docs/findings-001.md` §C3 + README §Phase F.
+  ~$54 of a $60 pool. (Full write-up: README §Phase F.)
 
 ### Deployment & Operations
 
-The shipped topology is **container-first, role-split** (see [`docs/design-docs/11-deployment.md`](design-docs/11-deployment.md)):
+The shipped topology is **container-first, role-split**:
 
 - **Stateless compute roles** — `api` (FastAPI + HITL UI), `worker` (and replicas), and a separate **no-DinD `runner`** that executes `code_executor` in a gVisor-style sandbox with **no Docker socket** (the worker delegates code-execution to it over the shared `turing-workspace` volume; other tools run in-process in the worker).
 - **Stateful services** — PostgreSQL via `pgvector/pgvector:pg18` (host port **5433**) and Redis via `redis:7-alpine` (host port **6380**); non-default host ports avoid clashing with host-local instances. Never `docker compose down -v` — it deletes the pgdata/redisdata volumes.
@@ -844,7 +843,7 @@ A run's lifecycle status (`queued → running → completed/failed/timeout/budge
 | Database | PostgreSQL 18 + pgvector | Sole persistent store (warm/cold memory, tools, sub-agents, cost_ledger, eval_results) |
 | Cache / queue | Redis | Hot memory, rate limiting, Redis Streams work queue, run-status + cancel flags |
 | Structured mirror | Neo4j (opt-in) | Skills/facts/sub-agents → graph nodes/edges |
-| Configuration | pydantic-settings | `.env`-driven settings via `get_settings()` (host env: `source /home/amiagarw/aiml01/bin/activate`, not `uv run`) |
+| Configuration | pydantic-settings | `.env`-driven settings via `get_settings()` (host env: `source .venv/bin/activate`, not `uv run`) |
 | Embeddings | litellm + hash fallback | Vector embeddings for memory recall + selection |
 | Observability | LangSmith + Prometheus + OTel | Tracing, metrics, logging |
 | Safety | Custom 7-layer pipeline | Static analysis + sandboxed code validation |

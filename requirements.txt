@@ -84,7 +84,7 @@ black==26.5.1
 # ─── Utilities ──────────────────────────────────────────────────
 tiktoken==0.12.0
 jinja2==3.1.6
-json-repair==0.59.10
+json-repair==0.60.1
 pyyaml==6.0.3
 numpy==2.2.6                        # 2.x (was 1.26.4): cvxpy 1.9.1 requires numpy>=2.0; scipy 1.17.1 caps <2.7. The 1.x pin was the last 1.x carried from the torch removal; cvxpy/scipy 2026 releases forced the bump (ResolutionImpossible on image build).
 # Scientific-computing baseline for generated code. Pinned explicitly because

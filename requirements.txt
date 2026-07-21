@@ -35,7 +35,7 @@ sqlite-vec==0.1.9                   # Local vector search without Postgres
 
 # ─── Configuration ──────────────────────────────────────────────
 pydantic==2.12.5
-pydantic-settings==2.14.1
+pydantic-settings==2.14.2
 python-dotenv==1.2.2
 
 # ─── Resilience & Rate Limiting ─────────────────────────────────

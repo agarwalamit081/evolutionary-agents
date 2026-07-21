@@ -11,7 +11,7 @@ langgraph-checkpoint-sqlite==3.1.0  # Local development + testing only
 langchain-mcp-adapters==0.2.2
 
 # ─── LLM Gateway ────────────────────────────────────────────────
-litellm==1.83.14                    # PRIMARY — all chat completions go through here
+litellm==1.93.0                    # PRIMARY — all chat completions go through here
 # Docker installs litellm with --no-deps (its metadata over-pins fastapi/uvicorn/
 # orjson/rich/prometheus/opentelemetry/aiohttp/click/pypdf to old exact versions;
 # the working env deliberately runs newer ones — see Dockerfile). litellm base deps

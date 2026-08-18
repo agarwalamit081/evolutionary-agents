@@ -7,7 +7,7 @@ langchain-text-splitters==1.1.2
 langgraph==1.2.0
 langgraph-prebuilt==1.1.0
 langgraph-checkpoint-postgres==3.1.0
-langgraph-checkpoint-sqlite==3.1.0  # Local development + testing only
+langgraph-checkpoint-sqlite==3.1.1  # Local development + testing only
 langchain-mcp-adapters==0.2.2
 
 # ─── LLM Gateway ────────────────────────────────────────────────

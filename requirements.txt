@@ -110,7 +110,7 @@ unstructured==0.21.5                 # Document partitioning — allowlisted for
 markdown-it-py==4.2.0                # Markdown parsing — allowlisted for generated tools
 selectolax==0.4.10                   # Fast HTML parser (lexbor C, no deps) — allowlisted for generated tools (D5)
 mdformat==1.0.0                      # Markdown formatter (pure-py; builds on markdown-it-py<5) — allowlisted for generated tools (D5)
-mistune==3.3.2                       # Markdown renderer (pure-py, zero deps) — allowlisted for generated tools (D5)
+mistune==3.3.3                       # Markdown renderer (pure-py, zero deps) — allowlisted for generated tools (D5)
 parsel==1.11.0                       # CSS/XPath selector over lxml (deps: lxml/cssselect/jmespath/w3lib) — allowlisted for generated tools (D5)
 pymupdf==1.26.7                     # PDF render/extract — allowlisted for generated tools (import fitz/pymupdf)
 pulp==3.3.2                         # Linear programming, bundles CBC — allowlisted for generated tools
